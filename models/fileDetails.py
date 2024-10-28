@@ -1,7 +1,8 @@
 from sqlalchemy import Column, String, Date, ForeignKey
-from Base import Base
+from models.Base import Base
 from sqlalchemy.orm import relationship
 from sqlalchemy import Integer
+
 
 class FileDetails(Base):
     __tablename__ = 'fileDetails'

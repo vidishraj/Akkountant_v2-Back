@@ -1,6 +1,7 @@
-from sqlalchemy import Column, String, Date, ForeignKey, Decimal, Integer
-from Base import Base
+from sqlalchemy import Column, String, Date, ForeignKey
+from models.Base import Base
 from sqlalchemy.orm import relationship
+from sqlalchemy.types import DECIMAL as Decimal
 
 
 class Transactions(Base):
