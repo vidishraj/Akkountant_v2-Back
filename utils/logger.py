@@ -1,6 +1,8 @@
 import logging
 import os
+from functools import wraps
 from logging.handlers import TimedRotatingFileHandler
+from flask import jsonify
 
 
 class Logger:
@@ -19,7 +21,7 @@ class Logger:
         # Creating handlers for different log levels
         self._setup_handlers(log_dir)
 
-    def _setup_handlers(self, log_dir):
+    def _setup_handlers(self, log_dir: str):
         """Set up file handlers for different log levels."""
         levels = {
             'DEBUG': logging.DEBUG,
@@ -54,6 +56,26 @@ class Logger:
             file_handler.setLevel(level_value)
             file_handler.setFormatter(formatter)
             self._logger.addHandler(file_handler)
+
+    @staticmethod
+    def standardLogger(func):
+        """Static method to use as a decorator for logging and error handling."""
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            instance = args[0]  # The instance of the class where the method is called
+            logger = instance.logger if hasattr(instance, 'logger') else logging.getLogger(func.__name__)
+
+            logger.info(f"Starting {func.__name__}")
+            try:
+                result = func(*args, **kwargs)
+                logger.info(f"Completed {func.__name__} successfully")
+                return result
+            except Exception as e:
+                logger.error(f"An error occurred in {func.__name__}: {e}")
+                return jsonify({"Error": e.__cause__}), 500
+
+        return wrapper
 
     def get_logger(self):
         """Return the configured logger."""
