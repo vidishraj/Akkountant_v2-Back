@@ -1,7 +1,11 @@
+import os
+
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from utils.logger import Logger
+from google.auth.exceptions import RefreshError
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 
 class GoogleServiceSingleton:
@@ -34,17 +38,27 @@ class GoogleServiceSingleton:
             # Check if token needs refreshing
             if credentials.expired and credentials.refresh_token:
                 self.logger.info(f"Token expired for {service_name}. Refreshing token.")
-                credentials.refresh(Request())
-                # Update the token info with the refreshed token
-                token_info['token'] = credentials.token
-                token_info['expiry'] = credentials.expiry
+
+                try:
+                    credentials.refresh(Request())
+                    # Update the token info with the refreshed token
+                    token_info['token'] = credentials.token
+                    token_info['expiry'] = credentials.expiry
+                except RefreshError as e:
+                    self.logger.error(f"Failed to refresh token for {service_name}. Reason: {e}")
+                    return None
             elif credentials.expired:
+                self.logger.info(self.start_fresh_auth_flow(scopes))
                 self.logger.error(f"Token for {service_name} expired and no refresh token is available.")
                 return None
 
             # Initialize and cache the Google service
             service = build(service_name, api_version, credentials=credentials)
             return service
+        except RefreshError as e:
+            self.logger.error(
+                f"Failed to initialize {service_name} service due to invalid grant (token expired or revoked): {e}")
+            return None
         except Exception as e:
             self.logger.error(f"Failed to initialize {service_name} service: {e}")
             return None
@@ -76,7 +90,7 @@ class GoogleServiceSingleton:
             token_info,
             service_name='drive',
             api_version='v3',
-            scopes=['https://www.googleapis.com/auth/drive']
+            scopes=['https://www.googleapis.com/auth/drive.file']
         )
 
         if drive_service:
@@ -84,3 +98,69 @@ class GoogleServiceSingleton:
             self.logger.info(f"Drive service initialized for user {user_id}.")
 
         return drive_service
+
+    def start_fresh_auth_flow(self, scopes):
+        """
+        Start a fresh OAuth 2.0 flow for Gmail or Google Drive and return the new token information.
+        """
+        try:
+            client_secrets_file = os.path.join(os.getcwd(), "client_secret.json")
+            flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, scopes)
+            return flow.client_config
+        except Exception as e:
+            self.logger.error(f"Failed to start fresh auth flow: {e}")
+            return None
+
+    def is_token_valid(self, token_info: dict) -> bool:
+        """
+        Checks if a user's Google API token is still valid.
+
+        Args:
+            token_info (dict): A dictionary containing the user's token information with keys:
+                - 'token': Access token string
+                - 'refresh_token': Refresh token string (optional)
+                - 'client_id': OAuth client ID
+                - 'client_secret': OAuth client secret
+                - 'token_uri': Token URI (default: "https://oauth2.googleapis.com/token")
+                - 'scopes': List of required scopes (optional)
+
+        Returns:
+            bool: True if the token is valid, False otherwise.
+        """
+        try:
+            credentials = Credentials(
+                token=token_info.get("token"),
+                refresh_token=token_info.get("refresh_token"),
+                client_id=token_info.get("client_id"),
+                client_secret=token_info.get("client_secret"),
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=token_info.get("scopes", [])
+            )
+
+            # Check if token is expired
+            if credentials.expired:
+                if credentials.refresh_token:
+                    # Attempt to refresh the token
+                    credentials.refresh(Request())
+                    return True
+                else:
+                    # Token is expired and no refresh token is available
+                    return False
+
+            # Token is valid and not expired
+            return True
+
+        except RefreshError:
+            # Refresh failed (e.g., invalid or revoked refresh token)
+            return False
+        except Exception as e:
+            # Handle other errors (e.g., malformed token info)
+            self.logger.error(f"Error checking token validity: {e}")
+            return False
+    @staticmethod
+    def getGmailScope():
+        return ['https://www.googleapis.com/auth/gmail.readonly']
+
+    @staticmethod
+    def getDriveScope():
+        return ['https://www.googleapis.com/auth/drive.file']
