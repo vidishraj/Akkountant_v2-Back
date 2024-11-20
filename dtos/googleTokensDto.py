@@ -1,6 +1,5 @@
 from marshmallow import Schema, fields, validates, ValidationError
-from datetime import datetime
-from enums import ServiceTypeEnum
+from enums.ServiceTypeEnum import ServiceTypeEnum
 
 
 class UserTokenSchema(Schema):
