@@ -1,5 +1,7 @@
+import os
 import re
 import hashlib
+import shutil
 
 from enums.EmailRegexEnum import EmailRegexEnum
 from utils.DateTimeUtil import DateTimeUtil
@@ -47,7 +49,12 @@ class GenericUtil:
                     description = details.get('merchant')
                     amount = details.get('amount_spent')
                     referenceID = GenericUtil().generate_reference_id(date, description, amount)
-                    cleanedMails.append([referenceID, date, description, amount])
+                    cleanedMails.append({
+                        'reference': referenceID,
+                        'date': date,
+                        'description': description,
+                        'amount': amount,
+                    })
                 else:
                     # Insert this into conflicts here
                     conflicts.append(email)
@@ -55,3 +62,17 @@ class GenericUtil:
             return cleanedMails, conflicts
         except KeyError:
             logger.error(f"Error: '{bankType}' is not a valid EmailRegexEnum member.")
+
+    @staticmethod
+    def emptyTemp():
+        folderPath = os.getcwd() + "/tmp"
+        # Delete the folder and all its contents
+        shutil.rmtree(folderPath)
+        # Recreate the empty folder
+        os.makedirs(folderPath, exist_ok=True)
+
+        # This seems to be a faster approach then deleting the files in the folder? Not sure
+
+    @staticmethod
+    def getFileSize(filePath):
+        return os.path.getsize(os.getcwd() + '/tmp/' + filePath)
