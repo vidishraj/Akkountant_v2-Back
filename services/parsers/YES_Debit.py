@@ -54,7 +54,6 @@ class YESBankDebitParser(BaseParser, ABC):
                                     amount = -1 * crAmount
                                 else:
                                     amount = dbAmount
-                            closingBalance = float(str(row[6]).replace(",", ''))
                             if type(desc) != str and math.isnan(desc):
                                 if innerIndex - 1 > 0 and type(table.iloc[innerIndex - 1][2]) == str:
                                     desc = table.iloc[innerIndex - 1][2]

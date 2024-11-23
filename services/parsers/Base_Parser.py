@@ -8,8 +8,8 @@ from utils.logger import Logger
 
 class BaseParser(ABC):
     pagesInPDF: int
-    password: str
-    filePath: str
+    password: str | None
+    filePath: str | None
     _transactionList: []
 
     def __init__(self, name):

@@ -46,10 +46,8 @@ class YESBankCreditParser(BaseParser, ABC):
                         if tableStart and re.match(dateRegex, date):
                             desc = str(row[1])
                             amount = row[2]
-                            reference = ""
                             descSplit = desc.split("Ref No:")
                             if len(descSplit) > 1:
-                                reference = descSplit[1]
                                 desc = descSplit[0][0:-2]
                             cleanedAmount = float(str(amount[0:-3]).replace(",", ''))
                             amountType = amount[len(amount) - 2: len(amount)]

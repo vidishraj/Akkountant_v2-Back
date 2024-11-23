@@ -49,7 +49,6 @@ class HDFCDebitParser(BaseParser, ABC):
                                 amount = -1 * float(str(row[5]).replace(",", ''))
                             if type(row[5]) != str and math.isnan(row[5]):
                                 amount = float(str(row[4]).replace(",", ''))
-                            closingBalance = float(str(row[6]).replace(",", ''))
                             reference = GenericUtil().generate_reference_id(date, desc, amount)
                             self._transactionList.append(
                                 {
@@ -85,7 +84,6 @@ class HDFCDebitParser(BaseParser, ABC):
                         desc = row[1]
                         amount = str(row[4])
                         amount = amount.replace(",", "")
-                        closingAmount = row[6]
                         if float(amount) == 0:
                             cleanVal = str(row[5]).replace(',', '')
                             creditVal = float(cleanVal)
