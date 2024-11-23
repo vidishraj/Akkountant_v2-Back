@@ -111,11 +111,11 @@ class Akkountant(Flask):
                 return jsonify({"error": "Unauthorized - Firebase ID is required"}), 401
             g.firebase_id = firebase_id
 
-        @self.teardown_appcontext
-        def _teardown_db():
-            """Remove the database session at the end of the request."""
-            g.pop('db', None)
-            self.db.session.remove()
+        # @self.teardown_appcontext
+        # def _teardown_db():
+        #     """Remove the database session at the end of the request."""
+        #     g.pop('db', None)
+        #     self.db.session.remove()
 
     def run_app(self, host='0.0.0.0', port=8000, debug=True):
         """Run the application."""
