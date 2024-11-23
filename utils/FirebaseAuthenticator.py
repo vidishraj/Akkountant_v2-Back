@@ -21,7 +21,7 @@ class FirebaseAuthenticator:
     def verify_token(self, token: str):
         """
         Verifying the Firebase token passed from the client.
-        :param token: Firebase token from the request header.
+        /:param token: Firebase token from the request header.
         :return: Decoded token if valid, raises exception if invalid.
         """
         try:

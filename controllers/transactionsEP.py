@@ -3,6 +3,8 @@ from services.transactionsService import TransactionService
 from utils.logger import Logger
 from flask import request, jsonify
 
+from flask import g
+
 
 class TransactionController:
     TransactionService: TransactionService
@@ -33,6 +35,48 @@ class TransactionController:
         }
 
         # Return the response
+        return jsonify(response), 200
+
+    def fetchOptedBanks(self):
+        """
+                Endpoint to fetch transaction and statement dates for the calendar view.
+                """
+
+        userId = g.get('firebase_id')
+        # Ensure both `userID` and `optedBanks` are provided
+        if not userId:
+            return jsonify({"error": "userID are required"}), 400
+
+        # Call the update_opted_banks service function
+        result = self.TransactionService.fetchBanksOptedByUser(userId)
+        if "error" in result:
+            return jsonify(result), 404  # Return 404 if user not found
+        return jsonify(result), 200  # Return 200 OK on success
+    @Logger.standardLogger
+    def fetchCalendarTransactions(self):
+        """
+        Endpoint to fetch transaction and statement dates for the calendar view.
+        """
+        data = request.get_json(force=True)
+        month_start = data.get("monthStart")  # Expected in "yyyy-mm-dd" format
+        month_end = data.get("monthEnd")  # Expected in "yyyy-mm-dd" format
+
+        if not month_start or not month_end:
+            return jsonify({"error": "Invalid or missing date range"}), 400
+
+        self.logger.info(f"Fetching transactions for range: {month_start} - {month_end}")
+
+        # Fetch transactions and statements from the service
+        transactions = self.TransactionService.fetchTransactionDates(
+            date_from=month_start, date_to=month_end
+        )
+
+        # Format the response
+        response = {
+            "transaction_dates": transactions.get("transaction_dates", []),
+            "statement_dates": transactions.get("statement_dates", []),
+        }
+
         return jsonify(response), 200
 
     @Logger.standardLogger
@@ -99,14 +143,15 @@ class TransactionController:
     @Logger.standardLogger
     def addUpdateUserToken(self):
         data = request.get_json()
-
+        userId = g.get('firebase_id')
         # Ensure all required fields are present
-        required_fields = ['user_id', 'access_token', 'refresh_token', 'client_id', 'client_secret', 'expiry',
+        required_fields = ['access_token', 'refresh_token', 'client_id', 'client_secret', 'expiry',
                            'service_type']
         missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
+        if missing_fields or not userId:
             return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
         # Call the service function to add or update the token
+        data['user_id'] = userId
         result = self.TransactionService.addUpdateUserToken(data)
         return jsonify(result), 200
 
@@ -150,24 +195,31 @@ class TransactionController:
         return jsonify(result), 200
 
     @Logger.standardLogger
-    def getFileDetails(self):
-        data = request.get_json()
+    def fetchFileDetails(self):
+        data = request.get_json(force=True)
+        page = data.get("Page", 1)
+        filters = data.get("Filter", None)
+        self.logger.info(f"Fetch FileDetails Page {page} with filter {filters}")
+        file_details = self.TransactionService.fetchFileDetails(page=page, filters=filters)
 
-        # Ensure all required fields are present
-        required_fields = ['userId']
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
-            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
-        # Call the service function to add or update the token
-        result = self.TransactionService.getFileDetails(data['userId'])
-        return jsonify(result), 200
+        # Format the file details for JSON response
+        results = [
+            {key: value for key, value in fd.__dict__.items() if key != '_sa_instance_state'}
+            for fd in file_details["results"]
+        ]
+        response = {
+            "total_count": file_details["count"],
+            "page": page,
+            "page_size": len(results),
+            "results": results,
+        }
+        return jsonify(response)
 
     @Logger.standardLogger
     def checkGoogleApiStatus(self):
-        userId = request.args.get('userId')
+        userId = g.get('firebase_id')
         service = request.args.get('serviceType')
-        if userId is None:
-            return jsonify({"error": f"Missing required fields: {', '.join('user_id')}"}), 400
+        self.logger.info(f"userID: {userId}")
         # Call the service function to add or update the token
-        result = self.TransactionService.checkGoogleStatus(userId, ServiceTypeEnum[service])
+        result = self.TransactionService.checkGoogleStatus(userId, ServiceTypeEnum[service.capitalize()])
         return jsonify(result), 200

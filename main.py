@@ -1,9 +1,15 @@
 import logging
 import os
-from flask import Flask
+from flask import Flask, g, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 from sqlalchemy import inspect
+from flask_cors import CORS
+
+from controllers.transactionsEP import TransactionController
+from services.tasks.checkMailTask import CheckMailTask
+from services.tasks.scheduler import TaskScheduler
+from services.transactionsService import TransactionService
 from utils.logger import Logger
 from models import *
 
@@ -12,54 +18,107 @@ class Akkountant(Flask):
     """Main application class for Akkountant."""
     db: SQLAlchemy
     logger: logging.Logger
+    scheduler: TaskScheduler
+    transactionEP: TransactionController
+    transactionService: TransactionService
 
     def __init__(self, import_name: str):
         load_dotenv()
         super().__init__(import_name)
 
+        # Initialize logger
         self.logger = Logger(__name__).get_logger()
-
         self.logger.info("Starting Akkountant")
 
-        self.setUpDatabase()
-        self.logger.info("Finished setting up db connection and creating tables.")
+        # Set up application components
+        self._setup_config()
+        self._setup_database()
+        self._setup_instances()
+        self._setup_schedulers()
+        self._setup_routes()
+        self._setup_hooks()
 
-        self.init_routes()
-        self.logger.info("Finished setting up routes.")
+        CORS(self)
+        self.logger.info("Akkountant initialization complete.")
 
-    def setUpDatabase(self):
-        """Sets up the database configuration and initializes the connection using SQLAlchemy."""
-
+    def _setup_config(self):
+        """Set up configuration."""
         self.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-        # self.config['SQLALCHEMY_ECHO'] = True  # For detailed logs
-        self.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False  # Performance overhead
+        self.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+    def _setup_database(self):
+        """Set up database connection and create tables."""
         self.db = SQLAlchemy(self, model_class=Base)
-
-        # Creating tables if they do not exist
         with self.app_context():
-            self.logger.info("Creating database tables")
+            self.logger.info("Creating database tables if not exist.")
             inspector = inspect(self.db.engine)
+
             existing_tables_before = inspector.get_table_names()
-
             self.db.create_all()
-            self.logger.info("Database tables created successfully.")
 
-            inspector = inspect(self.db.engine)
             existing_tables_after = inspector.get_table_names()
-            self.logger.info(f"Existing tables after creation: {existing_tables_after}")
-
-            if len(existing_tables_after) > len(existing_tables_before):
-                new_tables = list(set(existing_tables_after) - set(existing_tables_before))
+            new_tables = set(existing_tables_after) - set(existing_tables_before)
+            if new_tables:
                 self.logger.info(f"New tables created: {new_tables}")
             else:
-                self.logger.info("No new tables were created.")
+                self.logger.info("No new tables created.")
 
-    def init_routes(self):
-        """App routes."""
-        pass
+    def _setup_instances(self):
+        """Initialize application instances."""
+        self.transactionService = TransactionService()
+        self.transactionEP = TransactionController(self.transactionService)
 
-    def run_app(self, host='0.0.0.0', port=5500, debug=False):
-        """Akkountant Runner."""
+    def _setup_schedulers(self):
+        """Set up background tasks."""
+        self.scheduler = TaskScheduler()
+        self.logger.info("Background schedulers initialized.")
+
+    def _setup_routes(self):
+        """Define application routes."""
+        routes = [
+            ('/fetchTransactions', 'POST', self.transactionEP.fetchTransactions),
+            ('/fetchOptedBanks', 'GET', self.transactionEP.fetchOptedBanks),
+            ('/calendarTransactions', 'POST', self.transactionEP.fetchCalendarTransactions),
+            ('/readEmails', 'GET', self.transactionEP.triggerEmailCheck),
+            ('/readStatements', 'GET', self.transactionEP.triggerStatementCheck),
+            ('/getFileDetails', 'POST', self.transactionEP.fetchFileDetails),
+            ('/getGoogleStatus', 'GET', self.transactionEP.checkGoogleApiStatus),
+            ('/updateGoogleTokens', 'POST', self.transactionEP.addUpdateUserToken),
+        ]
+
+        for rule, method, view_func in routes:
+            self.add_url_rule(rule, methods=[method], view_func=view_func)
+
+        self.logger.info("Application routes initialized.")
+
+    def _setup_hooks(self):
+        """Set up request and teardown hooks."""
+
+        @self.before_request
+        def _set_db_on_request():
+            """Attach the database session to the request context."""
+            g.db = self.db
+
+        @self.before_request
+        def _request_interceptor():
+            """Intercept incoming requests."""
+            if request.method == "OPTIONS":
+                self.logger.info("OPTIONS preflight request received.")
+                return
+            firebase_id = request.headers.get("X-Firebase-ID")
+            if not firebase_id:
+                self.logger.warning("Request missing Firebase ID.")
+                return jsonify({"error": "Unauthorized - Firebase ID is required"}), 401
+            g.firebase_id = firebase_id
+
+        @self.teardown_appcontext
+        def _teardown_db():
+            """Remove the database session at the end of the request."""
+            g.pop('db', None)
+            self.db.session.remove()
+
+    def run_app(self, host='0.0.0.0', port=8000, debug=True):
+        """Run the application."""
         self.logger.info(f"Running the app on {host}:{port} with debug={debug}.")
         self.run(host=host, port=port, debug=debug)
 
