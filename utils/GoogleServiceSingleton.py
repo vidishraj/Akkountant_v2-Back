@@ -106,7 +106,7 @@ class GoogleServiceSingleton:
         try:
             client_secrets_file = os.path.join(os.getcwd(), "client_secret.json")
             flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, scopes)
-            return flow.client_config
+            return {"Auth": flow.client_config}
         except Exception as e:
             self.logger.error(f"Failed to start fresh auth flow: {e}")
             return None
