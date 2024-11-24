@@ -52,6 +52,7 @@ class TransactionController:
         if "error" in result:
             return jsonify(result), 404  # Return 404 if user not found
         return jsonify(result), 200  # Return 200 OK on success
+
     @Logger.standardLogger
     def fetchCalendarTransactions(self):
         """
