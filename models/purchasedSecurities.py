@@ -5,7 +5,7 @@ from sqlalchemy.orm import relationship
 
 
 class PurchasedSecurities(Base):
-    __tablename__ = 'purchased_securities'
+    __tablename__ = 'purchasedSecurities'
 
     buyID = Column(Integer, primary_key=True, autoincrement=True)  # Auto-incrementing primary key
     securityCode = Column(String(250), nullable=False)
@@ -15,3 +15,4 @@ class PurchasedSecurities(Base):
     securityType = Column(String(10), nullable=False)
 
     user_relationship = relationship('User', back_populates='purchased_securities')
+    sold_securities = relationship('SoldSecurities', back_populates='purchase_relationship')

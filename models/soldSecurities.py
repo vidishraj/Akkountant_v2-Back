@@ -5,10 +5,10 @@ from sqlalchemy.orm import relationship
 
 
 class SoldSecurities(Base):
-    __tablename__ = 'sold_securities'
+    __tablename__ = 'soldSecurities'
 
     sellID = Column(Integer, primary_key=True, autoincrement=True)  # Auto-incrementing primary key
-    buyID = Column(Integer, ForeignKey('purchased_securities.buyID'), nullable=False)
+    buyID = Column(Integer, ForeignKey('purchasedSecurities.buyID'), nullable=False)
     sellQuant = Column(Integer, nullable=False)
     sellPrice = Column(Decimal(10, 2), nullable=False)
     profit = Column(Decimal(10, 2), nullable=True)
