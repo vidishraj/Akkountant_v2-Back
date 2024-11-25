@@ -3,7 +3,7 @@ from sqlalchemy.types import DECIMAL as Decimal
 from models.Base import Base
 from sqlalchemy.orm import relationship
 
-z
+
 class PurchasedSecurities(Base):
     __tablename__ = 'purchased_securities'
 
