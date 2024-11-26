@@ -1,4 +1,4 @@
-import uuid
+
 from abc import ABC
 
 from sqlalchemy.exc import NoResultFound
@@ -11,7 +11,6 @@ from services.Base_MSN import Base_MSN
 import pandas as pd
 import nsepython
 
-from utils.DateTimeUtil import DateTimeUtil
 from utils.logger import Logger
 
 
@@ -37,15 +36,15 @@ class StocksService(Base_MSN, ABC):
 
     def buySecurity(self, security_data, userId):
         try:
-            # @TODO
             # Validate the securityCode using the separate function
-
+            if not self.checkIfSecurityExists(security_data['securityCode']):
+                return {"error": "Invalid code"}
             # Check if the user has the same security bought already. If yes add
             existingRow: PurchasedSecurities = self.findIdIfSecurityBought(userId, security_data['securityCode'])
             # Manage Date
             date = security_data.get('date')
             if date is None:
-                date = DateTimeUtil().getCurrentDatetimeSqlFormat()
+                date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
             if existingRow is None:
                 # Proceed with insertion if validation passes and not existing
                 new_purchase = PurchasedSecurities(
@@ -87,7 +86,7 @@ class StocksService(Base_MSN, ABC):
             # Manage date
             date = sell_data.get('date')
             if date is None:
-                date = DateTimeUtil().getCurrentDatetimeSqlFormat()
+                date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
 
             # Insert into SoldSecurities
             new_sale = SoldSecurities(
@@ -140,30 +139,10 @@ class StocksService(Base_MSN, ABC):
             self.sellSecurity(item, userId)
         self.logger.info("Finished processing file and inserting statements")
 
-    def findIdIfSecurityBought(self, userId, securityCode):
-        result = self.db.session.query(PurchasedSecurities.buyID).filter(
-            PurchasedSecurities.userID == userId,
-            PurchasedSecurities.securityCode == securityCode
-        ).first()
-
-        # Check if a result is found
-        if result:
-            return result
-        else:
-            return None
-
-    def updatePriceAndQuant(self, buyId, newPrice, newQuant):
-        try:
-            # Fetch the record with the given buyID
-            security = self.db.session.query(PurchasedSecurities).filter(PurchasedSecurities.buyID == buyId).first()
-
-            # Update fields with new values
-            security.buyPrice = newPrice
-            security.buyQuant = newQuant
-
-            # Commit the changes to the database
-            self.db.session.commit()
-            self.logger.info(f"Record with buyID {buyId} successfully updated.")
-        except Exception as e:
-            self.db.session.rollback()  # Roll back in case of error
-            self.logger.error(f"An error occurred while updating row {e}")
+    def checkIfSecurityExists(self, symbol):
+        stockList = self.JsonDownloadService.getStockList()
+        stockList = stockList['data']
+        for stock in stockList:
+            if symbol == stock:
+                return True
+        return False

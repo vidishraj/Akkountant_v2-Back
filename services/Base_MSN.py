@@ -6,6 +6,7 @@ from abc import abstractmethod
 
 from werkzeug.routing import ValidationError
 
+from models import PurchasedSecurities
 from services.JsonDownloadService import JSONDownloadService
 from utils.DateTimeUtil import DateTimeUtil
 from utils.GenericUtils import GenericUtil
@@ -83,3 +84,31 @@ class Base_MSN:
         :return: Success or throws error
         """
         pass
+
+    def findIdIfSecurityBought(self, userId, securityCode):
+        result = self.db.session.query(PurchasedSecurities.buyID).filter(
+            PurchasedSecurities.userID == userId,
+            PurchasedSecurities.securityCode == securityCode
+        ).first()
+
+        # Check if a result is found
+        if result:
+            return result
+        else:
+            return None
+
+    def updatePriceAndQuant(self, buyId, newPrice, newQuant):
+        try:
+            # Fetch the record with the given buyID
+            security = self.db.session.query(PurchasedSecurities).filter(PurchasedSecurities.buyID == buyId).first()
+
+            # Update fields with new values
+            security.buyPrice = newPrice
+            security.buyQuant = newQuant
+
+            # Commit the changes to the database
+            self.db.session.commit()
+            self.logger.info(f"Record with buyID {buyId} successfully updated.")
+        except Exception as e:
+            self.db.session.rollback()  # Roll back in case of error
+            self.logger.error(f"An error occurred while updating row {e}")
