@@ -16,38 +16,13 @@ class NPSService(Base_MSN, ABC):
         self.baseAPIURL = "https://nps.purifiedbytes.com/api/"
 
     def fetchAllSecurities(self):
-        return self.check_and_update_file(self.baseDirectory + 'assets', 'NPSList', self.baseAPIURL + 'schemes.json')
+        return self.JsonDownloadService.getNPSList()
 
     def findSecurity(self, securityCode):
+        return  self.JsonDownloadService.getNPSRate(securityCode)
+
+    def buySecurity(self, security_data, userId):
         try:
-            # Step 1: Make the API request
-            response = requests.get(f"{self.baseAPIURL}/api/schemes/{securityCode}/nav.json")
-            response.raise_for_status()  # Raise an error if the request failed
-
-            # Step 2: Parse the JSON response
-            data = response.json()
-
-            # Step 3: Extract the NAV data
-            nav_data = data.get("data", [])
-            if not nav_data:
-                raise ValidationError("No NAV data found for the specified NPS security code.")
-
-            # Step 4: Extract the latest NAV (first element in the list)
-            latest_nav = nav_data[0].get("nav")
-            if latest_nav is None:
-                raise ValidationError("Invalid NAV data format in the response.")
-
-            return {"latest_nav": latest_nav, "security_code": securityCode}
-
-        except requests.RequestException as e:
-            raise ValidationError(f"API request failed: {str(e)}")
-        except (KeyError, IndexError):
-            raise ValidationError("Invalid data format received from the API.")
-
-    def buySecurity(self, security_data, filePath, key, userId):
-        try:
-            # Validate the securityCode using the separate function
-            self.validate_security_in_json(filePath, key, security_data['securityCode'])
 
             # Proceed with insertion if validation passes
             new_purchase = PurchasedSecurities(
@@ -90,3 +65,9 @@ class NPSService(Base_MSN, ABC):
 
         except NoResultFound:
             return {"error": "Purchase record not found for the given buyID"}
+
+    def readFromStatement(self, file_path: str, userId):
+        """
+        We will be reading the NPS statement here
+        :return:
+        """
