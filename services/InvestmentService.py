@@ -40,3 +40,37 @@ class InvestmentService:
         elif serviceType == MSNENUM.NPS:
             # @TODO
             pass
+
+    def fetchActiveSecurities(self, securityType, userId):
+        if securityType == MSNENUM.Stocks:
+            return self.StockService.fetchActive(securityType, userId)
+        elif securityType == MSNENUM.Mutual_Funds:
+            return self.MFService.fetchActive(securityType, userId)
+        elif securityType == MSNENUM.NPS:
+            return self.NPSService.fetchActive(securityType, userId)
+
+    def fetchHistory(self, securityType, userId):
+        if securityType == MSNENUM.Stocks:
+            return self.StockService.getInvestmentHistory(securityType, userId)
+        elif securityType == MSNENUM.Mutual_Funds:
+            return self.MFService.getInvestmentHistory(securityType, userId)
+        elif securityType == MSNENUM.NPS:
+            return self.NPSService.getInvestmentHistory(securityType, userId)
+
+    def fetchSummary(self, securityType, userId):
+        totalProfit = self.StockService.getTotalProfit(securityType, userId)
+        activeProfit = self.StockService.getActiveProfit(securityType, userId)
+        totalInvested = self.StockService.getTotalMoneyInvested(securityType, userId)
+        activeInvested = self.StockService.getActiveMoneyInvested(securityType, userId)
+        return {
+            'active': {
+                'invested': activeInvested,
+                'profit': activeProfit,
+                'total': activeInvested + activeProfit
+            },
+            'total': {
+                'invested': totalInvested,
+                'profit': totalProfit,
+                'total': totalInvested + totalProfit
+            }
+        }

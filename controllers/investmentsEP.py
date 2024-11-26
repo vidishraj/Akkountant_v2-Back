@@ -84,3 +84,39 @@ class InvestmentController:
         self.InvestmentService.processFilesForMSN(service_type, file_path, user_id)
 
         return jsonify({"message": "File processed successfully"}), 200
+
+    @Logger.standardLogger
+    def fetSummary(self):
+        # Get user ID from context
+        service_type_param = request.args.get('serviceType')
+        params = self.getUserIdServiceType(service_type_param)
+        if not isinstance(params, tuple):
+            # Error has happened during validation
+            return params
+        user_id, service_type = params
+        self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
+        return self.InvestmentService.fetchSummary(service_type, user_id)
+
+    @Logger.standardLogger
+    def fetchHistory(self):
+        # Get user ID from context
+        service_type_param = request.args.get('serviceType')
+        params = self.getUserIdServiceType(service_type_param)
+        if not isinstance(params, tuple):
+            # Error has happened during validation
+            return params
+        user_id, service_type = params
+        self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
+        return self.InvestmentService.fetchHistory(service_type, user_id)
+
+    @Logger.standardLogger
+    def fetchActiveSecurities(self):
+        # Get user ID from context
+        service_type_param = request.args.get('serviceType')
+        params = self.getUserIdServiceType(service_type_param)
+        if not isinstance(params, tuple):
+            # Error has happened during validation
+            return params
+        user_id, service_type = params
+        self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
+        return self.InvestmentService.fetchActiveSecurities(service_type, user_id)

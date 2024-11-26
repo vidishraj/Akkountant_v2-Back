@@ -48,6 +48,7 @@ class JSONDownloadService:
         self.logger = Logger(__name__).get_logger()
 
     """ Stocks methods """
+
     def handle_stocks(self):
         filePath = self.getLatestFile(self.listType, self.StockListPrefix)
         # Compare time difference with 72 hours
@@ -198,6 +199,13 @@ class JSONDownloadService:
             if item['scheme_id'] == schemeCode:
                 return item
         return {}
+
+    def getNpsSchemeCodeSchemeName(self, schemeName):
+        jsonData = self.getNPSList()
+        for item in jsonData:
+            if item['name'] == schemeName:
+                return item['id']
+        return None
 
     """ MF methods """
 

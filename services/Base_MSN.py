@@ -4,25 +4,24 @@ This file holds the Base class to manage Mutual funds, stocks and NPS data.
 """
 from abc import abstractmethod
 
-from werkzeug.routing import ValidationError
+from sqlalchemy import func, case
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import joinedload
 
-from models import PurchasedSecurities
+from models import PurchasedSecurities, SoldSecurities
 from services.JsonDownloadService import JSONDownloadService
 from utils.DateTimeUtil import DateTimeUtil
 from utils.GenericUtils import GenericUtil
-from flask_sqlalchemy import SQLAlchemy
+from flask_sqlalchemy import SQLAlchemy, session
 from logging import Logger
 from flask import g
 
 import os
-import datetime
-import json
-import requests
 
 
 class Base_MSN:
     baseAPIURL: str
-    db: SQLAlchemy
+    db: session.Session
     logger: Logger
     genericUtil: GenericUtil
     baseDirectory: str = f'{os.getcwd()}/services/'
@@ -85,8 +84,197 @@ class Base_MSN:
         """
         pass
 
+    def fetchActive(self, investment_type: str, user_id: int):
+        """
+        Fetch active securities of a specific type and format them into JSON.
+
+        :param investment_type: Type of the security to filter.
+        :param user_id: ID of the user to filter.
+        :return: List of dictionaries (JSON-like structure).
+        """
+        try:
+            active_securities = self.db.session.query(PurchasedSecurities).filter(
+                PurchasedSecurities.buyQuant > 0,
+                PurchasedSecurities.securityType == investment_type,
+                PurchasedSecurities.userID == user_id  # Filter by userID
+            ).all()
+
+            result_json = [
+                {
+                    "buyID": sec.buyID,
+                    "buyCode": sec.securityCode,
+                    "buyQuant": sec.buyQuant,
+                    "schemeCode": sec.securityType,
+                    "serviceType": investment_type,
+                    "date": sec.date.strftime("%Y-%m-%d"),
+                }
+                for sec in active_securities
+            ]
+            return result_json
+
+        except SQLAlchemyError as e:
+            print(f"Database error occurred: {e}")
+            return []
+
+    def getActiveMoneyInvested(self, service_type, user_id):
+        """
+        Get the total money invested in active securities based on service type.
+
+        :param service_type: The service type to filter by.
+        :param user_id: The userID to filter by.
+        :return: Active money invested as a float.
+        """
+        try:
+            active_invested = self.db.session.query(
+                func.sum(
+                    case(
+                        [
+                            (PurchasedSecurities.buyQuant > func.coalesce(func.sum(SoldSecurities.sellQuant), 0),
+                             (PurchasedSecurities.buyQuant - func.coalesce(func.sum(SoldSecurities.sellQuant),
+                                                                           0)) * PurchasedSecurities.buyPrice)
+                        ],
+                        else_=0
+                    )
+                )
+            ).join(
+                SoldSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID, isouter=True
+            ).filter(
+                PurchasedSecurities.buyQuant > 0,
+                PurchasedSecurities.serviceType == service_type,
+                PurchasedSecurities.userID == user_id  # Filter by userID
+            ).scalar()
+
+            return float(active_invested) if active_invested else 0.0
+
+        except SQLAlchemyError as e:
+            print(f"Database error occurred: {e}")
+            return 0.0
+
+    def getTotalMoneyInvested(self, service_type, user_id):
+        """
+        Get the total money invested in all securities based on service type.
+
+        :param service_type: The service type to filter by.
+        :param user_id: The userID to filter by.
+        :return: Total money invested as a float.
+        """
+        try:
+            total_invested = self.db.session.query(
+                func.sum(PurchasedSecurities.buyPrice * PurchasedSecurities.buyQuant)
+            ).filter(
+                PurchasedSecurities.serviceType == service_type,
+                PurchasedSecurities.userID == user_id  # Filter by userID
+            ).scalar()
+
+            return float(total_invested) if total_invested else 0.0
+
+        except SQLAlchemyError as e:
+            print(f"Database error occurred: {e}")
+            return 0.0
+
+    def getTotalProfit(self, service_type, user_id):
+        """
+        Calculate the total profit from all securities based on service type.
+
+        :param service_type: The service type to filter by.
+        :param user_id: The userID to filter by.
+        :return: Total profit from all securities as a float.
+        """
+        try:
+            total_profit = self.db.session.query(
+                func.sum(SoldSecurities.profit)
+            ).join(
+                PurchasedSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID
+            ).filter(
+                PurchasedSecurities.serviceType == service_type,
+                PurchasedSecurities.userID == user_id  # Filter by userID
+            ).scalar()
+
+            return float(total_profit) if total_profit else 0.0
+
+        except SQLAlchemyError as e:
+            print(f"Database error occurred: {e}")
+            return 0.0
+
+    def getActiveProfit(self, service_type, user_id):
+        """
+        Calculate the profit of active securities based on service type.
+
+        :param service_type: The service type to filter by.
+        :param user_id: The userID to filter by.
+        :return: Total profit from active securities as a float.
+        """
+        try:
+            active_profit = self.db.session.query(
+                func.sum(
+                    case(
+                        [
+                            (PurchasedSecurities.buyQuant > func.coalesce(func.sum(SoldSecurities.sellQuant), 0),
+                             (PurchasedSecurities.buyQuant - func.coalesce(func.sum(SoldSecurities.sellQuant),
+                                                                           0)) * SoldSecurities.profit)
+                        ],
+                        else_=0
+                    )
+                )
+            ).join(
+                SoldSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID, isouter=True
+            ).filter(
+                PurchasedSecurities.buyQuant > 0,
+                PurchasedSecurities.serviceType == service_type,
+                PurchasedSecurities.userID == user_id  # Filter by userID
+            ).scalar()
+
+            return float(active_profit) if active_profit else 0.0
+
+        except SQLAlchemyError as e:
+            print(f"Database error occurred: {e}")
+            return 0.0
+
+    def getInvestmentHistory(self, service_type=None, user_id=None):
+        """
+        Fetch investment history with nested sold securities.
+        :return: List of dictionaries (JSON-like structure).
+        """
+        try:
+            investment_history = self.db.session.query(PurchasedSecurities).options(
+                joinedload(PurchasedSecurities.sold_securities)
+            ).filter(
+                PurchasedSecurities.userID == user_id if user_id else True  # Filter by userID if provided
+            ).all()
+
+            if service_type:
+                investment_history = [purchase for purchase in investment_history if
+                                      purchase.securityType == service_type]
+
+            result_json = [
+                {
+                    "buyID": purchase.buyID,
+                    "buyCode": purchase.securityCode,
+                    "buyQuant": purchase.buyQuant,
+                    "schemeCode": purchase.securityType,
+                    "date": purchase.date.strftime("%Y-%m-%d"),
+                    "soldSecurities": [
+                        {
+                            "sellID": sold.sellID,
+                            "sellQuant": sold.sellQuant,
+                            "sellPrice": float(sold.sellPrice),
+                            "profit": float(sold.profit) if sold.profit else None,
+                            "date": sold.date.strftime("%Y-%m-%d"),
+                        }
+                        for sold in purchase.sold_securities
+                    ]
+                }
+                for purchase in investment_history
+            ]
+
+            return result_json
+
+        except SQLAlchemyError as e:
+            print(f"Database error occurred: {e}")
+            return []
+
     def findIdIfSecurityBought(self, userId, securityCode):
-        result = self.db.session.query(PurchasedSecurities.buyID).filter(
+        result = self.db.session.query(PurchasedSecurities).filter(
             PurchasedSecurities.userID == userId,
             PurchasedSecurities.securityCode == securityCode
         ).first()

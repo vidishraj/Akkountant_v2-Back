@@ -8,6 +8,7 @@ from enums.MsnEnum import MSNENUM
 from models.purchasedSecurities import PurchasedSecurities
 from models.soldSecurities import SoldSecurities
 from services.Base_MSN import Base_MSN
+from services.parsers.NPS_Statement import NPSParser
 
 
 class NPSService(Base_MSN, ABC):
@@ -15,6 +16,7 @@ class NPSService(Base_MSN, ABC):
     def __init__(self):
         super().__init__()
         self.baseAPIURL = "https://nps.purifiedbytes.com/api/"
+        self.parser = NPSParser()
 
     def fetchAllSecurities(self):
         return self.JsonDownloadService.getNPSList()
@@ -96,7 +98,16 @@ class NPSService(Base_MSN, ABC):
         We will be reading the NPS statement here
         :return:
         """
-        pass
+
+        self.parser.setPath(file_path)
+        npsTransactions = self.parser.parseFile()
+        for npsTransaction in npsTransactions:
+            schemeCode = self.JsonDownloadService.getNpsSchemeCodeSchemeName(npsTransactions['schemeName'])
+            self.buySecurity({
+                'securityCode': schemeCode,
+                'buyQuant': npsTransaction['buyQuant'],
+                'buyPrice': npsTransaction['buyPrice']
+            }, userId)
 
     def checkIfSecurityExists(self, symbol):
         npsList = self.JsonDownloadService.getNPSList()

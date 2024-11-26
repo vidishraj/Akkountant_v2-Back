@@ -1,13 +1,16 @@
 import logging
 import os
+
 from flask import Flask, g, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 from sqlalchemy import inspect
 from flask_cors import CORS
 
+from controllers.investmentsEP import InvestmentController
 from controllers.transactionsEP import TransactionController
-from services.tasks.checkMailTask import CheckMailTask
+from services.InvestmentService import InvestmentService
+from services.JsonDownloadService import JSONDownloadService
 from services.tasks.scheduler import TaskScheduler
 from services.transactionsService import TransactionService
 from utils.logger import Logger
@@ -35,6 +38,8 @@ class Akkountant(Flask):
         self._setup_database()
         self._setup_instances()
         self._setup_schedulers()
+        # Run async methods in setup
+        self._setup_investments()  # Run async setup
         self._setup_routes()
         self._setup_hooks()
 
@@ -67,15 +72,26 @@ class Akkountant(Flask):
         """Initialize application instances."""
         self.transactionService = TransactionService()
         self.transactionEP = TransactionController(self.transactionService)
+        self.investmentService = InvestmentService()
+        self.investmentEP = InvestmentController(self.investmentService)
 
     def _setup_schedulers(self):
         """Set up background tasks."""
         self.scheduler = TaskScheduler()
         self.logger.info("Background schedulers initialized.")
 
+    @staticmethod
+    def _setup_investments():
+        """Read from the JSON file, call the JSON service individually for rates and lists."""
+        json_service = JSONDownloadService(save_directory=f"{os.getcwd()}/services/assets/")
+        json_service.handle_stocks()
+        json_service.handle_nps()
+        json_service.handle_gold()
+        json_service.handle_mf()
+
     def _setup_routes(self):
         """Define application routes."""
-        routes = [
+        transactionRoutes = [
             ('/fetchTransactions', 'POST', self.transactionEP.fetchTransactions),
             ('/fetchOptedBanks', 'GET', self.transactionEP.fetchOptedBanks),
             ('/calendarTransactions', 'POST', self.transactionEP.fetchCalendarTransactions),
@@ -86,7 +102,15 @@ class Akkountant(Flask):
             ('/updateGoogleTokens', 'POST', self.transactionEP.addUpdateUserToken),
         ]
 
-        for rule, method, view_func in routes:
+        for rule, method, view_func in transactionRoutes:
+            self.add_url_rule(rule, methods=[method], view_func=view_func)
+
+        investmentRoutes = [
+            ('/fetchSecurityList', 'GET', self.investmentEP.fetchSecurityList),
+            ('/fetchSecurityScheme', 'GET', self.investmentEP.fetchSecurityRate),
+        ]
+
+        for rule, method, view_func in investmentRoutes:
             self.add_url_rule(rule, methods=[method], view_func=view_func)
 
         self.logger.info("Application routes initialized.")
