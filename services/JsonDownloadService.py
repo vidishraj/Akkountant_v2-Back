@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 import re  # For regex to match the timestamp
 from utils.logger import Logger
 import requests
+import nsepython
 
 start_time = None
 # Limit the maximum number of concurrent requests
@@ -39,6 +40,34 @@ class JSONDownloadService:
     """
     GOLD SECTION
     """
+
+    def handle_stocks(self):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename_prefix = "Stock"
+        stockPrefix = "Stock_details"
+        filePath = self.getLatestFile("lists", stockPrefix)
+        # Compare time difference with 72 hours
+        if filePath is not None:
+            file_timestamp = self.extract_timestamp(filePath)
+            time_diff = datetime.now() - file_timestamp
+
+            # Define 72 hours as a timedelta
+            seventyTwo_hours = timedelta(hours=72)
+            if time_diff <= seventyTwo_hours:
+                self.logger.info("Stock list present. Skipping")
+                return
+
+        try:
+            codeList = nsepython.nse_eq_symbols()
+            list_data = []
+            for code in codeList:
+                list_data.append({
+                    'stockCode': code
+                })
+            filePath = self.getFilePath(stockPrefix, 'lists')
+            self.save_json({'date': list_data}, filePath)
+        except Exception as ex:
+            self.logger.error(f"Error while updating stocks list {ex}")
 
     def handle_gold(self):
         """
@@ -94,7 +123,8 @@ class JSONDownloadService:
 
 
         else:
-            self.logger.error(f"Failed to retrieve the page. Status code: {response.status_code}")
+            self.logger.error(
+                f"Failed to retrieve the page during gold management. Status code: {response.status_code}")
 
     @staticmethod
     def clean_rate(rate):
