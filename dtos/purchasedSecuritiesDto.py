@@ -4,6 +4,7 @@ from enums.MsnEnum import MSNENUM
 
 class PurchasedSecuritiesSchema(Schema):
     buyID = fields.Integer(dump_only=True)  # Exclude from input, include in output
+    date = fields.Date(required=True, format="%Y-%m-%d")
     securityCode = fields.String(required=True, validate=lambda s: len(s) <= 250)
     buyQuant = fields.Integer(required=True)
     buyPrice = fields.Decimal(as_string=True, required=True, places=2)

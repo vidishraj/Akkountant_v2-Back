@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer
+from sqlalchemy import Column, String, ForeignKey, Integer, Date
 from sqlalchemy.types import DECIMAL as Decimal
 from models.Base import Base
 from sqlalchemy.orm import relationship
@@ -9,6 +9,7 @@ class SoldSecurities(Base):
 
     sellID = Column(Integer, primary_key=True, autoincrement=True)  # Auto-incrementing primary key
     buyID = Column(Integer, ForeignKey('purchasedSecurities.buyID'), nullable=False)
+    date = Column(Date, nullable=False)
     sellQuant = Column(Integer, nullable=False)
     sellPrice = Column(Decimal(10, 2), nullable=False)
     profit = Column(Decimal(10, 2), nullable=True)
