@@ -7,13 +7,13 @@ from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientRes
 
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-import re  # For regex to match the timestamp
+import re
 from utils.logger import Logger
 import requests
 import nsepython
 
 start_time = None
-# Limit the maximum number of concurrent requests
+# Check this while deploying
 CONCURRENT_REQUESTS = 200  # Reduce to 50 for stability; adjust based on testing
 # To count successful requests
 requestsProcessed = 0
@@ -24,6 +24,16 @@ RETRY_DELAY = 0  # Seconds to wait between retries
 
 class JSONDownloadService:
     _instance = None  # Singleton instance
+    MfListPrefix: str = "MF_details"
+    MfRatePrefix: str = "MF_rate"
+    StockListPrefix: str = "Stock_details"
+    # StockRatePrefix: str = "NPS_rate"  #Doesn't exist
+    NpsListPrefix: str = "NPS_details"
+    NpsRatePrefix: str = "NPS_rate"
+    GoldListPrefix: str = "Gold_details"
+    GoldRatePrefix: str = "Gold_rate"
+    listType: str = "lists"
+    ratesType: str = "rates"
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -37,15 +47,9 @@ class JSONDownloadService:
             self.initialized = True
         self.logger = Logger(__name__).get_logger()
 
-    """
-    GOLD SECTION
-    """
-
+    """ Stocks methods """
     def handle_stocks(self):
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename_prefix = "Stock"
-        stockPrefix = "Stock_details"
-        filePath = self.getLatestFile("lists", stockPrefix)
+        filePath = self.getLatestFile(self.listType, self.StockListPrefix)
         # Compare time difference with 72 hours
         if filePath is not None:
             file_timestamp = self.extract_timestamp(filePath)
@@ -64,10 +68,22 @@ class JSONDownloadService:
                 list_data.append({
                     'stockCode': code
                 })
-            filePath = self.getFilePath(stockPrefix, 'lists')
+            filePath = self.getFilePath(self.StockListPrefix, self.listType)
             self.save_json({'date': list_data}, filePath)
         except Exception as ex:
             self.logger.error(f"Error while updating stocks list {ex}")
+
+    def getStockList(self):
+        self.handle_stocks()
+        fileCheck = self.checkJsonInDirectory(self.listType, self.StockListPrefix)
+        if not fileCheck:
+            raise FileNotFoundError("Stock file not available right now")
+        filepath = self.getLatestFile(self.listType, self.StockListPrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        return jsonData
+
+    """ Gold methods """
 
     def handle_gold(self):
         """
@@ -75,11 +91,8 @@ class JSONDownloadService:
         """
 
         url = 'https://www.financialexpress.com/gold-rate-today/'
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename_prefix = "Gold"
-        filename = f"{filename_prefix}_{timestamp}.json"
-        goldPrefix = "Gold_rate"
-        filePath = self.getLatestFile("rates", goldPrefix)
+
+        filePath = self.getLatestFile(self.ratesType, self.GoldRatePrefix)
         # Compare time difference with six_hours
         if filePath is not None:
             file_timestamp = self.extract_timestamp(filePath)
@@ -118,13 +131,19 @@ class JSONDownloadService:
                                     "22 Carat": twenty_two_carat,
                                     "24 Carat": twenty_four_carat
                                 }
-                                filePath = self.getFilePath(goldPrefix, 'rates')
+                                filePath = self.getFilePath(self.GoldRatePrefix, self.ratesType)
                                 self.save_json(rate_data, filePath)
 
 
         else:
             self.logger.error(
                 f"Failed to retrieve the page during gold management. Status code: {response.status_code}")
+
+    def getGoldList(self):
+        pass
+
+    def getGoldRate(self, schemeCode):
+        pass
 
     @staticmethod
     def clean_rate(rate):
@@ -135,51 +154,95 @@ class JSONDownloadService:
             return int(rate[1:].replace(",", ""))
         return None
 
-    """
-    NPS SECTION
-    """
+    """ NPS methods """
 
     def handle_nps(self):
-        listPrefix = "NPS_details"
-        navPrefix = "NPS_rate"
         listUrl = "https://nps.purifiedbytes.com/api/schemes.json"
         navUrl = "https://nps.purifiedbytes.com/api/nav/latest.json"
-        if not self.checkJsonInDirectory('lists', listPrefix):
+        if not self.checkJsonInDirectory(self.listType, self.NpsListPrefix):
             self.logger.info("Either NPS list file doesn't exist or is older than 6 hours, updating it")
             jsonData = self.make_request(listUrl)
-            filePath = self.getFilePath(listPrefix, 'lists')
+            filePath = self.getFilePath(self.NpsListPrefix, self.listType)
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("Nps List present. Skipping")
-        if not self.checkJsonInDirectory('rates', navPrefix):
+        if not self.checkJsonInDirectory(self.ratesType, self.NpsRatePrefix):
             self.logger.info("Either NPS rate file doesn't exist or is older than 6 hours, updating it")
             jsonData = self.make_request(navUrl)
-            filePath = self.getFilePath(navPrefix, 'rates')
+            filePath = self.getFilePath(self.NpsRatePrefix, self.ratesType)
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("Nps Rates present. Skipping")
         return
 
+    def getNPSList(self):
+        self.handle_nps()
+        fileCheck = self.checkJsonInDirectory(self.listType, self.NpsListPrefix)
+        if not fileCheck:
+            raise FileNotFoundError("MF file not available right now")
+        filepath = self.getLatestFile(self.listType, self.NpsListPrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        return jsonData
+
+    def getNPSRate(self, schemeCode):
+        self.handle_nps()
+        fileCheck = self.checkJsonInDirectory(self.ratesType, self.NpsRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("MF Rate file not available right now")
+        filepath = self.getLatestFile(self.ratesType, self.NpsRatePrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData['data']
+        for item in rateList:
+            if item['scheme_id'] == schemeCode:
+                return item
+        return {}
+
+    """ MF methods """
+
     def handle_mf(self):
-        listPrefix = "MF_details"
-        navPrefix = "MF_rate"
         listUrl = "https://api.mfapi.in/mf"
-        if not self.checkJsonInDirectory('lists', listPrefix):
+        if not self.checkJsonInDirectory(self.listType, self.MfListPrefix):
             self.logger.info("Either MF list file doesn't exist or is older than 6 hours, updating it")
-            listFilePath = self.getFilePath(listPrefix, 'lists')
+            listFilePath = self.getFilePath(self.MfListPrefix, self.listType)
             jsonData = self.make_request(listUrl)
             self.save_json(jsonData, listFilePath)
         else:
             self.logger.info("MF List present. Skipping")
-        if not self.checkJsonInDirectory('rates', navPrefix):
+        if not self.checkJsonInDirectory(self.ratesType, self.MfRatePrefix):
             self.logger.info("Either MF rate file doesn't exist or is older than 6 hours, updating it")
-            latestListFile = self.getLatestFile('lists', listPrefix)
+            latestListFile = self.getLatestFile(self.listType, self.MfListPrefix)
             jsonData = self.buildJsonForMF(listUrl, latestListFile)
-            filePath = self.getFilePath(navPrefix, 'rates')
+            filePath = self.getFilePath(self.MfRatePrefix, self.ratesType)
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("MF Rates present. Skipping")
         return
+
+    def getMfList(self):
+        self.handle_mf()
+        fileCheck = self.checkJsonInDirectory(self.listType, self.MfListPrefix)
+        if not fileCheck:
+            raise FileNotFoundError("MF file not available right now")
+        filepath = self.getLatestFile(self.listType, self.MfListPrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        return jsonData
+
+    def getMFRate(self, schemeCode):
+        self.handle_mf()
+        fileCheck = self.checkJsonInDirectory(self.ratesType, self.MfRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("MF Rate file not available right now")
+        filepath = self.getLatestFile(self.ratesType, self.MfRatePrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData['data']
+        for item in rateList:
+            if item['scheme_id'] == schemeCode:
+                return item
+        return {}
 
     def buildJsonForMF(self, baseUrl, listPath):
         with open(listPath, 'r') as file:
@@ -209,6 +272,8 @@ class JSONDownloadService:
                 self.logger.error(f"Skipping invalid response: {response}")
 
         return {"data": result_data}
+
+    """ Utility methods """
 
     def getFilePath(self, filename_prefix, type):
         new_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -241,7 +306,7 @@ class JSONDownloadService:
                 time_diff = datetime.now() - file_timestamp
 
                 # Define 6 hours as a timedelta
-                six_hours = timedelta(hours=6)
+                six_hours = timedelta(hours=88)
                 # Compare time difference with six_hours
                 if time_diff <= six_hours:
                     # File is less than 6 hours old, do nothing it
@@ -282,6 +347,8 @@ class JSONDownloadService:
             return datetime.strptime(match.group(1), '%Y%m%d_%H%M%S')
         else:
             return datetime.min  # Return a very old date if no timestamp is found
+
+    """ Asynchronous methods for MF rate fetching """
 
     async def fetch_html(self, url: str, session: ClientSession, semaphore: asyncio.Semaphore, **kwargs):
         global requestsProcessed
