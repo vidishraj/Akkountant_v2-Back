@@ -1,0 +1,6115 @@
+{
+    "date": [
+        {
+            "stockCode": "20MICRONS"
+        },
+        {
+            "stockCode": "21STCENMGM"
+        },
+        {
+            "stockCode": "360ONE"
+        },
+        {
+            "stockCode": "3IINFOLTD"
+        },
+        {
+            "stockCode": "3MINDIA"
+        },
+        {
+            "stockCode": "3PLAND"
+        },
+        {
+            "stockCode": "5PAISA"
+        },
+        {
+            "stockCode": "63MOONS"
+        },
+        {
+            "stockCode": "A2ZINFRA"
+        },
+        {
+            "stockCode": "AAATECH"
+        },
+        {
+            "stockCode": "AADHARHFC"
+        },
+        {
+            "stockCode": "AAKASH"
+        },
+        {
+            "stockCode": "AAREYDRUGS"
+        },
+        {
+            "stockCode": "AARON"
+        },
+        {
+            "stockCode": "AARTECH"
+        },
+        {
+            "stockCode": "AARTIDRUGS"
+        },
+        {
+            "stockCode": "AARTIIND"
+        },
+        {
+            "stockCode": "AARTIPHARM"
+        },
+        {
+            "stockCode": "AARTISURF"
+        },
+        {
+            "stockCode": "AARVEEDEN"
+        },
+        {
+            "stockCode": "AARVI"
+        },
+        {
+            "stockCode": "AAVAS"
+        },
+        {
+            "stockCode": "ABAN"
+        },
+        {
+            "stockCode": "ABB"
+        },
+        {
+            "stockCode": "ABBOTINDIA"
+        },
+        {
+            "stockCode": "ABCAPITAL"
+        },
+        {
+            "stockCode": "ABDL"
+        },
+        {
+            "stockCode": "ABFRL"
+        },
+        {
+            "stockCode": "ABINFRA"
+        },
+        {
+            "stockCode": "ABMINTLLTD"
+        },
+        {
+            "stockCode": "ABREL"
+        },
+        {
+            "stockCode": "ABSLAMC"
+        },
+        {
+            "stockCode": "ACC"
+        },
+        {
+            "stockCode": "ACCELYA"
+        },
+        {
+            "stockCode": "ACCURACY"
+        },
+        {
+            "stockCode": "ACE"
+        },
+        {
+            "stockCode": "ACEINTEG"
+        },
+        {
+            "stockCode": "ACI"
+        },
+        {
+            "stockCode": "ACL"
+        },
+        {
+            "stockCode": "ACLGATI"
+        },
+        {
+            "stockCode": "ACMESOLAR"
+        },
+        {
+            "stockCode": "ADANIENSOL"
+        },
+        {
+            "stockCode": "ADANIENT"
+        },
+        {
+            "stockCode": "ADANIGREEN"
+        },
+        {
+            "stockCode": "ADANIPORTS"
+        },
+        {
+            "stockCode": "ADANIPOWER"
+        },
+        {
+            "stockCode": "ADFFOODS"
+        },
+        {
+            "stockCode": "ADL"
+        },
+        {
+            "stockCode": "ADORWELD"
+        },
+        {
+            "stockCode": "ADROITINFO"
+        },
+        {
+            "stockCode": "ADSL"
+        },
+        {
+            "stockCode": "ADVANIHOTR"
+        },
+        {
+            "stockCode": "ADVENZYMES"
+        },
+        {
+            "stockCode": "AEGISLOG"
+        },
+        {
+            "stockCode": "AEROFLEX"
+        },
+        {
+            "stockCode": "AETHER"
+        },
+        {
+            "stockCode": "AFCONS"
+        },
+        {
+            "stockCode": "AFFLE"
+        },
+        {
+            "stockCode": "AFFORDABLE"
+        },
+        {
+            "stockCode": "AFIL"
+        },
+        {
+            "stockCode": "AGARIND"
+        },
+        {
+            "stockCode": "AGI"
+        },
+        {
+            "stockCode": "AGIIL"
+        },
+        {
+            "stockCode": "AGRITECH"
+        },
+        {
+            "stockCode": "AGROPHOS"
+        },
+        {
+            "stockCode": "AGSTRA"
+        },
+        {
+            "stockCode": "AHL"
+        },
+        {
+            "stockCode": "AHLADA"
+        },
+        {
+            "stockCode": "AHLEAST"
+        },
+        {
+            "stockCode": "AHLUCONT"
+        },
+        {
+            "stockCode": "AIAENG"
+        },
+        {
+            "stockCode": "AIIL"
+        },
+        {
+            "stockCode": "AIRAN"
+        },
+        {
+            "stockCode": "AIROLAM"
+        },
+        {
+            "stockCode": "AJANTPHARM"
+        },
+        {
+            "stockCode": "AJMERA"
+        },
+        {
+            "stockCode": "AJOONI"
+        },
+        {
+            "stockCode": "AKASH"
+        },
+        {
+            "stockCode": "AKG"
+        },
+        {
+            "stockCode": "AKI"
+        },
+        {
+            "stockCode": "AKSHAR"
+        },
+        {
+            "stockCode": "AKSHARCHEM"
+        },
+        {
+            "stockCode": "AKSHOPTFBR"
+        },
+        {
+            "stockCode": "AKUMS"
+        },
+        {
+            "stockCode": "AKZOINDIA"
+        },
+        {
+            "stockCode": "ALANKIT"
+        },
+        {
+            "stockCode": "ALBERTDAVD"
+        },
+        {
+            "stockCode": "ALEMBICLTD"
+        },
+        {
+            "stockCode": "ALICON"
+        },
+        {
+            "stockCode": "ALKALI"
+        },
+        {
+            "stockCode": "ALKEM"
+        },
+        {
+            "stockCode": "ALKYLAMINE"
+        },
+        {
+            "stockCode": "ALLCARGO"
+        },
+        {
+            "stockCode": "ALLDIGI"
+        },
+        {
+            "stockCode": "ALMONDZ"
+        },
+        {
+            "stockCode": "ALOKINDS"
+        },
+        {
+            "stockCode": "ALPA"
+        },
+        {
+            "stockCode": "ALPHAGEO"
+        },
+        {
+            "stockCode": "AMBER"
+        },
+        {
+            "stockCode": "AMBICAAGAR"
+        },
+        {
+            "stockCode": "AMBIKCO"
+        },
+        {
+            "stockCode": "AMBUJACEM"
+        },
+        {
+            "stockCode": "AMDIND"
+        },
+        {
+            "stockCode": "AMIORG"
+        },
+        {
+            "stockCode": "AMJLAND"
+        },
+        {
+            "stockCode": "AMNPLST"
+        },
+        {
+            "stockCode": "AMRUTANJAN"
+        },
+        {
+            "stockCode": "ANANDRATHI"
+        },
+        {
+            "stockCode": "ANANTRAJ"
+        },
+        {
+            "stockCode": "ANDHRAPAP"
+        },
+        {
+            "stockCode": "ANDHRSUGAR"
+        },
+        {
+            "stockCode": "ANGELONE"
+        },
+        {
+            "stockCode": "ANIKINDS"
+        },
+        {
+            "stockCode": "ANKITMETAL"
+        },
+        {
+            "stockCode": "ANMOL"
+        },
+        {
+            "stockCode": "ANSALAPI"
+        },
+        {
+            "stockCode": "ANTGRAPHIC"
+        },
+        {
+            "stockCode": "ANUP"
+        },
+        {
+            "stockCode": "ANURAS"
+        },
+        {
+            "stockCode": "APARINDS"
+        },
+        {
+            "stockCode": "APCL"
+        },
+        {
+            "stockCode": "APCOTEXIND"
+        },
+        {
+            "stockCode": "APEX"
+        },
+        {
+            "stockCode": "APLAPOLLO"
+        },
+        {
+            "stockCode": "APLLTD"
+        },
+        {
+            "stockCode": "APOLLO"
+        },
+        {
+            "stockCode": "APOLLOHOSP"
+        },
+        {
+            "stockCode": "APOLLOPIPE"
+        },
+        {
+            "stockCode": "APOLLOTYRE"
+        },
+        {
+            "stockCode": "APOLSINHOT"
+        },
+        {
+            "stockCode": "APTECHT"
+        },
+        {
+            "stockCode": "APTUS"
+        },
+        {
+            "stockCode": "ARCHIDPLY"
+        },
+        {
+            "stockCode": "ARCHIES"
+        },
+        {
+            "stockCode": "ARE&M"
+        },
+        {
+            "stockCode": "ARENTERP"
+        },
+        {
+            "stockCode": "ARIES"
+        },
+        {
+            "stockCode": "ARIHANTCAP"
+        },
+        {
+            "stockCode": "ARIHANTSUP"
+        },
+        {
+            "stockCode": "ARKADE"
+        },
+        {
+            "stockCode": "ARMANFIN"
+        },
+        {
+            "stockCode": "AROGRANITE"
+        },
+        {
+            "stockCode": "ARROWGREEN"
+        },
+        {
+            "stockCode": "ARSHIYA"
+        },
+        {
+            "stockCode": "ARSSINFRA"
+        },
+        {
+            "stockCode": "ARTEMISMED"
+        },
+        {
+            "stockCode": "ARTNIRMAN"
+        },
+        {
+            "stockCode": "ARVEE"
+        },
+        {
+            "stockCode": "ARVIND"
+        },
+        {
+            "stockCode": "ARVINDFASN"
+        },
+        {
+            "stockCode": "ARVSMART"
+        },
+        {
+            "stockCode": "ASAHIINDIA"
+        },
+        {
+            "stockCode": "ASAHISONG"
+        },
+        {
+            "stockCode": "ASAL"
+        },
+        {
+            "stockCode": "ASALCBR"
+        },
+        {
+            "stockCode": "ASHAPURMIN"
+        },
+        {
+            "stockCode": "ASHIANA"
+        },
+        {
+            "stockCode": "ASHIMASYN"
+        },
+        {
+            "stockCode": "ASHOKA"
+        },
+        {
+            "stockCode": "ASHOKAMET"
+        },
+        {
+            "stockCode": "ASHOKLEY"
+        },
+        {
+            "stockCode": "ASIANENE"
+        },
+        {
+            "stockCode": "ASIANHOTNR"
+        },
+        {
+            "stockCode": "ASIANPAINT"
+        },
+        {
+            "stockCode": "ASIANTILES"
+        },
+        {
+            "stockCode": "ASKAUTOLTD"
+        },
+        {
+            "stockCode": "ASMS"
+        },
+        {
+            "stockCode": "ASPINWALL"
+        },
+        {
+            "stockCode": "ASTEC"
+        },
+        {
+            "stockCode": "ASTERDM"
+        },
+        {
+            "stockCode": "ASTRAL"
+        },
+        {
+            "stockCode": "ASTRAMICRO"
+        },
+        {
+            "stockCode": "ASTRAZEN"
+        },
+        {
+            "stockCode": "ASTRON"
+        },
+        {
+            "stockCode": "ATALREAL"
+        },
+        {
+            "stockCode": "ATAM"
+        },
+        {
+            "stockCode": "ATFL"
+        },
+        {
+            "stockCode": "ATGL"
+        },
+        {
+            "stockCode": "ATL"
+        },
+        {
+            "stockCode": "ATLANTAA"
+        },
+        {
+            "stockCode": "ATUL"
+        },
+        {
+            "stockCode": "ATULAUTO"
+        },
+        {
+            "stockCode": "AUBANK"
+        },
+        {
+            "stockCode": "AURIONPRO"
+        },
+        {
+            "stockCode": "AUROPHARMA"
+        },
+        {
+            "stockCode": "AURUM"
+        },
+        {
+            "stockCode": "AUSOMENT"
+        },
+        {
+            "stockCode": "AUTOAXLES"
+        },
+        {
+            "stockCode": "AUTOIND"
+        },
+        {
+            "stockCode": "AVADHSUGAR"
+        },
+        {
+            "stockCode": "AVALON"
+        },
+        {
+            "stockCode": "AVANTEL"
+        },
+        {
+            "stockCode": "AVANTIFEED"
+        },
+        {
+            "stockCode": "AVG"
+        },
+        {
+            "stockCode": "AVL"
+        },
+        {
+            "stockCode": "AVONMORE"
+        },
+        {
+            "stockCode": "AVROIND"
+        },
+        {
+            "stockCode": "AVTNPL"
+        },
+        {
+            "stockCode": "AWFIS"
+        },
+        {
+            "stockCode": "AWHCL"
+        },
+        {
+            "stockCode": "AWL"
+        },
+        {
+            "stockCode": "AXISBANK"
+        },
+        {
+            "stockCode": "AXISCADES"
+        },
+        {
+            "stockCode": "AXITA"
+        },
+        {
+            "stockCode": "AYMSYNTEX"
+        },
+        {
+            "stockCode": "AZAD"
+        },
+        {
+            "stockCode": "BAFNAPH"
+        },
+        {
+            "stockCode": "BAGFILMS"
+        },
+        {
+            "stockCode": "BAIDFIN"
+        },
+        {
+            "stockCode": "BAJAJ-AUTO"
+        },
+        {
+            "stockCode": "BAJAJCON"
+        },
+        {
+            "stockCode": "BAJAJELEC"
+        },
+        {
+            "stockCode": "BAJAJFINSV"
+        },
+        {
+            "stockCode": "BAJAJHCARE"
+        },
+        {
+            "stockCode": "BAJAJHFL"
+        },
+        {
+            "stockCode": "BAJAJHIND"
+        },
+        {
+            "stockCode": "BAJAJHLDNG"
+        },
+        {
+            "stockCode": "BAJEL"
+        },
+        {
+            "stockCode": "BAJFINANCE"
+        },
+        {
+            "stockCode": "BALAJEE"
+        },
+        {
+            "stockCode": "BALAJITELE"
+        },
+        {
+            "stockCode": "BALAMINES"
+        },
+        {
+            "stockCode": "BALAXI"
+        },
+        {
+            "stockCode": "BALKRISHNA"
+        },
+        {
+            "stockCode": "BALKRISIND"
+        },
+        {
+            "stockCode": "BALMLAWRIE"
+        },
+        {
+            "stockCode": "BALPHARMA"
+        },
+        {
+            "stockCode": "BALRAMCHIN"
+        },
+        {
+            "stockCode": "BALUFORGE"
+        },
+        {
+            "stockCode": "BANARBEADS"
+        },
+        {
+            "stockCode": "BANARISUG"
+        },
+        {
+            "stockCode": "BANCOINDIA"
+        },
+        {
+            "stockCode": "BANDHANBNK"
+        },
+        {
+            "stockCode": "BANG"
+        },
+        {
+            "stockCode": "BANKA"
+        },
+        {
+            "stockCode": "BANKBARODA"
+        },
+        {
+            "stockCode": "BANKINDIA"
+        },
+        {
+            "stockCode": "BANSALWIRE"
+        },
+        {
+            "stockCode": "BANSWRAS"
+        },
+        {
+            "stockCode": "BARBEQUE"
+        },
+        {
+            "stockCode": "BASF"
+        },
+        {
+            "stockCode": "BASML"
+        },
+        {
+            "stockCode": "BATAINDIA"
+        },
+        {
+            "stockCode": "BAYERCROP"
+        },
+        {
+            "stockCode": "BBL"
+        },
+        {
+            "stockCode": "BBOX"
+        },
+        {
+            "stockCode": "BBTC"
+        },
+        {
+            "stockCode": "BBTCL"
+        },
+        {
+            "stockCode": "BCLIND"
+        },
+        {
+            "stockCode": "BCONCEPTS"
+        },
+        {
+            "stockCode": "BDL"
+        },
+        {
+            "stockCode": "BEARDSELL"
+        },
+        {
+            "stockCode": "BECTORFOOD"
+        },
+        {
+            "stockCode": "BEDMUTHA"
+        },
+        {
+            "stockCode": "BEL"
+        },
+        {
+            "stockCode": "BEML"
+        },
+        {
+            "stockCode": "BEPL"
+        },
+        {
+            "stockCode": "BERGEPAINT"
+        },
+        {
+            "stockCode": "BESTAGRO"
+        },
+        {
+            "stockCode": "BFINVEST"
+        },
+        {
+            "stockCode": "BFUTILITIE"
+        },
+        {
+            "stockCode": "BGRENERGY"
+        },
+        {
+            "stockCode": "BHAGCHEM"
+        },
+        {
+            "stockCode": "BHAGERIA"
+        },
+        {
+            "stockCode": "BHAGYANGR"
+        },
+        {
+            "stockCode": "BHANDARI"
+        },
+        {
+            "stockCode": "BHARATFORG"
+        },
+        {
+            "stockCode": "BHARATGEAR"
+        },
+        {
+            "stockCode": "BHARATRAS"
+        },
+        {
+            "stockCode": "BHARATWIRE"
+        },
+        {
+            "stockCode": "BHARTIARTL"
+        },
+        {
+            "stockCode": "BHARTIHEXA"
+        },
+        {
+            "stockCode": "BHEL"
+        },
+        {
+            "stockCode": "BIGBLOC"
+        },
+        {
+            "stockCode": "BIKAJI"
+        },
+        {
+            "stockCode": "BIL"
+        },
+        {
+            "stockCode": "BINANIIND"
+        },
+        {
+            "stockCode": "BIOCON"
+        },
+        {
+            "stockCode": "BIOFILCHEM"
+        },
+        {
+            "stockCode": "BIRLACABLE"
+        },
+        {
+            "stockCode": "BIRLACORPN"
+        },
+        {
+            "stockCode": "BIRLAMONEY"
+        },
+        {
+            "stockCode": "BLACKBUCK"
+        },
+        {
+            "stockCode": "BLAL"
+        },
+        {
+            "stockCode": "BLBLIMITED"
+        },
+        {
+            "stockCode": "BLISSGVS"
+        },
+        {
+            "stockCode": "BLKASHYAP"
+        },
+        {
+            "stockCode": "BLS"
+        },
+        {
+            "stockCode": "BLSE"
+        },
+        {
+            "stockCode": "BLUECHIP"
+        },
+        {
+            "stockCode": "BLUEDART"
+        },
+        {
+            "stockCode": "BLUEJET"
+        },
+        {
+            "stockCode": "BLUESTARCO"
+        },
+        {
+            "stockCode": "BODALCHEM"
+        },
+        {
+            "stockCode": "BOMDYEING"
+        },
+        {
+            "stockCode": "BOROLTD"
+        },
+        {
+            "stockCode": "BORORENEW"
+        },
+        {
+            "stockCode": "BOROSCI"
+        },
+        {
+            "stockCode": "BOSCHLTD"
+        },
+        {
+            "stockCode": "BPCL"
+        },
+        {
+            "stockCode": "BPL"
+        },
+        {
+            "stockCode": "BRIGADE"
+        },
+        {
+            "stockCode": "BRITANNIA"
+        },
+        {
+            "stockCode": "BRNL"
+        },
+        {
+            "stockCode": "BROOKS"
+        },
+        {
+            "stockCode": "BSE"
+        },
+        {
+            "stockCode": "BSHSL"
+        },
+        {
+            "stockCode": "BSL"
+        },
+        {
+            "stockCode": "BSOFT"
+        },
+        {
+            "stockCode": "BTML"
+        },
+        {
+            "stockCode": "BURNPUR"
+        },
+        {
+            "stockCode": "BUTTERFLY"
+        },
+        {
+            "stockCode": "BVCL"
+        },
+        {
+            "stockCode": "BYKE"
+        },
+        {
+            "stockCode": "CALSOFT"
+        },
+        {
+            "stockCode": "CAMLINFINE"
+        },
+        {
+            "stockCode": "CAMPUS"
+        },
+        {
+            "stockCode": "CAMS"
+        },
+        {
+            "stockCode": "CANBK"
+        },
+        {
+            "stockCode": "CANFINHOME"
+        },
+        {
+            "stockCode": "CANTABIL"
+        },
+        {
+            "stockCode": "CAPACITE"
+        },
+        {
+            "stockCode": "CAPITALSFB"
+        },
+        {
+            "stockCode": "CAPLIPOINT"
+        },
+        {
+            "stockCode": "CAPTRUST"
+        },
+        {
+            "stockCode": "CARBORUNIV"
+        },
+        {
+            "stockCode": "CAREERP"
+        },
+        {
+            "stockCode": "CARERATING"
+        },
+        {
+            "stockCode": "CARTRADE"
+        },
+        {
+            "stockCode": "CARYSIL"
+        },
+        {
+            "stockCode": "CASTROLIND"
+        },
+        {
+            "stockCode": "CCCL"
+        },
+        {
+            "stockCode": "CCHHL"
+        },
+        {
+            "stockCode": "CCL"
+        },
+        {
+            "stockCode": "CDSL"
+        },
+        {
+            "stockCode": "CEATLTD"
+        },
+        {
+            "stockCode": "CEIGALL"
+        },
+        {
+            "stockCode": "CELEBRITY"
+        },
+        {
+            "stockCode": "CELLO"
+        },
+        {
+            "stockCode": "CENTENKA"
+        },
+        {
+            "stockCode": "CENTEXT"
+        },
+        {
+            "stockCode": "CENTRALBK"
+        },
+        {
+            "stockCode": "CENTRUM"
+        },
+        {
+            "stockCode": "CENTUM"
+        },
+        {
+            "stockCode": "CENTURYPLY"
+        },
+        {
+            "stockCode": "CERA"
+        },
+        {
+            "stockCode": "CEREBRAINT"
+        },
+        {
+            "stockCode": "CESC"
+        },
+        {
+            "stockCode": "CGCL"
+        },
+        {
+            "stockCode": "CGPOWER"
+        },
+        {
+            "stockCode": "CHALET"
+        },
+        {
+            "stockCode": "CHAMBLFERT"
+        },
+        {
+            "stockCode": "CHEMBOND"
+        },
+        {
+            "stockCode": "CHEMCON"
+        },
+        {
+            "stockCode": "CHEMFAB"
+        },
+        {
+            "stockCode": "CHEMPLASTS"
+        },
+        {
+            "stockCode": "CHENNPETRO"
+        },
+        {
+            "stockCode": "CHEVIOT"
+        },
+        {
+            "stockCode": "CHOICEIN"
+        },
+        {
+            "stockCode": "CHOLAFIN"
+        },
+        {
+            "stockCode": "CHOLAHLDNG"
+        },
+        {
+            "stockCode": "CIEINDIA"
+        },
+        {
+            "stockCode": "CIGNITITEC"
+        },
+        {
+            "stockCode": "CINELINE"
+        },
+        {
+            "stockCode": "CINEVISTA"
+        },
+        {
+            "stockCode": "CIPLA"
+        },
+        {
+            "stockCode": "CLEAN"
+        },
+        {
+            "stockCode": "CLEDUCATE"
+        },
+        {
+            "stockCode": "CLSEL"
+        },
+        {
+            "stockCode": "CMSINFO"
+        },
+        {
+            "stockCode": "COALINDIA"
+        },
+        {
+            "stockCode": "COASTCORP"
+        },
+        {
+            "stockCode": "COCHINSHIP"
+        },
+        {
+            "stockCode": "COFORGE"
+        },
+        {
+            "stockCode": "COLPAL"
+        },
+        {
+            "stockCode": "COMPUSOFT"
+        },
+        {
+            "stockCode": "COMSYN"
+        },
+        {
+            "stockCode": "CONCOR"
+        },
+        {
+            "stockCode": "CONCORDBIO"
+        },
+        {
+            "stockCode": "CONFIPET"
+        },
+        {
+            "stockCode": "CONSOFINVT"
+        },
+        {
+            "stockCode": "CONTROLPR"
+        },
+        {
+            "stockCode": "CORALFINAC"
+        },
+        {
+            "stockCode": "CORDSCABLE"
+        },
+        {
+            "stockCode": "COROMANDEL"
+        },
+        {
+            "stockCode": "COSMOFIRST"
+        },
+        {
+            "stockCode": "COUNCODOS"
+        },
+        {
+            "stockCode": "CRAFTSMAN"
+        },
+        {
+            "stockCode": "CREATIVE"
+        },
+        {
+            "stockCode": "CREATIVEYE"
+        },
+        {
+            "stockCode": "CREDITACC"
+        },
+        {
+            "stockCode": "CREST"
+        },
+        {
+            "stockCode": "CRISIL"
+        },
+        {
+            "stockCode": "CROMPTON"
+        },
+        {
+            "stockCode": "CROWN"
+        },
+        {
+            "stockCode": "CSBBANK"
+        },
+        {
+            "stockCode": "CSLFINANCE"
+        },
+        {
+            "stockCode": "CTE"
+        },
+        {
+            "stockCode": "CUB"
+        },
+        {
+            "stockCode": "CUBEXTUB"
+        },
+        {
+            "stockCode": "CUMMINSIND"
+        },
+        {
+            "stockCode": "CUPID"
+        },
+        {
+            "stockCode": "CYBERMEDIA"
+        },
+        {
+            "stockCode": "CYBERTECH"
+        },
+        {
+            "stockCode": "CYIENT"
+        },
+        {
+            "stockCode": "CYIENTDLM"
+        },
+        {
+            "stockCode": "DABUR"
+        },
+        {
+            "stockCode": "DALBHARAT"
+        },
+        {
+            "stockCode": "DALMIASUG"
+        },
+        {
+            "stockCode": "DAMODARIND"
+        },
+        {
+            "stockCode": "DANGEE"
+        },
+        {
+            "stockCode": "DATAMATICS"
+        },
+        {
+            "stockCode": "DATAPATTNS"
+        },
+        {
+            "stockCode": "DAVANGERE"
+        },
+        {
+            "stockCode": "DBCORP"
+        },
+        {
+            "stockCode": "DBEIL"
+        },
+        {
+            "stockCode": "DBL"
+        },
+        {
+            "stockCode": "DBOL"
+        },
+        {
+            "stockCode": "DBREALTY"
+        },
+        {
+            "stockCode": "DBSTOCKBRO"
+        },
+        {
+            "stockCode": "DCAL"
+        },
+        {
+            "stockCode": "DCBBANK"
+        },
+        {
+            "stockCode": "DCI"
+        },
+        {
+            "stockCode": "DCM"
+        },
+        {
+            "stockCode": "DCMFINSERV"
+        },
+        {
+            "stockCode": "DCMNVL"
+        },
+        {
+            "stockCode": "DCMSHRIRAM"
+        },
+        {
+            "stockCode": "DCMSRIND"
+        },
+        {
+            "stockCode": "DCW"
+        },
+        {
+            "stockCode": "DCXINDIA"
+        },
+        {
+            "stockCode": "DECCANCE"
+        },
+        {
+            "stockCode": "DEEDEV"
+        },
+        {
+            "stockCode": "DEEPAKFERT"
+        },
+        {
+            "stockCode": "DEEPAKNTR"
+        },
+        {
+            "stockCode": "DEEPINDS"
+        },
+        {
+            "stockCode": "DELHIVERY"
+        },
+        {
+            "stockCode": "DELPHIFX"
+        },
+        {
+            "stockCode": "DELTACORP"
+        },
+        {
+            "stockCode": "DELTAMAGNT"
+        },
+        {
+            "stockCode": "DEN"
+        },
+        {
+            "stockCode": "DENORA"
+        },
+        {
+            "stockCode": "DEVIT"
+        },
+        {
+            "stockCode": "DEVYANI"
+        },
+        {
+            "stockCode": "DGCONTENT"
+        },
+        {
+            "stockCode": "DHAMPURSUG"
+        },
+        {
+            "stockCode": "DHANBANK"
+        },
+        {
+            "stockCode": "DHANI"
+        },
+        {
+            "stockCode": "DHANUKA"
+        },
+        {
+            "stockCode": "DHARMAJ"
+        },
+        {
+            "stockCode": "DHRUV"
+        },
+        {
+            "stockCode": "DHUNINV"
+        },
+        {
+            "stockCode": "DIACABS"
+        },
+        {
+            "stockCode": "DIAMINESQ"
+        },
+        {
+            "stockCode": "DIAMONDYD"
+        },
+        {
+            "stockCode": "DICIND"
+        },
+        {
+            "stockCode": "DIFFNKG"
+        },
+        {
+            "stockCode": "DIGIDRIVE"
+        },
+        {
+            "stockCode": "DIGISPICE"
+        },
+        {
+            "stockCode": "DIGJAMLMTD"
+        },
+        {
+            "stockCode": "DIL"
+        },
+        {
+            "stockCode": "DISHTV"
+        },
+        {
+            "stockCode": "DIVGIITTS"
+        },
+        {
+            "stockCode": "DIVISLAB"
+        },
+        {
+            "stockCode": "DIXON"
+        },
+        {
+            "stockCode": "DJML"
+        },
+        {
+            "stockCode": "DLF"
+        },
+        {
+            "stockCode": "DLINKINDIA"
+        },
+        {
+            "stockCode": "DMART"
+        },
+        {
+            "stockCode": "DMCC"
+        },
+        {
+            "stockCode": "DNAMEDIA"
+        },
+        {
+            "stockCode": "DODLA"
+        },
+        {
+            "stockCode": "DOLATALGO"
+        },
+        {
+            "stockCode": "DOLLAR"
+        },
+        {
+            "stockCode": "DOLPHIN"
+        },
+        {
+            "stockCode": "DOMS"
+        },
+        {
+            "stockCode": "DONEAR"
+        },
+        {
+            "stockCode": "DPABHUSHAN"
+        },
+        {
+            "stockCode": "DPSCLTD"
+        },
+        {
+            "stockCode": "DPWIRES"
+        },
+        {
+            "stockCode": "DRCSYSTEMS"
+        },
+        {
+            "stockCode": "DREAMFOLKS"
+        },
+        {
+            "stockCode": "DREDGECORP"
+        },
+        {
+            "stockCode": "DRREDDY"
+        },
+        {
+            "stockCode": "DSSL"
+        },
+        {
+            "stockCode": "DTIL"
+        },
+        {
+            "stockCode": "DUCON"
+        },
+        {
+            "stockCode": "DVL"
+        },
+        {
+            "stockCode": "DWARKESH"
+        },
+        {
+            "stockCode": "DYCL"
+        },
+        {
+            "stockCode": "DYNAMATECH"
+        },
+        {
+            "stockCode": "DYNPRO"
+        },
+        {
+            "stockCode": "E2E"
+        },
+        {
+            "stockCode": "EASEMYTRIP"
+        },
+        {
+            "stockCode": "ECLERX"
+        },
+        {
+            "stockCode": "ECOSMOBLTY"
+        },
+        {
+            "stockCode": "EDELWEISS"
+        },
+        {
+            "stockCode": "EICHERMOT"
+        },
+        {
+            "stockCode": "EIDPARRY"
+        },
+        {
+            "stockCode": "EIFFL"
+        },
+        {
+            "stockCode": "EIHAHOTELS"
+        },
+        {
+            "stockCode": "EIHOTEL"
+        },
+        {
+            "stockCode": "EIMCOELECO"
+        },
+        {
+            "stockCode": "EKC"
+        },
+        {
+            "stockCode": "ELDEHSG"
+        },
+        {
+            "stockCode": "ELECON"
+        },
+        {
+            "stockCode": "ELECTCAST"
+        },
+        {
+            "stockCode": "ELECTHERM"
+        },
+        {
+            "stockCode": "ELGIEQUIP"
+        },
+        {
+            "stockCode": "ELGIRUBCO"
+        },
+        {
+            "stockCode": "ELIN"
+        },
+        {
+            "stockCode": "EMAMILTD"
+        },
+        {
+            "stockCode": "EMAMIPAP"
+        },
+        {
+            "stockCode": "EMAMIREAL"
+        },
+        {
+            "stockCode": "EMBDL"
+        },
+        {
+            "stockCode": "EMCURE"
+        },
+        {
+            "stockCode": "EMIL"
+        },
+        {
+            "stockCode": "EMKAY"
+        },
+        {
+            "stockCode": "EMMBI"
+        },
+        {
+            "stockCode": "EMSLIMITED"
+        },
+        {
+            "stockCode": "EMUDHRA"
+        },
+        {
+            "stockCode": "ENDURANCE"
+        },
+        {
+            "stockCode": "ENERGYDEV"
+        },
+        {
+            "stockCode": "ENGINERSIN"
+        },
+        {
+            "stockCode": "ENIL"
+        },
+        {
+            "stockCode": "ENTERO"
+        },
+        {
+            "stockCode": "EPACK"
+        },
+        {
+            "stockCode": "EPIGRAL"
+        },
+        {
+            "stockCode": "EPL"
+        },
+        {
+            "stockCode": "EQUIPPP"
+        },
+        {
+            "stockCode": "EQUITASBNK"
+        },
+        {
+            "stockCode": "ERIS"
+        },
+        {
+            "stockCode": "EROSMEDIA"
+        },
+        {
+            "stockCode": "ESABINDIA"
+        },
+        {
+            "stockCode": "ESAFSFB"
+        },
+        {
+            "stockCode": "ESCORTS"
+        },
+        {
+            "stockCode": "ESSARSHPNG"
+        },
+        {
+            "stockCode": "ESSENTIA"
+        },
+        {
+            "stockCode": "ESTER"
+        },
+        {
+            "stockCode": "ETHOSLTD"
+        },
+        {
+            "stockCode": "EUREKAFORB"
+        },
+        {
+            "stockCode": "EUROTEXIND"
+        },
+        {
+            "stockCode": "EVEREADY"
+        },
+        {
+            "stockCode": "EVERESTIND"
+        },
+        {
+            "stockCode": "EXCEL"
+        },
+        {
+            "stockCode": "EXCELINDUS"
+        },
+        {
+            "stockCode": "EXICOM"
+        },
+        {
+            "stockCode": "EXIDEIND"
+        },
+        {
+            "stockCode": "EXPLEOSOL"
+        },
+        {
+            "stockCode": "EXXARO"
+        },
+        {
+            "stockCode": "FACT"
+        },
+        {
+            "stockCode": "FAIRCHEMOR"
+        },
+        {
+            "stockCode": "FAZE3Q"
+        },
+        {
+            "stockCode": "FCL"
+        },
+        {
+            "stockCode": "FCSSOFT"
+        },
+        {
+            "stockCode": "FDC"
+        },
+        {
+            "stockCode": "FEDERALBNK"
+        },
+        {
+            "stockCode": "FEDFINA"
+        },
+        {
+            "stockCode": "FEL"
+        },
+        {
+            "stockCode": "FELDVR"
+        },
+        {
+            "stockCode": "FIBERWEB"
+        },
+        {
+            "stockCode": "FIEMIND"
+        },
+        {
+            "stockCode": "FILATEX"
+        },
+        {
+            "stockCode": "FILATFASH"
+        },
+        {
+            "stockCode": "FINCABLES"
+        },
+        {
+            "stockCode": "FINEORG"
+        },
+        {
+            "stockCode": "FINOPB"
+        },
+        {
+            "stockCode": "FINPIPE"
+        },
+        {
+            "stockCode": "FIRSTCRY"
+        },
+        {
+            "stockCode": "FIVESTAR"
+        },
+        {
+            "stockCode": "FLAIR"
+        },
+        {
+            "stockCode": "FLEXITUFF"
+        },
+        {
+            "stockCode": "FLFL"
+        },
+        {
+            "stockCode": "FLUOROCHEM"
+        },
+        {
+            "stockCode": "FMGOETZE"
+        },
+        {
+            "stockCode": "FMNL"
+        },
+        {
+            "stockCode": "FOCUS"
+        },
+        {
+            "stockCode": "FOODSIN"
+        },
+        {
+            "stockCode": "FORCEMOT"
+        },
+        {
+            "stockCode": "FORTIS"
+        },
+        {
+            "stockCode": "FOSECOIND"
+        },
+        {
+            "stockCode": "FSL"
+        },
+        {
+            "stockCode": "FUSION"
+        },
+        {
+            "stockCode": "GABRIEL"
+        },
+        {
+            "stockCode": "GAEL"
+        },
+        {
+            "stockCode": "GAIL"
+        },
+        {
+            "stockCode": "GALAPREC"
+        },
+        {
+            "stockCode": "GALAXYSURF"
+        },
+        {
+            "stockCode": "GALLANTT"
+        },
+        {
+            "stockCode": "GANDHAR"
+        },
+        {
+            "stockCode": "GANDHITUBE"
+        },
+        {
+            "stockCode": "GANECOS"
+        },
+        {
+            "stockCode": "GANESHBE"
+        },
+        {
+            "stockCode": "GANESHHOUC"
+        },
+        {
+            "stockCode": "GANGAFORGE"
+        },
+        {
+            "stockCode": "GANGESSECU"
+        },
+        {
+            "stockCode": "GARFIBRES"
+        },
+        {
+            "stockCode": "GARUDA"
+        },
+        {
+            "stockCode": "GATECH"
+        },
+        {
+            "stockCode": "GATECHDVR"
+        },
+        {
+            "stockCode": "GATEWAY"
+        },
+        {
+            "stockCode": "GAYAPROJ"
+        },
+        {
+            "stockCode": "GEECEE"
+        },
+        {
+            "stockCode": "GEEKAYWIRE"
+        },
+        {
+            "stockCode": "GENCON"
+        },
+        {
+            "stockCode": "GENESYS"
+        },
+        {
+            "stockCode": "GENSOL"
+        },
+        {
+            "stockCode": "GENUSPAPER"
+        },
+        {
+            "stockCode": "GENUSPOWER"
+        },
+        {
+            "stockCode": "GEOJITFSL"
+        },
+        {
+            "stockCode": "GEPIL"
+        },
+        {
+            "stockCode": "GESHIP"
+        },
+        {
+            "stockCode": "GFLLIMITED"
+        },
+        {
+            "stockCode": "GHCL"
+        },
+        {
+            "stockCode": "GHCLTEXTIL"
+        },
+        {
+            "stockCode": "GICHSGFIN"
+        },
+        {
+            "stockCode": "GICRE"
+        },
+        {
+            "stockCode": "GILLANDERS"
+        },
+        {
+            "stockCode": "GILLETTE"
+        },
+        {
+            "stockCode": "GINNIFILA"
+        },
+        {
+            "stockCode": "GIPCL"
+        },
+        {
+            "stockCode": "GKWLIMITED"
+        },
+        {
+            "stockCode": "GLAND"
+        },
+        {
+            "stockCode": "GLAXO"
+        },
+        {
+            "stockCode": "GLENMARK"
+        },
+        {
+            "stockCode": "GLFL"
+        },
+        {
+            "stockCode": "GLOBAL"
+        },
+        {
+            "stockCode": "GLOBALE"
+        },
+        {
+            "stockCode": "GLOBALVECT"
+        },
+        {
+            "stockCode": "GLOBE"
+        },
+        {
+            "stockCode": "GLOBUSSPR"
+        },
+        {
+            "stockCode": "GLOSTERLTD"
+        },
+        {
+            "stockCode": "GLS"
+        },
+        {
+            "stockCode": "GMBREW"
+        },
+        {
+            "stockCode": "GMDCLTD"
+        },
+        {
+            "stockCode": "GMMPFAUDLR"
+        },
+        {
+            "stockCode": "GMRINFRA"
+        },
+        {
+            "stockCode": "GMRP&UI"
+        },
+        {
+            "stockCode": "GNA"
+        },
+        {
+            "stockCode": "GNFC"
+        },
+        {
+            "stockCode": "GOACARBON"
+        },
+        {
+            "stockCode": "GOCLCORP"
+        },
+        {
+            "stockCode": "GOCOLORS"
+        },
+        {
+            "stockCode": "GODAVARIB"
+        },
+        {
+            "stockCode": "GODFRYPHLP"
+        },
+        {
+            "stockCode": "GODHA"
+        },
+        {
+            "stockCode": "GODIGIT"
+        },
+        {
+            "stockCode": "GODREJAGRO"
+        },
+        {
+            "stockCode": "GODREJCP"
+        },
+        {
+            "stockCode": "GODREJIND"
+        },
+        {
+            "stockCode": "GODREJPROP"
+        },
+        {
+            "stockCode": "GOENKA"
+        },
+        {
+            "stockCode": "GOKEX"
+        },
+        {
+            "stockCode": "GOKUL"
+        },
+        {
+            "stockCode": "GOKULAGRO"
+        },
+        {
+            "stockCode": "GOLDENTOBC"
+        },
+        {
+            "stockCode": "GOLDIAM"
+        },
+        {
+            "stockCode": "GOLDTECH"
+        },
+        {
+            "stockCode": "GOODLUCK"
+        },
+        {
+            "stockCode": "GOPAL"
+        },
+        {
+            "stockCode": "GOYALALUM"
+        },
+        {
+            "stockCode": "GPIL"
+        },
+        {
+            "stockCode": "GPPL"
+        },
+        {
+            "stockCode": "GPTHEALTH"
+        },
+        {
+            "stockCode": "GPTINFRA"
+        },
+        {
+            "stockCode": "GRANULES"
+        },
+        {
+            "stockCode": "GRAPHITE"
+        },
+        {
+            "stockCode": "GRASIM"
+        },
+        {
+            "stockCode": "GRAVITA"
+        },
+        {
+            "stockCode": "GREAVESCOT"
+        },
+        {
+            "stockCode": "GREENLAM"
+        },
+        {
+            "stockCode": "GREENPANEL"
+        },
+        {
+            "stockCode": "GREENPLY"
+        },
+        {
+            "stockCode": "GREENPOWER"
+        },
+        {
+            "stockCode": "GRINDWELL"
+        },
+        {
+            "stockCode": "GRINFRA"
+        },
+        {
+            "stockCode": "GRMOVER"
+        },
+        {
+            "stockCode": "GROBTEA"
+        },
+        {
+            "stockCode": "GRPLTD"
+        },
+        {
+            "stockCode": "GRSE"
+        },
+        {
+            "stockCode": "GRWRHITECH"
+        },
+        {
+            "stockCode": "GSFC"
+        },
+        {
+            "stockCode": "GSLSU"
+        },
+        {
+            "stockCode": "GSPL"
+        },
+        {
+            "stockCode": "GSS"
+        },
+        {
+            "stockCode": "GTECJAINX"
+        },
+        {
+            "stockCode": "GTL"
+        },
+        {
+            "stockCode": "GTLINFRA"
+        },
+        {
+            "stockCode": "GTPL"
+        },
+        {
+            "stockCode": "GUFICBIO"
+        },
+        {
+            "stockCode": "GUJALKALI"
+        },
+        {
+            "stockCode": "GUJAPOLLO"
+        },
+        {
+            "stockCode": "GUJGASLTD"
+        },
+        {
+            "stockCode": "GUJRAFFIA"
+        },
+        {
+            "stockCode": "GULFOILLUB"
+        },
+        {
+            "stockCode": "GULFPETRO"
+        },
+        {
+            "stockCode": "GULPOLY"
+        },
+        {
+            "stockCode": "GVKPIL"
+        },
+        {
+            "stockCode": "GVPTECH"
+        },
+        {
+            "stockCode": "GVT&D"
+        },
+        {
+            "stockCode": "HAL"
+        },
+        {
+            "stockCode": "HAPPSTMNDS"
+        },
+        {
+            "stockCode": "HAPPYFORGE"
+        },
+        {
+            "stockCode": "HARDWYN"
+        },
+        {
+            "stockCode": "HARIOMPIPE"
+        },
+        {
+            "stockCode": "HARRMALAYA"
+        },
+        {
+            "stockCode": "HARSHA"
+        },
+        {
+            "stockCode": "HATHWAY"
+        },
+        {
+            "stockCode": "HATSUN"
+        },
+        {
+            "stockCode": "HAVELLS"
+        },
+        {
+            "stockCode": "HAVISHA"
+        },
+        {
+            "stockCode": "HBLPOWER"
+        },
+        {
+            "stockCode": "HBSL"
+        },
+        {
+            "stockCode": "HCC"
+        },
+        {
+            "stockCode": "HCG"
+        },
+        {
+            "stockCode": "HCL-INSYS"
+        },
+        {
+            "stockCode": "HCLTECH"
+        },
+        {
+            "stockCode": "HDFCAMC"
+        },
+        {
+            "stockCode": "HDFCBANK"
+        },
+        {
+            "stockCode": "HDFCLIFE"
+        },
+        {
+            "stockCode": "HDIL"
+        },
+        {
+            "stockCode": "HEADSUP"
+        },
+        {
+            "stockCode": "HECPROJECT"
+        },
+        {
+            "stockCode": "HEG"
+        },
+        {
+            "stockCode": "HEIDELBERG"
+        },
+        {
+            "stockCode": "HEMIPROP"
+        },
+        {
+            "stockCode": "HERANBA"
+        },
+        {
+            "stockCode": "HERCULES"
+        },
+        {
+            "stockCode": "HERITGFOOD"
+        },
+        {
+            "stockCode": "HEROMOTOCO"
+        },
+        {
+            "stockCode": "HESTERBIO"
+        },
+        {
+            "stockCode": "HEUBACHIND"
+        },
+        {
+            "stockCode": "HEXATRADEX"
+        },
+        {
+            "stockCode": "HFCL"
+        },
+        {
+            "stockCode": "HGINFRA"
+        },
+        {
+            "stockCode": "HGS"
+        },
+        {
+            "stockCode": "HIKAL"
+        },
+        {
+            "stockCode": "HIL"
+        },
+        {
+            "stockCode": "HILTON"
+        },
+        {
+            "stockCode": "HIMATSEIDE"
+        },
+        {
+            "stockCode": "HINDALCO"
+        },
+        {
+            "stockCode": "HINDCOMPOS"
+        },
+        {
+            "stockCode": "HINDCON"
+        },
+        {
+            "stockCode": "HINDCOPPER"
+        },
+        {
+            "stockCode": "HINDMOTORS"
+        },
+        {
+            "stockCode": "HINDNATGLS"
+        },
+        {
+            "stockCode": "HINDOILEXP"
+        },
+        {
+            "stockCode": "HINDPETRO"
+        },
+        {
+            "stockCode": "HINDUNILVR"
+        },
+        {
+            "stockCode": "HINDWAREAP"
+        },
+        {
+            "stockCode": "HINDZINC"
+        },
+        {
+            "stockCode": "HIRECT"
+        },
+        {
+            "stockCode": "HISARMETAL"
+        },
+        {
+            "stockCode": "HITECH"
+        },
+        {
+            "stockCode": "HITECHCORP"
+        },
+        {
+            "stockCode": "HITECHGEAR"
+        },
+        {
+            "stockCode": "HLEGLAS"
+        },
+        {
+            "stockCode": "HLVLTD"
+        },
+        {
+            "stockCode": "HMAAGRO"
+        },
+        {
+            "stockCode": "HMT"
+        },
+        {
+            "stockCode": "HMVL"
+        },
+        {
+            "stockCode": "HNDFDS"
+        },
+        {
+            "stockCode": "HOMEFIRST"
+        },
+        {
+            "stockCode": "HONASA"
+        },
+        {
+            "stockCode": "HONAUT"
+        },
+        {
+            "stockCode": "HONDAPOWER"
+        },
+        {
+            "stockCode": "HOVS"
+        },
+        {
+            "stockCode": "HPAL"
+        },
+        {
+            "stockCode": "HPIL"
+        },
+        {
+            "stockCode": "HPL"
+        },
+        {
+            "stockCode": "HSCL"
+        },
+        {
+            "stockCode": "HTMEDIA"
+        },
+        {
+            "stockCode": "HUBTOWN"
+        },
+        {
+            "stockCode": "HUDCO"
+        },
+        {
+            "stockCode": "HUHTAMAKI"
+        },
+        {
+            "stockCode": "HYBRIDFIN"
+        },
+        {
+            "stockCode": "HYUNDAI"
+        },
+        {
+            "stockCode": "ICDSLTD"
+        },
+        {
+            "stockCode": "ICEMAKE"
+        },
+        {
+            "stockCode": "ICICIBANK"
+        },
+        {
+            "stockCode": "ICICIGI"
+        },
+        {
+            "stockCode": "ICICIPRULI"
+        },
+        {
+            "stockCode": "ICIL"
+        },
+        {
+            "stockCode": "ICRA"
+        },
+        {
+            "stockCode": "IDBI"
+        },
+        {
+            "stockCode": "IDEA"
+        },
+        {
+            "stockCode": "IDEAFORGE"
+        },
+        {
+            "stockCode": "IDFCFIRSTB"
+        },
+        {
+            "stockCode": "IEL"
+        },
+        {
+            "stockCode": "IEX"
+        },
+        {
+            "stockCode": "IFBAGRO"
+        },
+        {
+            "stockCode": "IFBIND"
+        },
+        {
+            "stockCode": "IFCI"
+        },
+        {
+            "stockCode": "IFGLEXPOR"
+        },
+        {
+            "stockCode": "IGARASHI"
+        },
+        {
+            "stockCode": "IGL"
+        },
+        {
+            "stockCode": "IGPL"
+        },
+        {
+            "stockCode": "IIFL"
+        },
+        {
+            "stockCode": "IIFLSEC"
+        },
+        {
+            "stockCode": "IITL"
+        },
+        {
+            "stockCode": "IKIO"
+        },
+        {
+            "stockCode": "IL&FSENGG"
+        },
+        {
+            "stockCode": "IL&FSTRANS"
+        },
+        {
+            "stockCode": "IMAGICAA"
+        },
+        {
+            "stockCode": "IMFA"
+        },
+        {
+            "stockCode": "IMPAL"
+        },
+        {
+            "stockCode": "IMPEXFERRO"
+        },
+        {
+            "stockCode": "INCREDIBLE"
+        },
+        {
+            "stockCode": "INDBANK"
+        },
+        {
+            "stockCode": "INDGN"
+        },
+        {
+            "stockCode": "INDHOTEL"
+        },
+        {
+            "stockCode": "INDIACEM"
+        },
+        {
+            "stockCode": "INDIAGLYCO"
+        },
+        {
+            "stockCode": "INDIAMART"
+        },
+        {
+            "stockCode": "INDIANB"
+        },
+        {
+            "stockCode": "INDIANCARD"
+        },
+        {
+            "stockCode": "INDIANHUME"
+        },
+        {
+            "stockCode": "INDIASHLTR"
+        },
+        {
+            "stockCode": "INDIGO"
+        },
+        {
+            "stockCode": "INDIGOPNTS"
+        },
+        {
+            "stockCode": "INDNIPPON"
+        },
+        {
+            "stockCode": "INDOAMIN"
+        },
+        {
+            "stockCode": "INDOBORAX"
+        },
+        {
+            "stockCode": "INDOCO"
+        },
+        {
+            "stockCode": "INDORAMA"
+        },
+        {
+            "stockCode": "INDOSTAR"
+        },
+        {
+            "stockCode": "INDOTECH"
+        },
+        {
+            "stockCode": "INDOTHAI"
+        },
+        {
+            "stockCode": "INDOUS"
+        },
+        {
+            "stockCode": "INDOWIND"
+        },
+        {
+            "stockCode": "INDRAMEDCO"
+        },
+        {
+            "stockCode": "INDSWFTLAB"
+        },
+        {
+            "stockCode": "INDSWFTLTD"
+        },
+        {
+            "stockCode": "INDTERRAIN"
+        },
+        {
+            "stockCode": "INDUSINDBK"
+        },
+        {
+            "stockCode": "INDUSTOWER"
+        },
+        {
+            "stockCode": "INFIBEAM"
+        },
+        {
+            "stockCode": "INFOBEAN"
+        },
+        {
+            "stockCode": "INFOMEDIA"
+        },
+        {
+            "stockCode": "INFY"
+        },
+        {
+            "stockCode": "INGERRAND"
+        },
+        {
+            "stockCode": "INNOVACAP"
+        },
+        {
+            "stockCode": "INOXGREEN"
+        },
+        {
+            "stockCode": "INOXINDIA"
+        },
+        {
+            "stockCode": "INOXWIND"
+        },
+        {
+            "stockCode": "INSECTICID"
+        },
+        {
+            "stockCode": "INSPIRISYS"
+        },
+        {
+            "stockCode": "INTELLECT"
+        },
+        {
+            "stockCode": "INTENTECH"
+        },
+        {
+            "stockCode": "INTERARCH"
+        },
+        {
+            "stockCode": "INTLCONV"
+        },
+        {
+            "stockCode": "INVENTURE"
+        },
+        {
+            "stockCode": "IOB"
+        },
+        {
+            "stockCode": "IOC"
+        },
+        {
+            "stockCode": "IOLCP"
+        },
+        {
+            "stockCode": "IONEXCHANG"
+        },
+        {
+            "stockCode": "IPCALAB"
+        },
+        {
+            "stockCode": "IPL"
+        },
+        {
+            "stockCode": "IRB"
+        },
+        {
+            "stockCode": "IRCON"
+        },
+        {
+            "stockCode": "IRCTC"
+        },
+        {
+            "stockCode": "IREDA"
+        },
+        {
+            "stockCode": "IRFC"
+        },
+        {
+            "stockCode": "IRIS"
+        },
+        {
+            "stockCode": "IRISDOREME"
+        },
+        {
+            "stockCode": "IRMENERGY"
+        },
+        {
+            "stockCode": "ISEC"
+        },
+        {
+            "stockCode": "ISFT"
+        },
+        {
+            "stockCode": "ISGEC"
+        },
+        {
+            "stockCode": "ITC"
+        },
+        {
+            "stockCode": "ITDC"
+        },
+        {
+            "stockCode": "ITDCEM"
+        },
+        {
+            "stockCode": "ITI"
+        },
+        {
+            "stockCode": "IVC"
+        },
+        {
+            "stockCode": "IVP"
+        },
+        {
+            "stockCode": "IWEL"
+        },
+        {
+            "stockCode": "IXIGO"
+        },
+        {
+            "stockCode": "IZMO"
+        },
+        {
+            "stockCode": "J&KBANK"
+        },
+        {
+            "stockCode": "JAGRAN"
+        },
+        {
+            "stockCode": "JAGSNPHARM"
+        },
+        {
+            "stockCode": "JAIBALAJI"
+        },
+        {
+            "stockCode": "JAICORPLTD"
+        },
+        {
+            "stockCode": "JAIPURKURT"
+        },
+        {
+            "stockCode": "JAMNAAUTO"
+        },
+        {
+            "stockCode": "JASH"
+        },
+        {
+            "stockCode": "JAYAGROGN"
+        },
+        {
+            "stockCode": "JAYBARMARU"
+        },
+        {
+            "stockCode": "JAYNECOIND"
+        },
+        {
+            "stockCode": "JAYSREETEA"
+        },
+        {
+            "stockCode": "JBCHEPHARM"
+        },
+        {
+            "stockCode": "JBMA"
+        },
+        {
+            "stockCode": "JCHAC"
+        },
+        {
+            "stockCode": "JETFREIGHT"
+        },
+        {
+            "stockCode": "JGCHEM"
+        },
+        {
+            "stockCode": "JHS"
+        },
+        {
+            "stockCode": "JINDALPHOT"
+        },
+        {
+            "stockCode": "JINDALPOLY"
+        },
+        {
+            "stockCode": "JINDALSAW"
+        },
+        {
+            "stockCode": "JINDALSTEL"
+        },
+        {
+            "stockCode": "JINDRILL"
+        },
+        {
+            "stockCode": "JINDWORLD"
+        },
+        {
+            "stockCode": "JIOFIN"
+        },
+        {
+            "stockCode": "JISLDVREQS"
+        },
+        {
+            "stockCode": "JISLJALEQS"
+        },
+        {
+            "stockCode": "JITFINFRA"
+        },
+        {
+            "stockCode": "JKCEMENT"
+        },
+        {
+            "stockCode": "JKIL"
+        },
+        {
+            "stockCode": "JKLAKSHMI"
+        },
+        {
+            "stockCode": "JKPAPER"
+        },
+        {
+            "stockCode": "JKTYRE"
+        },
+        {
+            "stockCode": "JLHL"
+        },
+        {
+            "stockCode": "JMA"
+        },
+        {
+            "stockCode": "JMFINANCIL"
+        },
+        {
+            "stockCode": "JNKINDIA"
+        },
+        {
+            "stockCode": "JOCIL"
+        },
+        {
+            "stockCode": "JPOLYINVST"
+        },
+        {
+            "stockCode": "JPPOWER"
+        },
+        {
+            "stockCode": "JSFB"
+        },
+        {
+            "stockCode": "JSL"
+        },
+        {
+            "stockCode": "JSWENERGY"
+        },
+        {
+            "stockCode": "JSWHL"
+        },
+        {
+            "stockCode": "JSWINFRA"
+        },
+        {
+            "stockCode": "JSWSTEEL"
+        },
+        {
+            "stockCode": "JTEKTINDIA"
+        },
+        {
+            "stockCode": "JTLIND"
+        },
+        {
+            "stockCode": "JUBLFOOD"
+        },
+        {
+            "stockCode": "JUBLINGREA"
+        },
+        {
+            "stockCode": "JUBLPHARMA"
+        },
+        {
+            "stockCode": "JUNIPER"
+        },
+        {
+            "stockCode": "JUSTDIAL"
+        },
+        {
+            "stockCode": "JWL"
+        },
+        {
+            "stockCode": "JYOTHYLAB"
+        },
+        {
+            "stockCode": "JYOTICNC"
+        },
+        {
+            "stockCode": "JYOTISTRUC"
+        },
+        {
+            "stockCode": "KABRAEXTRU"
+        },
+        {
+            "stockCode": "KAJARIACER"
+        },
+        {
+            "stockCode": "KAKATCEM"
+        },
+        {
+            "stockCode": "KALAMANDIR"
+        },
+        {
+            "stockCode": "KALYANI"
+        },
+        {
+            "stockCode": "KALYANIFRG"
+        },
+        {
+            "stockCode": "KALYANKJIL"
+        },
+        {
+            "stockCode": "KAMATHOTEL"
+        },
+        {
+            "stockCode": "KAMDHENU"
+        },
+        {
+            "stockCode": "KAMOPAINTS"
+        },
+        {
+            "stockCode": "KANANIIND"
+        },
+        {
+            "stockCode": "KANORICHEM"
+        },
+        {
+            "stockCode": "KANPRPLA"
+        },
+        {
+            "stockCode": "KANSAINER"
+        },
+        {
+            "stockCode": "KAPSTON"
+        },
+        {
+            "stockCode": "KARMAENG"
+        },
+        {
+            "stockCode": "KARURVYSYA"
+        },
+        {
+            "stockCode": "KAUSHALYA"
+        },
+        {
+            "stockCode": "KAVVERITEL"
+        },
+        {
+            "stockCode": "KAYA"
+        },
+        {
+            "stockCode": "KAYNES"
+        },
+        {
+            "stockCode": "KBCGLOBAL"
+        },
+        {
+            "stockCode": "KCP"
+        },
+        {
+            "stockCode": "KCPSUGIND"
+        },
+        {
+            "stockCode": "KDDL"
+        },
+        {
+            "stockCode": "KEC"
+        },
+        {
+            "stockCode": "KECL"
+        },
+        {
+            "stockCode": "KEEPLEARN"
+        },
+        {
+            "stockCode": "KEI"
+        },
+        {
+            "stockCode": "KELLTONTEC"
+        },
+        {
+            "stockCode": "KERNEX"
+        },
+        {
+            "stockCode": "KESORAMIND"
+        },
+        {
+            "stockCode": "KEYFINSERV"
+        },
+        {
+            "stockCode": "KFINTECH"
+        },
+        {
+            "stockCode": "KHADIM"
+        },
+        {
+            "stockCode": "KHAICHEM"
+        },
+        {
+            "stockCode": "KHAITANLTD"
+        },
+        {
+            "stockCode": "KHANDSE"
+        },
+        {
+            "stockCode": "KICL"
+        },
+        {
+            "stockCode": "KILITCH"
+        },
+        {
+            "stockCode": "KIMS"
+        },
+        {
+            "stockCode": "KINGFA"
+        },
+        {
+            "stockCode": "KIOCL"
+        },
+        {
+            "stockCode": "KIRIINDUS"
+        },
+        {
+            "stockCode": "KIRLOSBROS"
+        },
+        {
+            "stockCode": "KIRLOSENG"
+        },
+        {
+            "stockCode": "KIRLOSIND"
+        },
+        {
+            "stockCode": "KIRLPNU"
+        },
+        {
+            "stockCode": "KITEX"
+        },
+        {
+            "stockCode": "KKCL"
+        },
+        {
+            "stockCode": "KMEW"
+        },
+        {
+            "stockCode": "KMSUGAR"
+        },
+        {
+            "stockCode": "KNRCON"
+        },
+        {
+            "stockCode": "KOHINOOR"
+        },
+        {
+            "stockCode": "KOKUYOCMLN"
+        },
+        {
+            "stockCode": "KOLTEPATIL"
+        },
+        {
+            "stockCode": "KOPRAN"
+        },
+        {
+            "stockCode": "KOTAKBANK"
+        },
+        {
+            "stockCode": "KOTARISUG"
+        },
+        {
+            "stockCode": "KOTHARIPET"
+        },
+        {
+            "stockCode": "KOTHARIPRO"
+        },
+        {
+            "stockCode": "KPEL"
+        },
+        {
+            "stockCode": "KPIGREEN"
+        },
+        {
+            "stockCode": "KPIL"
+        },
+        {
+            "stockCode": "KPITTECH"
+        },
+        {
+            "stockCode": "KPRMILL"
+        },
+        {
+            "stockCode": "KRBL"
+        },
+        {
+            "stockCode": "KREBSBIO"
+        },
+        {
+            "stockCode": "KRIDHANINF"
+        },
+        {
+            "stockCode": "KRISHANA"
+        },
+        {
+            "stockCode": "KRITI"
+        },
+        {
+            "stockCode": "KRITIKA"
+        },
+        {
+            "stockCode": "KRITINUT"
+        },
+        {
+            "stockCode": "KRN"
+        },
+        {
+            "stockCode": "KRONOX"
+        },
+        {
+            "stockCode": "KROSS"
+        },
+        {
+            "stockCode": "KRSNAA"
+        },
+        {
+            "stockCode": "KRYSTAL"
+        },
+        {
+            "stockCode": "KSB"
+        },
+        {
+            "stockCode": "KSCL"
+        },
+        {
+            "stockCode": "KSHITIJPOL"
+        },
+        {
+            "stockCode": "KSL"
+        },
+        {
+            "stockCode": "KSOLVES"
+        },
+        {
+            "stockCode": "KTKBANK"
+        },
+        {
+            "stockCode": "KUANTUM"
+        },
+        {
+            "stockCode": "LAGNAM"
+        },
+        {
+            "stockCode": "LAKPRE"
+        },
+        {
+            "stockCode": "LAL"
+        },
+        {
+            "stockCode": "LALPATHLAB"
+        },
+        {
+            "stockCode": "LAMBODHARA"
+        },
+        {
+            "stockCode": "LANCORHOL"
+        },
+        {
+            "stockCode": "LANDMARK"
+        },
+        {
+            "stockCode": "LAOPALA"
+        },
+        {
+            "stockCode": "LASA"
+        },
+        {
+            "stockCode": "LATENTVIEW"
+        },
+        {
+            "stockCode": "LATTEYS"
+        },
+        {
+            "stockCode": "LAURUSLABS"
+        },
+        {
+            "stockCode": "LAXMICOT"
+        },
+        {
+            "stockCode": "LCCINFOTEC"
+        },
+        {
+            "stockCode": "LEMONTREE"
+        },
+        {
+            "stockCode": "LEXUS"
+        },
+        {
+            "stockCode": "LFIC"
+        },
+        {
+            "stockCode": "LGBBROSLTD"
+        },
+        {
+            "stockCode": "LGHL"
+        },
+        {
+            "stockCode": "LIBAS"
+        },
+        {
+            "stockCode": "LIBERTSHOE"
+        },
+        {
+            "stockCode": "LICHSGFIN"
+        },
+        {
+            "stockCode": "LICI"
+        },
+        {
+            "stockCode": "LIKHITHA"
+        },
+        {
+            "stockCode": "LINC"
+        },
+        {
+            "stockCode": "LINCOLN"
+        },
+        {
+            "stockCode": "LINDEINDIA"
+        },
+        {
+            "stockCode": "LLOYDSENGG"
+        },
+        {
+            "stockCode": "LLOYDSENT"
+        },
+        {
+            "stockCode": "LLOYDSME"
+        },
+        {
+            "stockCode": "LMW"
+        },
+        {
+            "stockCode": "LODHA"
+        },
+        {
+            "stockCode": "LOKESHMACH"
+        },
+        {
+            "stockCode": "LORDSCHLO"
+        },
+        {
+            "stockCode": "LOTUSEYE"
+        },
+        {
+            "stockCode": "LOVABLE"
+        },
+        {
+            "stockCode": "LOYALTEX"
+        },
+        {
+            "stockCode": "LPDC"
+        },
+        {
+            "stockCode": "LT"
+        },
+        {
+            "stockCode": "LTF"
+        },
+        {
+            "stockCode": "LTFOODS"
+        },
+        {
+            "stockCode": "LTIM"
+        },
+        {
+            "stockCode": "LTTS"
+        },
+        {
+            "stockCode": "LUMAXIND"
+        },
+        {
+            "stockCode": "LUMAXTECH"
+        },
+        {
+            "stockCode": "LUPIN"
+        },
+        {
+            "stockCode": "LUXIND"
+        },
+        {
+            "stockCode": "LXCHEM"
+        },
+        {
+            "stockCode": "LYKALABS"
+        },
+        {
+            "stockCode": "LYPSAGEMS"
+        },
+        {
+            "stockCode": "M&M"
+        },
+        {
+            "stockCode": "M&MFIN"
+        },
+        {
+            "stockCode": "MAANALU"
+        },
+        {
+            "stockCode": "MACPOWER"
+        },
+        {
+            "stockCode": "MADHAV"
+        },
+        {
+            "stockCode": "MADHUCON"
+        },
+        {
+            "stockCode": "MADRASFERT"
+        },
+        {
+            "stockCode": "MAGADSUGAR"
+        },
+        {
+            "stockCode": "MAGNUM"
+        },
+        {
+            "stockCode": "MAHABANK"
+        },
+        {
+            "stockCode": "MAHAPEXLTD"
+        },
+        {
+            "stockCode": "MAHASTEEL"
+        },
+        {
+            "stockCode": "MAHEPC"
+        },
+        {
+            "stockCode": "MAHESHWARI"
+        },
+        {
+            "stockCode": "MAHLIFE"
+        },
+        {
+            "stockCode": "MAHLOG"
+        },
+        {
+            "stockCode": "MAHSCOOTER"
+        },
+        {
+            "stockCode": "MAHSEAMLES"
+        },
+        {
+            "stockCode": "MAITHANALL"
+        },
+        {
+            "stockCode": "MALLCOM"
+        },
+        {
+            "stockCode": "MALUPAPER"
+        },
+        {
+            "stockCode": "MANAKALUCO"
+        },
+        {
+            "stockCode": "MANAKCOAT"
+        },
+        {
+            "stockCode": "MANAKSIA"
+        },
+        {
+            "stockCode": "MANAKSTEEL"
+        },
+        {
+            "stockCode": "MANALIPETC"
+        },
+        {
+            "stockCode": "MANAPPURAM"
+        },
+        {
+            "stockCode": "MANBA"
+        },
+        {
+            "stockCode": "MANCREDIT"
+        },
+        {
+            "stockCode": "MANGALAM"
+        },
+        {
+            "stockCode": "MANGCHEFER"
+        },
+        {
+            "stockCode": "MANGLMCEM"
+        },
+        {
+            "stockCode": "MANINDS"
+        },
+        {
+            "stockCode": "MANINFRA"
+        },
+        {
+            "stockCode": "MANKIND"
+        },
+        {
+            "stockCode": "MANOMAY"
+        },
+        {
+            "stockCode": "MANORAMA"
+        },
+        {
+            "stockCode": "MANORG"
+        },
+        {
+            "stockCode": "MANUGRAPH"
+        },
+        {
+            "stockCode": "MANYAVAR"
+        },
+        {
+            "stockCode": "MAPMYINDIA"
+        },
+        {
+            "stockCode": "MARALOVER"
+        },
+        {
+            "stockCode": "MARATHON"
+        },
+        {
+            "stockCode": "MARICO"
+        },
+        {
+            "stockCode": "MARINE"
+        },
+        {
+            "stockCode": "MARKSANS"
+        },
+        {
+            "stockCode": "MARSHALL"
+        },
+        {
+            "stockCode": "MARUTI"
+        },
+        {
+            "stockCode": "MASFIN"
+        },
+        {
+            "stockCode": "MASKINVEST"
+        },
+        {
+            "stockCode": "MASTEK"
+        },
+        {
+            "stockCode": "MASTERTR"
+        },
+        {
+            "stockCode": "MATRIMONY"
+        },
+        {
+            "stockCode": "MAWANASUG"
+        },
+        {
+            "stockCode": "MAXESTATES"
+        },
+        {
+            "stockCode": "MAXHEALTH"
+        },
+        {
+            "stockCode": "MAXIND"
+        },
+        {
+            "stockCode": "MAYURUNIQ"
+        },
+        {
+            "stockCode": "MAZDA"
+        },
+        {
+            "stockCode": "MAZDOCK"
+        },
+        {
+            "stockCode": "MBAPL"
+        },
+        {
+            "stockCode": "MBECL"
+        },
+        {
+            "stockCode": "MBLINFRA"
+        },
+        {
+            "stockCode": "MCL"
+        },
+        {
+            "stockCode": "MCLEODRUSS"
+        },
+        {
+            "stockCode": "MCX"
+        },
+        {
+            "stockCode": "MEDANTA"
+        },
+        {
+            "stockCode": "MEDIASSIST"
+        },
+        {
+            "stockCode": "MEDICAMEQ"
+        },
+        {
+            "stockCode": "MEDICO"
+        },
+        {
+            "stockCode": "MEDPLUS"
+        },
+        {
+            "stockCode": "MEGASOFT"
+        },
+        {
+            "stockCode": "MEGASTAR"
+        },
+        {
+            "stockCode": "MENONBE"
+        },
+        {
+            "stockCode": "METROBRAND"
+        },
+        {
+            "stockCode": "METROPOLIS"
+        },
+        {
+            "stockCode": "MFML"
+        },
+        {
+            "stockCode": "MFSL"
+        },
+        {
+            "stockCode": "MGEL"
+        },
+        {
+            "stockCode": "MGL"
+        },
+        {
+            "stockCode": "MHLXMIRU"
+        },
+        {
+            "stockCode": "MHRIL"
+        },
+        {
+            "stockCode": "MICEL"
+        },
+        {
+            "stockCode": "MIDHANI"
+        },
+        {
+            "stockCode": "MINDACORP"
+        },
+        {
+            "stockCode": "MINDTECK"
+        },
+        {
+            "stockCode": "MIRCELECTR"
+        },
+        {
+            "stockCode": "MIRZAINT"
+        },
+        {
+            "stockCode": "MITCON"
+        },
+        {
+            "stockCode": "MITTAL"
+        },
+        {
+            "stockCode": "MKPL"
+        },
+        {
+            "stockCode": "MMFL"
+        },
+        {
+            "stockCode": "MMP"
+        },
+        {
+            "stockCode": "MMTC"
+        },
+        {
+            "stockCode": "MODIRUBBER"
+        },
+        {
+            "stockCode": "MODISONLTD"
+        },
+        {
+            "stockCode": "MODTHREAD"
+        },
+        {
+            "stockCode": "MOHITIND"
+        },
+        {
+            "stockCode": "MOIL"
+        },
+        {
+            "stockCode": "MOKSH"
+        },
+        {
+            "stockCode": "MOL"
+        },
+        {
+            "stockCode": "MOLDTECH"
+        },
+        {
+            "stockCode": "MOLDTKPAC"
+        },
+        {
+            "stockCode": "MONARCH"
+        },
+        {
+            "stockCode": "MONTECARLO"
+        },
+        {
+            "stockCode": "MORARJEE"
+        },
+        {
+            "stockCode": "MOREPENLAB"
+        },
+        {
+            "stockCode": "MOTHERSON"
+        },
+        {
+            "stockCode": "MOTILALOFS"
+        },
+        {
+            "stockCode": "MOTISONS"
+        },
+        {
+            "stockCode": "MOTOGENFIN"
+        },
+        {
+            "stockCode": "MPHASIS"
+        },
+        {
+            "stockCode": "MPSLTD"
+        },
+        {
+            "stockCode": "MRF"
+        },
+        {
+            "stockCode": "MRO-TEK"
+        },
+        {
+            "stockCode": "MRPL"
+        },
+        {
+            "stockCode": "MSPL"
+        },
+        {
+            "stockCode": "MSTCLTD"
+        },
+        {
+            "stockCode": "MSUMI"
+        },
+        {
+            "stockCode": "MTARTECH"
+        },
+        {
+            "stockCode": "MTNL"
+        },
+        {
+            "stockCode": "MUFIN"
+        },
+        {
+            "stockCode": "MUFTI"
+        },
+        {
+            "stockCode": "MUKANDLTD"
+        },
+        {
+            "stockCode": "MUKKA"
+        },
+        {
+            "stockCode": "MUKTAARTS"
+        },
+        {
+            "stockCode": "MUNJALAU"
+        },
+        {
+            "stockCode": "MUNJALSHOW"
+        },
+        {
+            "stockCode": "MURUDCERA"
+        },
+        {
+            "stockCode": "MUTHOOTCAP"
+        },
+        {
+            "stockCode": "MUTHOOTFIN"
+        },
+        {
+            "stockCode": "MUTHOOTMF"
+        },
+        {
+            "stockCode": "MVGJL"
+        },
+        {
+            "stockCode": "NACLIND"
+        },
+        {
+            "stockCode": "NAGAFERT"
+        },
+        {
+            "stockCode": "NAGREEKCAP"
+        },
+        {
+            "stockCode": "NAGREEKEXP"
+        },
+        {
+            "stockCode": "NAHARCAP"
+        },
+        {
+            "stockCode": "NAHARINDUS"
+        },
+        {
+            "stockCode": "NAHARPOLY"
+        },
+        {
+            "stockCode": "NAHARSPING"
+        },
+        {
+            "stockCode": "NAM-INDIA"
+        },
+        {
+            "stockCode": "NARMADA"
+        },
+        {
+            "stockCode": "NATCOPHARM"
+        },
+        {
+            "stockCode": "NATHBIOGEN"
+        },
+        {
+            "stockCode": "NATIONALUM"
+        },
+        {
+            "stockCode": "NAUKRI"
+        },
+        {
+            "stockCode": "NAVA"
+        },
+        {
+            "stockCode": "NAVINFLUOR"
+        },
+        {
+            "stockCode": "NAVKARCORP"
+        },
+        {
+            "stockCode": "NAVNETEDUL"
+        },
+        {
+            "stockCode": "NAZARA"
+        },
+        {
+            "stockCode": "NBCC"
+        },
+        {
+            "stockCode": "NBIFIN"
+        },
+        {
+            "stockCode": "NCC"
+        },
+        {
+            "stockCode": "NCLIND"
+        },
+        {
+            "stockCode": "NDGL"
+        },
+        {
+            "stockCode": "NDL"
+        },
+        {
+            "stockCode": "NDLVENTURE"
+        },
+        {
+            "stockCode": "NDRAUTO"
+        },
+        {
+            "stockCode": "NDTV"
+        },
+        {
+            "stockCode": "NECCLTD"
+        },
+        {
+            "stockCode": "NECLIFE"
+        },
+        {
+            "stockCode": "NELCAST"
+        },
+        {
+            "stockCode": "NELCO"
+        },
+        {
+            "stockCode": "NEOGEN"
+        },
+        {
+            "stockCode": "NESCO"
+        },
+        {
+            "stockCode": "NESTLEIND"
+        },
+        {
+            "stockCode": "NETWEB"
+        },
+        {
+            "stockCode": "NETWORK18"
+        },
+        {
+            "stockCode": "NEULANDLAB"
+        },
+        {
+            "stockCode": "NEWGEN"
+        },
+        {
+            "stockCode": "NEXTMEDIA"
+        },
+        {
+            "stockCode": "NFL"
+        },
+        {
+            "stockCode": "NGIL"
+        },
+        {
+            "stockCode": "NGLFINE"
+        },
+        {
+            "stockCode": "NH"
+        },
+        {
+            "stockCode": "NHPC"
+        },
+        {
+            "stockCode": "NIACL"
+        },
+        {
+            "stockCode": "NIBL"
+        },
+        {
+            "stockCode": "NIITLTD"
+        },
+        {
+            "stockCode": "NIITMTS"
+        },
+        {
+            "stockCode": "NILAINFRA"
+        },
+        {
+            "stockCode": "NILASPACES"
+        },
+        {
+            "stockCode": "NILKAMAL"
+        },
+        {
+            "stockCode": "NINSYS"
+        },
+        {
+            "stockCode": "NIPPOBATRY"
+        },
+        {
+            "stockCode": "NIRAJ"
+        },
+        {
+            "stockCode": "NIRAJISPAT"
+        },
+        {
+            "stockCode": "NITCO"
+        },
+        {
+            "stockCode": "NITINSPIN"
+        },
+        {
+            "stockCode": "NITIRAJ"
+        },
+        {
+            "stockCode": "NIVABUPA"
+        },
+        {
+            "stockCode": "NKIND"
+        },
+        {
+            "stockCode": "NLCINDIA"
+        },
+        {
+            "stockCode": "NMDC"
+        },
+        {
+            "stockCode": "NOCIL"
+        },
+        {
+            "stockCode": "NOIDATOLL"
+        },
+        {
+            "stockCode": "NORBTEAEXP"
+        },
+        {
+            "stockCode": "NORTHARC"
+        },
+        {
+            "stockCode": "NOVAAGRI"
+        },
+        {
+            "stockCode": "NRAIL"
+        },
+        {
+            "stockCode": "NRBBEARING"
+        },
+        {
+            "stockCode": "NRL"
+        },
+        {
+            "stockCode": "NSIL"
+        },
+        {
+            "stockCode": "NSLNISP"
+        },
+        {
+            "stockCode": "NTPC"
+        },
+        {
+            "stockCode": "NUCLEUS"
+        },
+        {
+            "stockCode": "NURECA"
+        },
+        {
+            "stockCode": "NUVAMA"
+        },
+        {
+            "stockCode": "NUVOCO"
+        },
+        {
+            "stockCode": "NYKAA"
+        },
+        {
+            "stockCode": "OAL"
+        },
+        {
+            "stockCode": "OBCL"
+        },
+        {
+            "stockCode": "OBEROIRLTY"
+        },
+        {
+            "stockCode": "OCCL"
+        },
+        {
+            "stockCode": "OCCLLTD"
+        },
+        {
+            "stockCode": "OFSS"
+        },
+        {
+            "stockCode": "OIL"
+        },
+        {
+            "stockCode": "OILCOUNTUB"
+        },
+        {
+            "stockCode": "OLAELEC"
+        },
+        {
+            "stockCode": "OLECTRA"
+        },
+        {
+            "stockCode": "OMAXAUTO"
+        },
+        {
+            "stockCode": "OMAXE"
+        },
+        {
+            "stockCode": "OMINFRAL"
+        },
+        {
+            "stockCode": "ONELIFECAP"
+        },
+        {
+            "stockCode": "ONEPOINT"
+        },
+        {
+            "stockCode": "ONGC"
+        },
+        {
+            "stockCode": "ONMOBILE"
+        },
+        {
+            "stockCode": "ONWARDTEC"
+        },
+        {
+            "stockCode": "OPTIEMUS"
+        },
+        {
+            "stockCode": "ORBTEXP"
+        },
+        {
+            "stockCode": "ORCHPHARMA"
+        },
+        {
+            "stockCode": "ORICONENT"
+        },
+        {
+            "stockCode": "ORIENTALTL"
+        },
+        {
+            "stockCode": "ORIENTBELL"
+        },
+        {
+            "stockCode": "ORIENTCEM"
+        },
+        {
+            "stockCode": "ORIENTCER"
+        },
+        {
+            "stockCode": "ORIENTELEC"
+        },
+        {
+            "stockCode": "ORIENTHOT"
+        },
+        {
+            "stockCode": "ORIENTLTD"
+        },
+        {
+            "stockCode": "ORIENTPPR"
+        },
+        {
+            "stockCode": "ORIENTTECH"
+        },
+        {
+            "stockCode": "ORISSAMINE"
+        },
+        {
+            "stockCode": "ORTINGLOBE"
+        },
+        {
+            "stockCode": "OSIAHYPER"
+        },
+        {
+            "stockCode": "OSWALAGRO"
+        },
+        {
+            "stockCode": "OSWALGREEN"
+        },
+        {
+            "stockCode": "OSWALSEEDS"
+        },
+        {
+            "stockCode": "PAGEIND"
+        },
+        {
+            "stockCode": "PAISALO"
+        },
+        {
+            "stockCode": "PAKKA"
+        },
+        {
+            "stockCode": "PALASHSECU"
+        },
+        {
+            "stockCode": "PALREDTEC"
+        },
+        {
+            "stockCode": "PANACEABIO"
+        },
+        {
+            "stockCode": "PANACHE"
+        },
+        {
+            "stockCode": "PANAMAPET"
+        },
+        {
+            "stockCode": "PANSARI"
+        },
+        {
+            "stockCode": "PAR"
+        },
+        {
+            "stockCode": "PARACABLES"
+        },
+        {
+            "stockCode": "PARADEEP"
+        },
+        {
+            "stockCode": "PARAGMILK"
+        },
+        {
+            "stockCode": "PARAS"
+        },
+        {
+            "stockCode": "PARASPETRO"
+        },
+        {
+            "stockCode": "PARKHOTELS"
+        },
+        {
+            "stockCode": "PARSVNATH"
+        },
+        {
+            "stockCode": "PASUPTAC"
+        },
+        {
+            "stockCode": "PATANJALI"
+        },
+        {
+            "stockCode": "PATELENG"
+        },
+        {
+            "stockCode": "PATINTLOG"
+        },
+        {
+            "stockCode": "PAVNAIND"
+        },
+        {
+            "stockCode": "PAYTM"
+        },
+        {
+            "stockCode": "PCBL"
+        },
+        {
+            "stockCode": "PCJEWELLER"
+        },
+        {
+            "stockCode": "PDMJEPAPER"
+        },
+        {
+            "stockCode": "PDSL"
+        },
+        {
+            "stockCode": "PEARLPOLY"
+        },
+        {
+            "stockCode": "PEL"
+        },
+        {
+            "stockCode": "PENIND"
+        },
+        {
+            "stockCode": "PENINLAND"
+        },
+        {
+            "stockCode": "PERSISTENT"
+        },
+        {
+            "stockCode": "PETRONET"
+        },
+        {
+            "stockCode": "PFC"
+        },
+        {
+            "stockCode": "PFIZER"
+        },
+        {
+            "stockCode": "PFOCUS"
+        },
+        {
+            "stockCode": "PFS"
+        },
+        {
+            "stockCode": "PGEL"
+        },
+        {
+            "stockCode": "PGHH"
+        },
+        {
+            "stockCode": "PGHL"
+        },
+        {
+            "stockCode": "PGIL"
+        },
+        {
+            "stockCode": "PHOENIXLTD"
+        },
+        {
+            "stockCode": "PIDILITIND"
+        },
+        {
+            "stockCode": "PIGL"
+        },
+        {
+            "stockCode": "PIIND"
+        },
+        {
+            "stockCode": "PILANIINVS"
+        },
+        {
+            "stockCode": "PILITA"
+        },
+        {
+            "stockCode": "PIONEEREMB"
+        },
+        {
+            "stockCode": "PITTIENG"
+        },
+        {
+            "stockCode": "PIXTRANS"
+        },
+        {
+            "stockCode": "PKTEA"
+        },
+        {
+            "stockCode": "PLASTIBLEN"
+        },
+        {
+            "stockCode": "PLATIND"
+        },
+        {
+            "stockCode": "PLAZACABLE"
+        },
+        {
+            "stockCode": "PNB"
+        },
+        {
+            "stockCode": "PNBGILTS"
+        },
+        {
+            "stockCode": "PNBHOUSING"
+        },
+        {
+            "stockCode": "PNC"
+        },
+        {
+            "stockCode": "PNCINFRA"
+        },
+        {
+            "stockCode": "PNGJL"
+        },
+        {
+            "stockCode": "POCL"
+        },
+        {
+            "stockCode": "PODDARHOUS"
+        },
+        {
+            "stockCode": "PODDARMENT"
+        },
+        {
+            "stockCode": "POKARNA"
+        },
+        {
+            "stockCode": "POLICYBZR"
+        },
+        {
+            "stockCode": "POLYCAB"
+        },
+        {
+            "stockCode": "POLYMED"
+        },
+        {
+            "stockCode": "POLYPLEX"
+        },
+        {
+            "stockCode": "PONNIERODE"
+        },
+        {
+            "stockCode": "POONAWALLA"
+        },
+        {
+            "stockCode": "POWERGRID"
+        },
+        {
+            "stockCode": "POWERINDIA"
+        },
+        {
+            "stockCode": "POWERMECH"
+        },
+        {
+            "stockCode": "PPAP"
+        },
+        {
+            "stockCode": "PPL"
+        },
+        {
+            "stockCode": "PPLPHARMA"
+        },
+        {
+            "stockCode": "PRAENG"
+        },
+        {
+            "stockCode": "PRAJIND"
+        },
+        {
+            "stockCode": "PRAKASH"
+        },
+        {
+            "stockCode": "PRAKASHSTL"
+        },
+        {
+            "stockCode": "PRAXIS"
+        },
+        {
+            "stockCode": "PRECAM"
+        },
+        {
+            "stockCode": "PRECOT"
+        },
+        {
+            "stockCode": "PRECWIRE"
+        },
+        {
+            "stockCode": "PREMEXPLN"
+        },
+        {
+            "stockCode": "PREMIERENE"
+        },
+        {
+            "stockCode": "PREMIERPOL"
+        },
+        {
+            "stockCode": "PRESTIGE"
+        },
+        {
+            "stockCode": "PRICOLLTD"
+        },
+        {
+            "stockCode": "PRIMESECU"
+        },
+        {
+            "stockCode": "PRINCEPIPE"
+        },
+        {
+            "stockCode": "PRITI"
+        },
+        {
+            "stockCode": "PRITIKAUTO"
+        },
+        {
+            "stockCode": "PRIVISCL"
+        },
+        {
+            "stockCode": "PROZONER"
+        },
+        {
+            "stockCode": "PRSMJOHNSN"
+        },
+        {
+            "stockCode": "PRUDENT"
+        },
+        {
+            "stockCode": "PRUDMOULI"
+        },
+        {
+            "stockCode": "PSB"
+        },
+        {
+            "stockCode": "PSPPROJECT"
+        },
+        {
+            "stockCode": "PTC"
+        },
+        {
+            "stockCode": "PTCIL"
+        },
+        {
+            "stockCode": "PTL"
+        },
+        {
+            "stockCode": "PUNJABCHEM"
+        },
+        {
+            "stockCode": "PURVA"
+        },
+        {
+            "stockCode": "PVP"
+        },
+        {
+            "stockCode": "PVRINOX"
+        },
+        {
+            "stockCode": "PVSL"
+        },
+        {
+            "stockCode": "PYRAMID"
+        },
+        {
+            "stockCode": "QUESS"
+        },
+        {
+            "stockCode": "QUICKHEAL"
+        },
+        {
+            "stockCode": "RACE"
+        },
+        {
+            "stockCode": "RACLGEAR"
+        },
+        {
+            "stockCode": "RADAAN"
+        },
+        {
+            "stockCode": "RADHIKAJWE"
+        },
+        {
+            "stockCode": "RADIANTCMS"
+        },
+        {
+            "stockCode": "RADICO"
+        },
+        {
+            "stockCode": "RADIOCITY"
+        },
+        {
+            "stockCode": "RAILTEL"
+        },
+        {
+            "stockCode": "RAIN"
+        },
+        {
+            "stockCode": "RAINBOW"
+        },
+        {
+            "stockCode": "RAJESHEXPO"
+        },
+        {
+            "stockCode": "RAJMET"
+        },
+        {
+            "stockCode": "RAJRATAN"
+        },
+        {
+            "stockCode": "RAJRILTD"
+        },
+        {
+            "stockCode": "RAJSREESUG"
+        },
+        {
+            "stockCode": "RAJTV"
+        },
+        {
+            "stockCode": "RALLIS"
+        },
+        {
+            "stockCode": "RAMANEWS"
+        },
+        {
+            "stockCode": "RAMAPHO"
+        },
+        {
+            "stockCode": "RAMASTEEL"
+        },
+        {
+            "stockCode": "RAMCOCEM"
+        },
+        {
+            "stockCode": "RAMCOIND"
+        },
+        {
+            "stockCode": "RAMCOSYS"
+        },
+        {
+            "stockCode": "RAMKY"
+        },
+        {
+            "stockCode": "RAMRAT"
+        },
+        {
+            "stockCode": "RANASUG"
+        },
+        {
+            "stockCode": "RANEENGINE"
+        },
+        {
+            "stockCode": "RANEHOLDIN"
+        },
+        {
+            "stockCode": "RATEGAIN"
+        },
+        {
+            "stockCode": "RATNAMANI"
+        },
+        {
+            "stockCode": "RATNAVEER"
+        },
+        {
+            "stockCode": "RAYMOND"
+        },
+        {
+            "stockCode": "RAYMONDLSL"
+        },
+        {
+            "stockCode": "RBA"
+        },
+        {
+            "stockCode": "RBL"
+        },
+        {
+            "stockCode": "RBLBANK"
+        },
+        {
+            "stockCode": "RBZJEWEL"
+        },
+        {
+            "stockCode": "RCF"
+        },
+        {
+            "stockCode": "RECLTD"
+        },
+        {
+            "stockCode": "REDINGTON"
+        },
+        {
+            "stockCode": "REDTAPE"
+        },
+        {
+            "stockCode": "REFEX"
+        },
+        {
+            "stockCode": "REGENCERAM"
+        },
+        {
+            "stockCode": "RELAXO"
+        },
+        {
+            "stockCode": "RELCHEMQ"
+        },
+        {
+            "stockCode": "RELIABLE"
+        },
+        {
+            "stockCode": "RELIANCE"
+        },
+        {
+            "stockCode": "RELIGARE"
+        },
+        {
+            "stockCode": "RELINFRA"
+        },
+        {
+            "stockCode": "RELTD"
+        },
+        {
+            "stockCode": "REMSONSIND"
+        },
+        {
+            "stockCode": "RENUKA"
+        },
+        {
+            "stockCode": "REPCOHOME"
+        },
+        {
+            "stockCode": "REPL"
+        },
+        {
+            "stockCode": "REPRO"
+        },
+        {
+            "stockCode": "RESPONIND"
+        },
+        {
+            "stockCode": "RETAIL"
+        },
+        {
+            "stockCode": "RGL"
+        },
+        {
+            "stockCode": "RHFL"
+        },
+        {
+            "stockCode": "RHIM"
+        },
+        {
+            "stockCode": "RHL"
+        },
+        {
+            "stockCode": "RICOAUTO"
+        },
+        {
+            "stockCode": "RIIL"
+        },
+        {
+            "stockCode": "RISHABH"
+        },
+        {
+            "stockCode": "RITCO"
+        },
+        {
+            "stockCode": "RITES"
+        },
+        {
+            "stockCode": "RKDL"
+        },
+        {
+            "stockCode": "RKEC"
+        },
+        {
+            "stockCode": "RKFORGE"
+        },
+        {
+            "stockCode": "RKSWAMY"
+        },
+        {
+            "stockCode": "RML"
+        },
+        {
+            "stockCode": "ROHLTD"
+        },
+        {
+            "stockCode": "ROLEXRINGS"
+        },
+        {
+            "stockCode": "ROLLT"
+        },
+        {
+            "stockCode": "ROML"
+        },
+        {
+            "stockCode": "ROSSARI"
+        },
+        {
+            "stockCode": "ROSSELLIND"
+        },
+        {
+            "stockCode": "ROTO"
+        },
+        {
+            "stockCode": "ROUTE"
+        },
+        {
+            "stockCode": "RPEL"
+        },
+        {
+            "stockCode": "RPGLIFE"
+        },
+        {
+            "stockCode": "RPOWER"
+        },
+        {
+            "stockCode": "RPPINFRA"
+        },
+        {
+            "stockCode": "RPPL"
+        },
+        {
+            "stockCode": "RPSGVENT"
+        },
+        {
+            "stockCode": "RPTECH"
+        },
+        {
+            "stockCode": "RRKABEL"
+        },
+        {
+            "stockCode": "RSSOFTWARE"
+        },
+        {
+            "stockCode": "RSWM"
+        },
+        {
+            "stockCode": "RSYSTEMS"
+        },
+        {
+            "stockCode": "RTNINDIA"
+        },
+        {
+            "stockCode": "RTNPOWER"
+        },
+        {
+            "stockCode": "RUBFILA"
+        },
+        {
+            "stockCode": "RUBYMILLS"
+        },
+        {
+            "stockCode": "RUCHINFRA"
+        },
+        {
+            "stockCode": "RUCHIRA"
+        },
+        {
+            "stockCode": "RUPA"
+        },
+        {
+            "stockCode": "RUSHIL"
+        },
+        {
+            "stockCode": "RUSTOMJEE"
+        },
+        {
+            "stockCode": "RVHL"
+        },
+        {
+            "stockCode": "RVNL"
+        },
+        {
+            "stockCode": "RVTH"
+        },
+        {
+            "stockCode": "S&SPOWER"
+        },
+        {
+            "stockCode": "SABEVENTS"
+        },
+        {
+            "stockCode": "SABTNL"
+        },
+        {
+            "stockCode": "SADBHAV"
+        },
+        {
+            "stockCode": "SADBHIN"
+        },
+        {
+            "stockCode": "SADHNANIQ"
+        },
+        {
+            "stockCode": "SAFARI"
+        },
+        {
+            "stockCode": "SAGARDEEP"
+        },
+        {
+            "stockCode": "SAGCEM"
+        },
+        {
+            "stockCode": "SAGILITY"
+        },
+        {
+            "stockCode": "SAH"
+        },
+        {
+            "stockCode": "SAHYADRI"
+        },
+        {
+            "stockCode": "SAIL"
+        },
+        {
+            "stockCode": "SAKAR"
+        },
+        {
+            "stockCode": "SAKHTISUG"
+        },
+        {
+            "stockCode": "SAKSOFT"
+        },
+        {
+            "stockCode": "SAKUMA"
+        },
+        {
+            "stockCode": "SALASAR"
+        },
+        {
+            "stockCode": "SALONA"
+        },
+        {
+            "stockCode": "SALSTEEL"
+        },
+        {
+            "stockCode": "SALZERELEC"
+        },
+        {
+            "stockCode": "SAMBHAAV"
+        },
+        {
+            "stockCode": "SAMHI"
+        },
+        {
+            "stockCode": "SAMMAANCAP"
+        },
+        {
+            "stockCode": "SAMPANN"
+        },
+        {
+            "stockCode": "SANCO"
+        },
+        {
+            "stockCode": "SANDESH"
+        },
+        {
+            "stockCode": "SANDHAR"
+        },
+        {
+            "stockCode": "SANDUMA"
+        },
+        {
+            "stockCode": "SANGAMIND"
+        },
+        {
+            "stockCode": "SANGHIIND"
+        },
+        {
+            "stockCode": "SANGHVIMOV"
+        },
+        {
+            "stockCode": "SANGINITA"
+        },
+        {
+            "stockCode": "SANOFI"
+        },
+        {
+            "stockCode": "SANOFICONR"
+        },
+        {
+            "stockCode": "SANSERA"
+        },
+        {
+            "stockCode": "SANSTAR"
+        },
+        {
+            "stockCode": "SANWARIA"
+        },
+        {
+            "stockCode": "SAPPHIRE"
+        },
+        {
+            "stockCode": "SARDAEN"
+        },
+        {
+            "stockCode": "SAREGAMA"
+        },
+        {
+            "stockCode": "SARLAPOLY"
+        },
+        {
+            "stockCode": "SARVESHWAR"
+        },
+        {
+            "stockCode": "SASKEN"
+        },
+        {
+            "stockCode": "SASTASUNDR"
+        },
+        {
+            "stockCode": "SATIA"
+        },
+        {
+            "stockCode": "SATIN"
+        },
+        {
+            "stockCode": "SATINDLTD"
+        },
+        {
+            "stockCode": "SAURASHCEM"
+        },
+        {
+            "stockCode": "SBC"
+        },
+        {
+            "stockCode": "SBCL"
+        },
+        {
+            "stockCode": "SBFC"
+        },
+        {
+            "stockCode": "SBGLP"
+        },
+        {
+            "stockCode": "SBICARD"
+        },
+        {
+            "stockCode": "SBILIFE"
+        },
+        {
+            "stockCode": "SBIN"
+        },
+        {
+            "stockCode": "SCHAEFFLER"
+        },
+        {
+            "stockCode": "SCHAND"
+        },
+        {
+            "stockCode": "SCHNEIDER"
+        },
+        {
+            "stockCode": "SCI"
+        },
+        {
+            "stockCode": "SCILAL"
+        },
+        {
+            "stockCode": "SCPL"
+        },
+        {
+            "stockCode": "SDBL"
+        },
+        {
+            "stockCode": "SEAMECLTD"
+        },
+        {
+            "stockCode": "SECMARK"
+        },
+        {
+            "stockCode": "SECURCRED"
+        },
+        {
+            "stockCode": "SECURKLOUD"
+        },
+        {
+            "stockCode": "SEJALLTD"
+        },
+        {
+            "stockCode": "SELAN"
+        },
+        {
+            "stockCode": "SELMC"
+        },
+        {
+            "stockCode": "SEMAC"
+        },
+        {
+            "stockCode": "SENCO"
+        },
+        {
+            "stockCode": "SEPC"
+        },
+        {
+            "stockCode": "SEQUENT"
+        },
+        {
+            "stockCode": "SERVOTECH"
+        },
+        {
+            "stockCode": "SESHAPAPER"
+        },
+        {
+            "stockCode": "SETCO"
+        },
+        {
+            "stockCode": "SETUINFRA"
+        },
+        {
+            "stockCode": "SFL"
+        },
+        {
+            "stockCode": "SGIL"
+        },
+        {
+            "stockCode": "SGL"
+        },
+        {
+            "stockCode": "SHAH"
+        },
+        {
+            "stockCode": "SHAHALLOYS"
+        },
+        {
+            "stockCode": "SHAILY"
+        },
+        {
+            "stockCode": "SHAKTIPUMP"
+        },
+        {
+            "stockCode": "SHALBY"
+        },
+        {
+            "stockCode": "SHALPAINTS"
+        },
+        {
+            "stockCode": "SHANKARA"
+        },
+        {
+            "stockCode": "SHANTI"
+        },
+        {
+            "stockCode": "SHANTIGEAR"
+        },
+        {
+            "stockCode": "SHARDACROP"
+        },
+        {
+            "stockCode": "SHARDAMOTR"
+        },
+        {
+            "stockCode": "SHAREINDIA"
+        },
+        {
+            "stockCode": "SHEKHAWATI"
+        },
+        {
+            "stockCode": "SHEMAROO"
+        },
+        {
+            "stockCode": "SHILPAMED"
+        },
+        {
+            "stockCode": "SHIVALIK"
+        },
+        {
+            "stockCode": "SHIVAMAUTO"
+        },
+        {
+            "stockCode": "SHIVAMILLS"
+        },
+        {
+            "stockCode": "SHIVATEX"
+        },
+        {
+            "stockCode": "SHK"
+        },
+        {
+            "stockCode": "SHOPERSTOP"
+        },
+        {
+            "stockCode": "SHRADHA"
+        },
+        {
+            "stockCode": "SHREDIGCEM"
+        },
+        {
+            "stockCode": "SHREECEM"
+        },
+        {
+            "stockCode": "SHREEPUSHK"
+        },
+        {
+            "stockCode": "SHREERAMA"
+        },
+        {
+            "stockCode": "SHRENIK"
+        },
+        {
+            "stockCode": "SHREYANIND"
+        },
+        {
+            "stockCode": "SHRIPISTON"
+        },
+        {
+            "stockCode": "SHRIRAMFIN"
+        },
+        {
+            "stockCode": "SHRIRAMPPS"
+        },
+        {
+            "stockCode": "SHYAMCENT"
+        },
+        {
+            "stockCode": "SHYAMMETL"
+        },
+        {
+            "stockCode": "SHYAMTEL"
+        },
+        {
+            "stockCode": "SICALLOG"
+        },
+        {
+            "stockCode": "SIEMENS"
+        },
+        {
+            "stockCode": "SIGACHI"
+        },
+        {
+            "stockCode": "SIGIND"
+        },
+        {
+            "stockCode": "SIGMA"
+        },
+        {
+            "stockCode": "SIGNATURE"
+        },
+        {
+            "stockCode": "SIGNPOST"
+        },
+        {
+            "stockCode": "SIKKO"
+        },
+        {
+            "stockCode": "SIL"
+        },
+        {
+            "stockCode": "SILGO"
+        },
+        {
+            "stockCode": "SILINV"
+        },
+        {
+            "stockCode": "SILLYMONKS"
+        },
+        {
+            "stockCode": "SILVERTUC"
+        },
+        {
+            "stockCode": "SIMBHALS"
+        },
+        {
+            "stockCode": "SIMPLEXINF"
+        },
+        {
+            "stockCode": "SINCLAIR"
+        },
+        {
+            "stockCode": "SINDHUTRAD"
+        },
+        {
+            "stockCode": "SINTERCOM"
+        },
+        {
+            "stockCode": "SIRCA"
+        },
+        {
+            "stockCode": "SIS"
+        },
+        {
+            "stockCode": "SITINET"
+        },
+        {
+            "stockCode": "SIYSIL"
+        },
+        {
+            "stockCode": "SJS"
+        },
+        {
+            "stockCode": "SJVN"
+        },
+        {
+            "stockCode": "SKFINDIA"
+        },
+        {
+            "stockCode": "SKIPPER"
+        },
+        {
+            "stockCode": "SKMEGGPROD"
+        },
+        {
+            "stockCode": "SKYGOLD"
+        },
+        {
+            "stockCode": "SMARTLINK"
+        },
+        {
+            "stockCode": "SMCGLOBAL"
+        },
+        {
+            "stockCode": "SMLISUZU"
+        },
+        {
+            "stockCode": "SMLT"
+        },
+        {
+            "stockCode": "SMSLIFE"
+        },
+        {
+            "stockCode": "SMSPHARMA"
+        },
+        {
+            "stockCode": "SNOWMAN"
+        },
+        {
+            "stockCode": "SOBHA"
+        },
+        {
+            "stockCode": "SOFTTECH"
+        },
+        {
+            "stockCode": "SOLARA"
+        },
+        {
+            "stockCode": "SOLARINDS"
+        },
+        {
+            "stockCode": "SOMANYCERA"
+        },
+        {
+            "stockCode": "SOMATEX"
+        },
+        {
+            "stockCode": "SOMICONVEY"
+        },
+        {
+            "stockCode": "SONACOMS"
+        },
+        {
+            "stockCode": "SONAMLTD"
+        },
+        {
+            "stockCode": "SONATSOFTW"
+        },
+        {
+            "stockCode": "SOTL"
+        },
+        {
+            "stockCode": "SOUTHBANK"
+        },
+        {
+            "stockCode": "SOUTHWEST"
+        },
+        {
+            "stockCode": "SPAL"
+        },
+        {
+            "stockCode": "SPANDANA"
+        },
+        {
+            "stockCode": "SPARC"
+        },
+        {
+            "stockCode": "SPCENET"
+        },
+        {
+            "stockCode": "SPECIALITY"
+        },
+        {
+            "stockCode": "SPENCERS"
+        },
+        {
+            "stockCode": "SPIC"
+        },
+        {
+            "stockCode": "SPLIL"
+        },
+        {
+            "stockCode": "SPLPETRO"
+        },
+        {
+            "stockCode": "SPMLINFRA"
+        },
+        {
+            "stockCode": "SPORTKING"
+        },
+        {
+            "stockCode": "SRD"
+        },
+        {
+            "stockCode": "SREEL"
+        },
+        {
+            "stockCode": "SRF"
+        },
+        {
+            "stockCode": "SRGHFL"
+        },
+        {
+            "stockCode": "SRHHYPOLTD"
+        },
+        {
+            "stockCode": "SRM"
+        },
+        {
+            "stockCode": "SRPL"
+        },
+        {
+            "stockCode": "SSDL"
+        },
+        {
+            "stockCode": "SSWL"
+        },
+        {
+            "stockCode": "STANLEY"
+        },
+        {
+            "stockCode": "STAR"
+        },
+        {
+            "stockCode": "STARCEMENT"
+        },
+        {
+            "stockCode": "STARHEALTH"
+        },
+        {
+            "stockCode": "STARPAPER"
+        },
+        {
+            "stockCode": "STARTECK"
+        },
+        {
+            "stockCode": "STCINDIA"
+        },
+        {
+            "stockCode": "STEELCAS"
+        },
+        {
+            "stockCode": "STEELCITY"
+        },
+        {
+            "stockCode": "STEELXIND"
+        },
+        {
+            "stockCode": "STEL"
+        },
+        {
+            "stockCode": "STERTOOLS"
+        },
+        {
+            "stockCode": "STLTECH"
+        },
+        {
+            "stockCode": "STOVEKRAFT"
+        },
+        {
+            "stockCode": "STYLAMIND"
+        },
+        {
+            "stockCode": "STYLEBAAZA"
+        },
+        {
+            "stockCode": "STYRENIX"
+        },
+        {
+            "stockCode": "SUBEXLTD"
+        },
+        {
+            "stockCode": "SUBROS"
+        },
+        {
+            "stockCode": "SUDARSCHEM"
+        },
+        {
+            "stockCode": "SUKHJITS"
+        },
+        {
+            "stockCode": "SULA"
+        },
+        {
+            "stockCode": "SUMICHEM"
+        },
+        {
+            "stockCode": "SUMIT"
+        },
+        {
+            "stockCode": "SUMMITSEC"
+        },
+        {
+            "stockCode": "SUNCLAY"
+        },
+        {
+            "stockCode": "SUNDARAM"
+        },
+        {
+            "stockCode": "SUNDARMFIN"
+        },
+        {
+            "stockCode": "SUNDARMHLD"
+        },
+        {
+            "stockCode": "SUNDRMBRAK"
+        },
+        {
+            "stockCode": "SUNDRMFAST"
+        },
+        {
+            "stockCode": "SUNFLAG"
+        },
+        {
+            "stockCode": "SUNPHARMA"
+        },
+        {
+            "stockCode": "SUNTECK"
+        },
+        {
+            "stockCode": "SUNTV"
+        },
+        {
+            "stockCode": "SUPERHOUSE"
+        },
+        {
+            "stockCode": "SUPERSPIN"
+        },
+        {
+            "stockCode": "SUPRAJIT"
+        },
+        {
+            "stockCode": "SUPREMEENG"
+        },
+        {
+            "stockCode": "SUPREMEIND"
+        },
+        {
+            "stockCode": "SUPREMEINF"
+        },
+        {
+            "stockCode": "SUPRIYA"
+        },
+        {
+            "stockCode": "SURAJEST"
+        },
+        {
+            "stockCode": "SURAJLTD"
+        },
+        {
+            "stockCode": "SURANASOL"
+        },
+        {
+            "stockCode": "SURANAT&P"
+        },
+        {
+            "stockCode": "SURYALAXMI"
+        },
+        {
+            "stockCode": "SURYAROSNI"
+        },
+        {
+            "stockCode": "SURYODAY"
+        },
+        {
+            "stockCode": "SUTLEJTEX"
+        },
+        {
+            "stockCode": "SUULD"
+        },
+        {
+            "stockCode": "SUVEN"
+        },
+        {
+            "stockCode": "SUVENPHAR"
+        },
+        {
+            "stockCode": "SUVIDHAA"
+        },
+        {
+            "stockCode": "SUYOG"
+        },
+        {
+            "stockCode": "SUZLON"
+        },
+        {
+            "stockCode": "SVLL"
+        },
+        {
+            "stockCode": "SVPGLOB"
+        },
+        {
+            "stockCode": "SWANENERGY"
+        },
+        {
+            "stockCode": "SWARAJENG"
+        },
+        {
+            "stockCode": "SWELECTES"
+        },
+        {
+            "stockCode": "SWIGGY"
+        },
+        {
+            "stockCode": "SWSOLAR"
+        },
+        {
+            "stockCode": "SYMPHONY"
+        },
+        {
+            "stockCode": "SYNCOMF"
+        },
+        {
+            "stockCode": "SYNGENE"
+        },
+        {
+            "stockCode": "SYRMA"
+        },
+        {
+            "stockCode": "TAINWALCHM"
+        },
+        {
+            "stockCode": "TAJGVK"
+        },
+        {
+            "stockCode": "TAKE"
+        },
+        {
+            "stockCode": "TALBROAUTO"
+        },
+        {
+            "stockCode": "TANLA"
+        },
+        {
+            "stockCode": "TARACHAND"
+        },
+        {
+            "stockCode": "TARAPUR"
+        },
+        {
+            "stockCode": "TARC"
+        },
+        {
+            "stockCode": "TARIL"
+        },
+        {
+            "stockCode": "TARMAT"
+        },
+        {
+            "stockCode": "TARSONS"
+        },
+        {
+            "stockCode": "TASTYBITE"
+        },
+        {
+            "stockCode": "TATACHEM"
+        },
+        {
+            "stockCode": "TATACOMM"
+        },
+        {
+            "stockCode": "TATACONSUM"
+        },
+        {
+            "stockCode": "TATAELXSI"
+        },
+        {
+            "stockCode": "TATAINVEST"
+        },
+        {
+            "stockCode": "TATAMOTORS"
+        },
+        {
+            "stockCode": "TATAPOWER"
+        },
+        {
+            "stockCode": "TATASTEEL"
+        },
+        {
+            "stockCode": "TATATECH"
+        },
+        {
+            "stockCode": "TATVA"
+        },
+        {
+            "stockCode": "TBOTEK"
+        },
+        {
+            "stockCode": "TBZ"
+        },
+        {
+            "stockCode": "TCI"
+        },
+        {
+            "stockCode": "TCIEXP"
+        },
+        {
+            "stockCode": "TCIFINANCE"
+        },
+        {
+            "stockCode": "TCLCONS"
+        },
+        {
+            "stockCode": "TCPLPACK"
+        },
+        {
+            "stockCode": "TCS"
+        },
+        {
+            "stockCode": "TDPOWERSYS"
+        },
+        {
+            "stockCode": "TEAMLEASE"
+        },
+        {
+            "stockCode": "TECHM"
+        },
+        {
+            "stockCode": "TECHNOE"
+        },
+        {
+            "stockCode": "TECILCHEM"
+        },
+        {
+            "stockCode": "TEGA"
+        },
+        {
+            "stockCode": "TEJASNET"
+        },
+        {
+            "stockCode": "TEMBO"
+        },
+        {
+            "stockCode": "TERASOFT"
+        },
+        {
+            "stockCode": "TEXINFRA"
+        },
+        {
+            "stockCode": "TEXMOPIPES"
+        },
+        {
+            "stockCode": "TEXRAIL"
+        },
+        {
+            "stockCode": "TFCILTD"
+        },
+        {
+            "stockCode": "TFL"
+        },
+        {
+            "stockCode": "TGBHOTELS"
+        },
+        {
+            "stockCode": "THANGAMAYL"
+        },
+        {
+            "stockCode": "THEINVEST"
+        },
+        {
+            "stockCode": "THEJO"
+        },
+        {
+            "stockCode": "THEMISMED"
+        },
+        {
+            "stockCode": "THERMAX"
+        },
+        {
+            "stockCode": "THOMASCOOK"
+        },
+        {
+            "stockCode": "THOMASCOTT"
+        },
+        {
+            "stockCode": "THYROCARE"
+        },
+        {
+            "stockCode": "TI"
+        },
+        {
+            "stockCode": "TIIL"
+        },
+        {
+            "stockCode": "TIINDIA"
+        },
+        {
+            "stockCode": "TIJARIA"
+        },
+        {
+            "stockCode": "TIL"
+        },
+        {
+            "stockCode": "TIMESGTY"
+        },
+        {
+            "stockCode": "TIMETECHNO"
+        },
+        {
+            "stockCode": "TIMKEN"
+        },
+        {
+            "stockCode": "TIPSFILMS"
+        },
+        {
+            "stockCode": "TIPSMUSIC"
+        },
+        {
+            "stockCode": "TIRUMALCHM"
+        },
+        {
+            "stockCode": "TIRUPATIFL"
+        },
+        {
+            "stockCode": "TITAGARH"
+        },
+        {
+            "stockCode": "TITAN"
+        },
+        {
+            "stockCode": "TMB"
+        },
+        {
+            "stockCode": "TNPETRO"
+        },
+        {
+            "stockCode": "TNPL"
+        },
+        {
+            "stockCode": "TNTELE"
+        },
+        {
+            "stockCode": "TOKYOPLAST"
+        },
+        {
+            "stockCode": "TOLINS"
+        },
+        {
+            "stockCode": "TORNTPHARM"
+        },
+        {
+            "stockCode": "TORNTPOWER"
+        },
+        {
+            "stockCode": "TOTAL"
+        },
+        {
+            "stockCode": "TOUCHWOOD"
+        },
+        {
+            "stockCode": "TPHQ"
+        },
+        {
+            "stockCode": "TPLPLASTEH"
+        },
+        {
+            "stockCode": "TRACXN"
+        },
+        {
+            "stockCode": "TRANSWORLD"
+        },
+        {
+            "stockCode": "TREEHOUSE"
+        },
+        {
+            "stockCode": "TREJHARA"
+        },
+        {
+            "stockCode": "TREL"
+        },
+        {
+            "stockCode": "TRENT"
+        },
+        {
+            "stockCode": "TRF"
+        },
+        {
+            "stockCode": "TRIDENT"
+        },
+        {
+            "stockCode": "TRIGYN"
+        },
+        {
+            "stockCode": "TRITURBINE"
+        },
+        {
+            "stockCode": "TRIVENI"
+        },
+        {
+            "stockCode": "TRU"
+        },
+        {
+            "stockCode": "TTKHLTCARE"
+        },
+        {
+            "stockCode": "TTKPRESTIG"
+        },
+        {
+            "stockCode": "TTL"
+        },
+        {
+            "stockCode": "TTML"
+        },
+        {
+            "stockCode": "TVSELECT"
+        },
+        {
+            "stockCode": "TVSHLTD"
+        },
+        {
+            "stockCode": "TVSMOTOR"
+        },
+        {
+            "stockCode": "TVSSCS"
+        },
+        {
+            "stockCode": "TVSSRICHAK"
+        },
+        {
+            "stockCode": "TVTODAY"
+        },
+        {
+            "stockCode": "TVVISION"
+        },
+        {
+            "stockCode": "UBL"
+        },
+        {
+            "stockCode": "UCAL"
+        },
+        {
+            "stockCode": "UCOBANK"
+        },
+        {
+            "stockCode": "UDAICEMENT"
+        },
+        {
+            "stockCode": "UDS"
+        },
+        {
+            "stockCode": "UFLEX"
+        },
+        {
+            "stockCode": "UFO"
+        },
+        {
+            "stockCode": "UGARSUGAR"
+        },
+        {
+            "stockCode": "UGROCAP"
+        },
+        {
+            "stockCode": "UJJIVANSFB"
+        },
+        {
+            "stockCode": "ULTRACEMCO"
+        },
+        {
+            "stockCode": "UMAEXPORTS"
+        },
+        {
+            "stockCode": "UMANGDAIRY"
+        },
+        {
+            "stockCode": "UMESLTD"
+        },
+        {
+            "stockCode": "UNICHEMLAB"
+        },
+        {
+            "stockCode": "UNIDT"
+        },
+        {
+            "stockCode": "UNIECOM"
+        },
+        {
+            "stockCode": "UNIENTER"
+        },
+        {
+            "stockCode": "UNIINFO"
+        },
+        {
+            "stockCode": "UNIONBANK"
+        },
+        {
+            "stockCode": "UNIPARTS"
+        },
+        {
+            "stockCode": "UNITDSPR"
+        },
+        {
+            "stockCode": "UNITECH"
+        },
+        {
+            "stockCode": "UNITEDPOLY"
+        },
+        {
+            "stockCode": "UNITEDTEA"
+        },
+        {
+            "stockCode": "UNIVASTU"
+        },
+        {
+            "stockCode": "UNIVCABLES"
+        },
+        {
+            "stockCode": "UNIVPHOTO"
+        },
+        {
+            "stockCode": "UNOMINDA"
+        },
+        {
+            "stockCode": "UPL"
+        },
+        {
+            "stockCode": "URAVI"
+        },
+        {
+            "stockCode": "URJA"
+        },
+        {
+            "stockCode": "USHAMART"
+        },
+        {
+            "stockCode": "USK"
+        },
+        {
+            "stockCode": "UTIAMC"
+        },
+        {
+            "stockCode": "UTKARSHBNK"
+        },
+        {
+            "stockCode": "UTTAMSUGAR"
+        },
+        {
+            "stockCode": "UYFINCORP"
+        },
+        {
+            "stockCode": "V2RETAIL"
+        },
+        {
+            "stockCode": "VADILALIND"
+        },
+        {
+            "stockCode": "VAIBHAVGBL"
+        },
+        {
+            "stockCode": "VAISHALI"
+        },
+        {
+            "stockCode": "VAKRANGEE"
+        },
+        {
+            "stockCode": "VALIANTLAB"
+        },
+        {
+            "stockCode": "VALIANTORG"
+        },
+        {
+            "stockCode": "VARDHACRLC"
+        },
+        {
+            "stockCode": "VARDMNPOLY"
+        },
+        {
+            "stockCode": "VARROC"
+        },
+        {
+            "stockCode": "VASCONEQ"
+        },
+        {
+            "stockCode": "VASWANI"
+        },
+        {
+            "stockCode": "VBL"
+        },
+        {
+            "stockCode": "VCL"
+        },
+        {
+            "stockCode": "VEDL"
+        },
+        {
+            "stockCode": "VEEDOL"
+        },
+        {
+            "stockCode": "VENKEYS"
+        },
+        {
+            "stockCode": "VENUSPIPES"
+        },
+        {
+            "stockCode": "VENUSREM"
+        },
+        {
+            "stockCode": "VERANDA"
+        },
+        {
+            "stockCode": "VERTOZ"
+        },
+        {
+            "stockCode": "VESUVIUS"
+        },
+        {
+            "stockCode": "VETO"
+        },
+        {
+            "stockCode": "VGUARD"
+        },
+        {
+            "stockCode": "VHL"
+        },
+        {
+            "stockCode": "VHLTD"
+        },
+        {
+            "stockCode": "VIDHIING"
+        },
+        {
+            "stockCode": "VIJAYA"
+        },
+        {
+            "stockCode": "VIJIFIN"
+        },
+        {
+            "stockCode": "VIKASECO"
+        },
+        {
+            "stockCode": "VIKASLIFE"
+        },
+        {
+            "stockCode": "VIMTALABS"
+        },
+        {
+            "stockCode": "VINATIORGA"
+        },
+        {
+            "stockCode": "VINCOFE"
+        },
+        {
+            "stockCode": "VINDHYATEL"
+        },
+        {
+            "stockCode": "VINEETLAB"
+        },
+        {
+            "stockCode": "VINNY"
+        },
+        {
+            "stockCode": "VINYLINDIA"
+        },
+        {
+            "stockCode": "VIPCLOTHNG"
+        },
+        {
+            "stockCode": "VIPIND"
+        },
+        {
+            "stockCode": "VIPULLTD"
+        },
+        {
+            "stockCode": "VIRINCHI"
+        },
+        {
+            "stockCode": "VISAKAIND"
+        },
+        {
+            "stockCode": "VISHNU"
+        },
+        {
+            "stockCode": "VISHWARAJ"
+        },
+        {
+            "stockCode": "VIVIDHA"
+        },
+        {
+            "stockCode": "VLEGOV"
+        },
+        {
+            "stockCode": "VLSFINANCE"
+        },
+        {
+            "stockCode": "VMART"
+        },
+        {
+            "stockCode": "VOLTAMP"
+        },
+        {
+            "stockCode": "VOLTAS"
+        },
+        {
+            "stockCode": "VPRPL"
+        },
+        {
+            "stockCode": "VRAJ"
+        },
+        {
+            "stockCode": "VRLLOG"
+        },
+        {
+            "stockCode": "VSSL"
+        },
+        {
+            "stockCode": "VSTIND"
+        },
+        {
+            "stockCode": "VSTL"
+        },
+        {
+            "stockCode": "VSTTILLERS"
+        },
+        {
+            "stockCode": "VTL"
+        },
+        {
+            "stockCode": "WAAREEENER"
+        },
+        {
+            "stockCode": "WABAG"
+        },
+        {
+            "stockCode": "WALCHANNAG"
+        },
+        {
+            "stockCode": "WANBURY"
+        },
+        {
+            "stockCode": "WCIL"
+        },
+        {
+            "stockCode": "WEALTH"
+        },
+        {
+            "stockCode": "WEBELSOLAR"
+        },
+        {
+            "stockCode": "WEIZMANIND"
+        },
+        {
+            "stockCode": "WEL"
+        },
+        {
+            "stockCode": "WELCORP"
+        },
+        {
+            "stockCode": "WELENT"
+        },
+        {
+            "stockCode": "WELINV"
+        },
+        {
+            "stockCode": "WELSPUNLIV"
+        },
+        {
+            "stockCode": "WENDT"
+        },
+        {
+            "stockCode": "WESTLIFE"
+        },
+        {
+            "stockCode": "WEWIN"
+        },
+        {
+            "stockCode": "WHEELS"
+        },
+        {
+            "stockCode": "WHIRLPOOL"
+        },
+        {
+            "stockCode": "WILLAMAGOR"
+        },
+        {
+            "stockCode": "WINDLAS"
+        },
+        {
+            "stockCode": "WINDMACHIN"
+        },
+        {
+            "stockCode": "WINSOME"
+        },
+        {
+            "stockCode": "WIPL"
+        },
+        {
+            "stockCode": "WIPRO"
+        },
+        {
+            "stockCode": "WOCKPHARMA"
+        },
+        {
+            "stockCode": "WONDERLA"
+        },
+        {
+            "stockCode": "WORTH"
+        },
+        {
+            "stockCode": "WSI"
+        },
+        {
+            "stockCode": "WSTCSTPAPR"
+        },
+        {
+            "stockCode": "XCHANGING"
+        },
+        {
+            "stockCode": "XELPMOC"
+        },
+        {
+            "stockCode": "XPROINDIA"
+        },
+        {
+            "stockCode": "XTGLOBAL"
+        },
+        {
+            "stockCode": "YAARI"
+        },
+        {
+            "stockCode": "YASHO"
+        },
+        {
+            "stockCode": "YATHARTH"
+        },
+        {
+            "stockCode": "YATRA"
+        },
+        {
+            "stockCode": "YESBANK"
+        },
+        {
+            "stockCode": "YUKEN"
+        },
+        {
+            "stockCode": "ZAGGLE"
+        },
+        {
+            "stockCode": "ZEEL"
+        },
+        {
+            "stockCode": "ZEELEARN"
+        },
+        {
+            "stockCode": "ZEEMEDIA"
+        },
+        {
+            "stockCode": "ZENITHEXPO"
+        },
+        {
+            "stockCode": "ZENITHSTL"
+        },
+        {
+            "stockCode": "ZENSARTECH"
+        },
+        {
+            "stockCode": "ZENTEC"
+        },
+        {
+            "stockCode": "ZFCVINDIA"
+        },
+        {
+            "stockCode": "ZIMLAB"
+        },
+        {
+            "stockCode": "ZODIAC"
+        },
+        {
+            "stockCode": "ZODIACLOTH"
+        },
+        {
+            "stockCode": "ZOMATO"
+        },
+        {
+            "stockCode": "ZOTA"
+        },
+        {
+            "stockCode": "ZUARI"
+        },
+        {
+            "stockCode": "ZUARIIND"
+        },
+        {
+            "stockCode": "ZYDUSLIFE"
+        },
+        {
+            "stockCode": "ZYDUSWELL"
+        }
+    ]
+}
