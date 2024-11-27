@@ -88,6 +88,7 @@ class Akkountant(Flask):
         json_service.handle_nps()
         json_service.handle_gold()
         json_service.handle_mf()
+        json_service.handle_ppf()
 
     def _setup_routes(self):
         """Define application routes."""
