@@ -73,7 +73,7 @@ class Logger:
                 return result
             except Exception as e:
                 logger.error(f"An error occurred in {func.__name__}: {e}")
-                return jsonify({"Error": e.__cause__}), 500
+                return jsonify({"Error": e.__str__()}), 500
 
         return wrapper
 

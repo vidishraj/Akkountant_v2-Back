@@ -2,6 +2,7 @@ import os
 import re
 import hashlib
 import shutil
+import uuid
 
 from enums.EmailRegexEnum import EmailRegexEnum
 from utils.DateTimeUtil import DateTimeUtil
@@ -76,3 +77,8 @@ class GenericUtil:
     @staticmethod
     def getFileSize(filePath):
         return os.path.getsize(os.getcwd() + '/tmp/' + filePath)
+
+    @staticmethod
+    def generate_custom_buyID():
+        # Custom logic to generate unique IDs; adjust as needed
+        return f"CUSTOM-{uuid.uuid4().hex[:8]}"  # Example: CUSTOM-ab12cd34
