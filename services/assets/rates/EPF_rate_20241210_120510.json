@@ -1,0 +1,472 @@
+{
+  "data": [
+    {
+      "Year": "2016-04",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-05",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-06",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-07",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-08",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-09",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-10",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-11",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2016-12",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2017-01",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2017-02",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2017-03",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2017-04",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-05",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-06",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-07",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-08",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-09",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-10",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-11",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2017-12",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2018-01",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2018-02",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2018-03",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2018-04",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-05",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-06",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-07",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-08",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-09",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-10",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-11",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2018-12",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-01",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-02",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-03",
+      "Interest Rate": 8.65
+    },    {
+      "Year": "2019-04",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-05",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-06",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-07",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-08",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-09",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-10",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-11",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2019-12",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2020-01",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2020-02",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2020-03",
+      "Interest Rate": 8.65
+    },
+    {
+      "Year": "2020-04",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-05",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-06",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-07",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-08",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-09",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-10",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-11",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2020-12",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-01",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-02",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-03",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-04",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-05",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-06",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-07",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-08",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-09",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-10",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-11",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2021-12",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2022-01",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2022-02",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2022-03",
+      "Interest Rate": 8.55
+    },
+    {
+      "Year": "2022-04",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-05",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-06",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-07",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-08",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-09",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-10",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-11",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2022-12",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-01",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-02",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-03",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-04",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-05",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-06",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-07",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-08",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-09",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-10",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-11",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-12",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-01",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-02",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-03",
+      "Interest Rate": 8.15
+    },
+    {
+      "Year": "2023-04",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-05",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-06",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-07",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-08",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-09",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-10",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-11",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2023-12",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-01",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-02",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-03",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-04",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-05",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-06",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-07",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-08",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-09",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-10",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-11",
+      "Interest Rate": 8.25
+    },
+    {
+      "Year": "2024-12",
+      "Interest Rate": 8.25
+    }
+  ]
+}
+
