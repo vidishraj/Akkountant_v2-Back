@@ -8,4 +8,5 @@ class DateStatementEnum(Enum):
     ICICI_AMAZON_PAY = "%d/%m/%Y"
     YES_BANK_ACE = "%d/%m/%Y"
     YES_BANK_DEBIT = "%d/%m/%Y"
+    EPF_STATEMENT = "%d-%m-%Y"
 
