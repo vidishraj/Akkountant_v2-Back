@@ -109,6 +109,15 @@ class Akkountant(Flask):
         investmentRoutes = [
             ('/fetchSecurityList', 'GET', self.investmentEP.fetchSecurityList),
             ('/fetchSecurityScheme', 'GET', self.investmentEP.fetchSecurityRate),
+            ('/uploadSecuritiesFile', 'POST', self.investmentEP.process_file_upload),
+            ('/fetchSummary', 'GET', self.investmentEP.fetchSummary),
+            ('/fetchSecurityTransactions', 'GET', self.investmentEP.fetchSecurityTransactions),
+            ('/fetchUserSecurities', 'GET', self.investmentEP.fetchUserSecurities),
+            ('/insertSecurityTransaction', 'POST', self.investmentEP.insertSecurityTransaction),
+            ('/fetchCompleteEPG', 'GET', self.investmentEP.fetchCompleteDataForEPG),
+            ('/fetchRates', 'GET', self.investmentEP.fetchRateForEPG),
+            ('/deleteSingleInvestment', 'GET', self.investmentEP.deleteSingleRecord),
+            ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
         ]
 
         for rule, method, view_func in investmentRoutes:

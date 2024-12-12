@@ -67,3 +67,5 @@ class YESBankCreditParser(BaseParser, ABC):
 
     def readLastPage(self):
         return
+
+

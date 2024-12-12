@@ -30,7 +30,7 @@ class ICICICreditCardStatementParser(BaseParser, ABC):
         columns = [86, 169, 366, 437, 507, 562]
         tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
             self.filePath,
-            pages=f'2', area=extraction_area, guess=False,
+            pages='2', area=extraction_area, guess=False,
             stream=True, silent=True,
             columns=columns, password=self.password)
         if tables[0].columns[0] == "Date":
@@ -55,6 +55,7 @@ class ICICICreditCardStatementParser(BaseParser, ABC):
                     date = table['Date'][innerIndex]
                     desc = table['Transaction Details'][innerIndex]
                     amount = amountConverted
+
                     reference = GenericUtil().generate_reference_id(date, desc, amount)
                     self._transactionList.append({
                         'date': date,

@@ -1,20 +1,23 @@
 from abc import ABC
+from decimal import Decimal, ROUND_DOWN
 
 import requests
 from sqlalchemy.exc import NoResultFound
 from werkzeug.routing import ValidationError
 
 from enums.MsnEnum import MSNENUM
-from models.purchasedSecurities import PurchasedSecurities
-from models.soldSecurities import SoldSecurities
+from models import PurchasedSecurities
+from models import SoldSecurities
 from services.Base_MSN import Base_MSN
 from services.parsers.NPS_Statement import NPSParser
+from utils.logger import Logger
 
 
 class NPSService(Base_MSN, ABC):
 
     def __init__(self):
         super().__init__()
+        self.logger = Logger(__name__).get_logger()
         self.baseAPIURL = "https://nps.purifiedbytes.com/api/"
         self.parser = NPSParser()
 
@@ -35,23 +38,27 @@ class NPSService(Base_MSN, ABC):
             date = security_data.get('date')
             if date is None:
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
+            transactionObject = dict(date=date, quant=security_data['buyQuant'], price=security_data['buyPrice'],
+                                     transactionType="buy", userID=userId, securityType=MSNENUM.NPS.value)
+            self.insert_security_transaction(transactionObject)
             if existingRow is None:
                 # Proceed with insertion if validation passes and not existing
                 new_purchase = PurchasedSecurities(
+                    buyID=self.genericUtil.generate_custom_buyID(),
                     securityCode=security_data['securityCode'],
                     date=date,
                     buyQuant=security_data['buyQuant'],
                     buyPrice=security_data['buyPrice'],
                     userID=userId,
-                    securityType=MSNENUM.NPS
+                    securityType=MSNENUM.NPS.value
                 )
-
                 self.db.session.add(new_purchase)
             else:
                 # We update the old purchase by finding average of price
-                newQuant = existingRow.buyQuant + security_data['buyQuant']
-                newPrice = (existingRow.buyPrice * existingRow.buyQuant) + (
-                        security_data['buyQuant'] * security_data['buyPrice']) / newQuant
+                newQuant = existingRow.buyQuant + Decimal(security_data['buyQuant'])
+                newPrice = (((existingRow.buyPrice * existingRow.buyQuant) +
+                             (Decimal(security_data['buyQuant']) * Decimal(security_data['buyPrice'])))
+                            / newQuant).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 self.updatePriceAndQuant(newPrice, newQuant, existingRow.buyID)
             self.db.session.commit()
             return {"message": "Security purchased successfully"}
@@ -78,6 +85,11 @@ class NPSService(Base_MSN, ABC):
             if date is None:
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
 
+            # Insert transaction into separate table
+            transactionObject = dict(date=date, quant=sell_data['sellQuant'], price=sell_data['sellPrice'],
+                                     transactionType="sell", userID=userId, securityType=MSNENUM.NPS.value)
+            self.insert_security_transaction(transactionObject)
+
             # Insert into SoldSecurities
             new_sale = SoldSecurities(
                 buyID=purchase.buyID,
@@ -98,21 +110,28 @@ class NPSService(Base_MSN, ABC):
         We will be reading the NPS statement here
         :return:
         """
-
         self.parser.setPath(file_path)
         npsTransactions = self.parser.parseFile()
+        rowsInserted = 0
         for npsTransaction in npsTransactions:
-            schemeCode = self.JsonDownloadService.getNpsSchemeCodeSchemeName(npsTransactions['schemeName'])
-            self.buySecurity({
+            schemeCode = self.JsonDownloadService.getNpsSchemeCodeSchemeName(npsTransaction['name'])
+            self.logger.info(f"Inserting security {schemeCode}")
+            status = self.buySecurity({
                 'securityCode': schemeCode,
-                'buyQuant': npsTransaction['buyQuant'],
-                'buyPrice': npsTransaction['buyPrice']
+                'buyQuant': npsTransaction['quantity'],
+                'buyPrice': npsTransaction['nav']
             }, userId)
+            if status.get('error') is None:
+                rowsInserted += 1
+            self.logger.info(f"Inserted security {schemeCode}")
+        self.logger.info("Finished processing file and inserting statements")
+        return {"readFromStatement": {'buy': len(npsTransactions), 'sold': 0},
+                "inserted": {'buy': rowsInserted, 'sold': 0}}
 
     def checkIfSecurityExists(self, symbol):
         npsList = self.JsonDownloadService.getNPSList()
         npsList = npsList['data']
         for scheme in npsList:
-            if symbol == scheme:
+            if symbol == scheme['id']:
                 return True
         return False

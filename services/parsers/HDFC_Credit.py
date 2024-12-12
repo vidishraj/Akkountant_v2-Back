@@ -30,6 +30,7 @@ class HDFCMilleniaParse(BaseParser, ABC):
                 columns=columns)
         self.processTableOnPage(tables)
 
+
     def readMiddlePages(self):
         extraction_area = [64, 23, 709, 588]
         columns = [104, 476, 677]

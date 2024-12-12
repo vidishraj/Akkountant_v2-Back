@@ -8,6 +8,8 @@ from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientRes
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import re
+
+from enums.EPGEnum import EPGEnum
 from utils.logger import Logger
 import requests
 import nsepython
@@ -33,6 +35,7 @@ class JSONDownloadService:
     GoldListPrefix: str = "Gold_details"
     GoldRatePrefix: str = "Gold_rate"
     PPFRatePrefix: str = "PPF_rate"
+    EPFRatePrefix: str = "EPF_rate"
     listType: str = "lists"
     ratesType: str = "rates"
 
@@ -46,7 +49,7 @@ class JSONDownloadService:
             self.bas_directory = save_directory
             os.makedirs(save_directory, exist_ok=True)  # Ensure the directory exists
             self.initialized = True
-        self.logger = Logger(__name__).get_logger()
+            self.logger = Logger(__name__).get_logger()
 
     """ Stocks methods """
 
@@ -60,7 +63,6 @@ class JSONDownloadService:
             # Define 72 hours as a timedelta
             seventyTwo_hours = timedelta(hours=72)
             if time_diff <= seventyTwo_hours:
-                self.logger.info("Stock list present. Skipping")
                 return
 
         try:
@@ -71,7 +73,8 @@ class JSONDownloadService:
                     'stockCode': code
                 })
             filePath = self.getFilePath(self.StockListPrefix, self.listType)
-            self.save_json({'date': list_data}, filePath)
+            self.save_json({'data': list_data}, filePath)
+            os.remove(filePath)
         except Exception as ex:
             self.logger.error(f"Error while updating stocks list {ex}")
 
@@ -134,7 +137,8 @@ class JSONDownloadService:
                                     "24 Carat": twenty_four_carat
                                 }
                                 filePath = self.getFilePath(self.GoldRatePrefix, self.ratesType)
-                                lastFilePath = self.getLatestFile(self.ratesType, self.GoldRatePrefix) # To delete later
+                                lastFilePath = self.getLatestFile(self.ratesType,
+                                                                  self.GoldRatePrefix)  # To delete later
                                 self.save_json(rate_data, filePath)
                                 os.remove(lastFilePath)
 
@@ -144,10 +148,27 @@ class JSONDownloadService:
                 f"Failed to retrieve the page during gold management. Status code: {response.status_code}")
 
     def getGoldList(self):
-        pass
+        fileCheck = self.checkJsonInDirectory(self.ratesType, self.GoldRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("Gold Rate file not available right now")
+        filepath = self.getLatestFile(self.ratesType, self.GoldRatePrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData
+        return rateList
 
     def getGoldRate(self, schemeCode):
-        pass
+        fileCheck = self.checkJsonInDirectory(self.ratesType, self.GoldRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("Gold Rate file not available right now")
+        filepath = self.getLatestFile(self.ratesType, self.GoldRatePrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData
+        for item in rateList:
+            if item == schemeCode:
+                return rateList[item]
+        return 0
 
     @staticmethod
     def clean_rate(rate):
@@ -164,6 +185,8 @@ class JSONDownloadService:
         listUrl = "https://nps.purifiedbytes.com/api/schemes.json"
         navUrl = "https://nps.purifiedbytes.com/api/nav/latest.json"
         if not self.checkJsonInDirectory(self.listType, self.NpsListPrefix):
+            latestFilePath = self.getLatestFile(self.listType, self.NpsListPrefix)
+            os.remove(latestFilePath)
             self.logger.info("Either NPS list file doesn't exist or is older than 6 hours, updating it")
             jsonData = self.make_request(listUrl)
             filePath = self.getFilePath(self.NpsListPrefix, self.listType)
@@ -171,16 +194,31 @@ class JSONDownloadService:
         else:
             self.logger.info("Nps List present. Skipping")
         if not self.checkJsonInDirectory(self.ratesType, self.NpsRatePrefix):
+
+            latestFilePath = self.getLatestFile(self.ratesType, self.NpsRatePrefix)
+            os.remove(latestFilePath)
             self.logger.info("Either NPS rate file doesn't exist or is older than 6 hours, updating it")
             jsonData = self.make_request(navUrl)
+            navList = jsonData.get('data')
+            for item in navList:
+                scheme_id = item['scheme_id']
+                historyAPI = f"https://nps.purifiedbytes.com/api/schemes/{scheme_id}/nav.json"
+                historicalData = self.make_request(historyAPI)
+                if historicalData is not None and isinstance(historicalData.get('data'), list) and len(
+                        historicalData['data']) > 0:
+                    item['yesterday'] = historicalData['data'][0]['nav']
+                    if len(historicalData['data']) > 6:
+                        item['lastWeek'] = historicalData['data'][6]['nav']
+                    if len(historicalData['data']) > 179:
+                        item['sixMonthsAgo'] = historicalData['data'][179]['nav']
+
             filePath = self.getFilePath(self.NpsRatePrefix, self.ratesType)
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("Nps Rates present. Skipping")
-        return
+
 
     def getNPSList(self):
-        self.handle_nps()
         fileCheck = self.checkJsonInDirectory(self.listType, self.NpsListPrefix)
         if not fileCheck:
             raise FileNotFoundError("MF file not available right now")
@@ -189,8 +227,20 @@ class JSONDownloadService:
             jsonData = json.load(f)
         return jsonData
 
+    def getNPSListDetailsForScheme(self, schemeCode):
+        fileCheck = self.checkJsonInDirectory(self.listType, self.NpsListPrefix)
+        if not fileCheck:
+            raise FileNotFoundError("MF file not available right now")
+        filepath = self.getLatestFile(self.listType, self.NpsListPrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        detailsList = jsonData['data']
+        for item in detailsList:
+            if item['id'] == schemeCode:
+                return item
+        return {}
+
     def getNPSRate(self, schemeCode):
-        self.handle_nps()
         fileCheck = self.checkJsonInDirectory(self.ratesType, self.NpsRatePrefix)
         if not fileCheck:
             raise FileNotFoundError("MF Rate file not available right now")
@@ -203,12 +253,17 @@ class JSONDownloadService:
                 return item
         return {}
 
-    def getNpsSchemeCodeSchemeName(self, schemeName):
+    def getNpsSchemeCodeSchemeName(self, schemeName: str):
         jsonData = self.getNPSList()
-        for item in jsonData:
-            if item['name'] == schemeName:
-                return item['id']
-        return None
+        # We will be
+        maxSimilarity = 0
+        selected = None
+        for item in jsonData['data']:
+            similarity = self.compareStrings(item['name'], schemeName.upper())
+            if maxSimilarity < similarity:
+                maxSimilarity = similarity
+                selected = item['id']
+        return selected
 
     """ MF methods """
 
@@ -218,7 +273,7 @@ class JSONDownloadService:
             self.logger.info("Either MF list file doesn't exist or is older than 6 hours, updating it")
             listFilePath = self.getFilePath(self.MfListPrefix, self.listType)
             jsonData = self.make_request(listUrl)
-            self.save_json(jsonData, listFilePath)
+            self.save_json({'data': jsonData}, listFilePath)
         else:
             self.logger.info("MF List present. Skipping")
         if not self.checkJsonInDirectory(self.ratesType, self.MfRatePrefix):
@@ -229,10 +284,9 @@ class JSONDownloadService:
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("MF Rates present. Skipping")
-        return
+
 
     def getMfList(self):
-        self.handle_mf()
         fileCheck = self.checkJsonInDirectory(self.listType, self.MfListPrefix)
         if not fileCheck:
             raise FileNotFoundError("MF file not available right now")
@@ -242,7 +296,6 @@ class JSONDownloadService:
         return jsonData
 
     def getMFRate(self, schemeCode):
-        self.handle_mf()
         fileCheck = self.checkJsonInDirectory(self.ratesType, self.MfRatePrefix)
         if not fileCheck:
             raise FileNotFoundError("MF Rate file not available right now")
@@ -258,7 +311,7 @@ class JSONDownloadService:
     def buildJsonForMF(self, baseUrl, listPath):
         with open(listPath, 'r') as file:
             data = json.load(file)
-
+        data = data['data']
         urls = [f"{baseUrl}/{item.get('schemeCode')}" for item in data]
         self.logger.info(f"API URL list built for MF. {len(urls)}")
 
@@ -293,7 +346,7 @@ class JSONDownloadService:
             if not self.checkJsonInDirectory(self.ratesType, self.PPFRatePrefix):
                 response = requests.get(url, verify=False)
                 if response.status_code != 200:
-                    raise Exception(f"Failed to fetch page, status code: {response.status_code}")
+                    raise ClientResponseError(f"Failed to fetch page, status code: {response.status_code}")
                 # Parse the HTML content using BeautifulSoup
                 soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -389,6 +442,48 @@ class JSONDownloadService:
                 self.logger.error(f'Error parsing this date in PPF handling {ex}- {year_range}')
         return result
 
+    # Common method to EPF and PPF rate
+    def getRateForMonth(self, monthString, serviceType):
+        if not serviceType or serviceType not in EPGEnum.__members__:
+            raise ValueError("Invalid or missing serviceType parameter")
+        service_type = EPGEnum[serviceType]
+        filepath = None
+        if service_type == EPGEnum.EPF:
+            filepath = self.getLatestFile(self.ratesType, self.EPFRatePrefix)
+            fileCheck = self.checkJsonInDirectory(self.ratesType, self.EPFRatePrefix)
+        elif service_type == EPGEnum.PF:
+            filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
+            fileCheck = self.checkJsonInDirectory(self.ratesType, self.PPFRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("EPF or PF rate file not available right now")
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData['data']
+        for item in rateList:
+            if item['Year'] == monthString:
+                return item['Interest Rate']
+        return {}
+
+    def getPPFRateFile(self):
+        filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
+        fileCheck = self.checkJsonInDirectory(self.ratesType, self.PPFRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("PPF Rate file not available right now")
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData['data']
+        return rateList
+
+    def getEPFRateFile(self):
+        filepath = self.getLatestFile(self.ratesType, self.EPFRatePrefix)
+        fileCheck = self.checkJsonInDirectory(self.ratesType, self.EPFRatePrefix)
+        if not fileCheck:
+            raise FileNotFoundError("EPF Rate file not available right now")
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        rateList = jsonData['data']
+        return rateList
+
     """ Utility methods """
 
     def getFilePath(self, filename_prefix, type):
@@ -463,6 +558,24 @@ class JSONDownloadService:
             return datetime.strptime(match.group(1), '%Y%m%d_%H%M%S')
         else:
             return datetime.min  # Return a very old date if no timestamp is found
+
+    @staticmethod
+    def compareStrings(str1, str2):
+        words1 = str1.split()
+        words2 = str2.split()
+
+        # Check if the first words match
+        if not words1 or not words2 or words1[-1] != words2[-1]:
+            return False
+
+        # Calculate Jaccard similarity for the rest of the words
+        set1 = set(words1)
+        set2 = set(words2)
+        intersection = set1.intersection(set2)
+        union = set1.union(set2)
+
+        jaccard_similarity = len(intersection) / len(union)
+        return jaccard_similarity
 
     """ Asynchronous methods for MF rate fetching """
 

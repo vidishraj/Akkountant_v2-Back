@@ -1,18 +1,17 @@
-"""
-This file holds the Base class to manage Mutual funds, stocks and NPS data.
-
-"""
 from abc import abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, ROUND_DOWN
 
-from sqlalchemy import func, case
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
-
+from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities, SoldSecurities
+from models.securityTransactions import SecurityTransactions
 from services.JsonDownloadService import JSONDownloadService
 from utils.DateTimeUtil import DateTimeUtil
 from utils.GenericUtils import GenericUtil
-from flask_sqlalchemy import SQLAlchemy, session
+from flask_sqlalchemy import session
 from logging import Logger
 from flask import g
 
@@ -104,6 +103,7 @@ class Base_MSN:
                     "buyID": sec.buyID,
                     "buyCode": sec.securityCode,
                     "buyQuant": sec.buyQuant,
+                    "buyPrice": sec.buyPrice,
                     "schemeCode": sec.securityType,
                     "serviceType": investment_type,
                     "date": sec.date.strftime("%Y-%m-%d"),
@@ -113,42 +113,8 @@ class Base_MSN:
             return result_json
 
         except SQLAlchemyError as e:
-            print(f"Database error occurred: {e}")
+            self.logger.error(f"Database error occurred: {e}")
             return []
-
-    def getActiveMoneyInvested(self, service_type, user_id):
-        """
-        Get the total money invested in active securities based on service type.
-
-        :param service_type: The service type to filter by.
-        :param user_id: The userID to filter by.
-        :return: Active money invested as a float.
-        """
-        try:
-            active_invested = self.db.session.query(
-                func.sum(
-                    case(
-                        [
-                            (PurchasedSecurities.buyQuant > func.coalesce(func.sum(SoldSecurities.sellQuant), 0),
-                             (PurchasedSecurities.buyQuant - func.coalesce(func.sum(SoldSecurities.sellQuant),
-                                                                           0)) * PurchasedSecurities.buyPrice)
-                        ],
-                        else_=0
-                    )
-                )
-            ).join(
-                SoldSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID, isouter=True
-            ).filter(
-                PurchasedSecurities.buyQuant > 0,
-                PurchasedSecurities.serviceType == service_type,
-                PurchasedSecurities.userID == user_id  # Filter by userID
-            ).scalar()
-
-            return float(active_invested) if active_invested else 0.0
-
-        except SQLAlchemyError as e:
-            print(f"Database error occurred: {e}")
-            return 0.0
 
     def getTotalMoneyInvested(self, service_type, user_id):
         """
@@ -169,7 +135,7 @@ class Base_MSN:
             return float(total_invested) if total_invested else 0.0
 
         except SQLAlchemyError as e:
-            print(f"Database error occurred: {e}")
+            self.logger.error(f"Database error occurred: {e}")
             return 0.0
 
     def getTotalProfit(self, service_type, user_id):
@@ -193,41 +159,43 @@ class Base_MSN:
             return float(total_profit) if total_profit else 0.0
 
         except SQLAlchemyError as e:
-            print(f"Database error occurred: {e}")
+            self.logger.error(f"Database error occurred: {e}")
             return 0.0
 
-    def getActiveProfit(self, service_type, user_id):
+    def getActiveMoneyInvested(self, service_type, user_id):
         """
-        Calculate the profit of active securities based on service type.
+        Get the total money invested in active securities based on service type.
 
         :param service_type: The service type to filter by.
         :param user_id: The userID to filter by.
-        :return: Total profit from active securities as a float.
+        :return: Active money invested as a float.
         """
         try:
-            active_profit = self.db.session.query(
-                func.sum(
-                    case(
-                        [
-                            (PurchasedSecurities.buyQuant > func.coalesce(func.sum(SoldSecurities.sellQuant), 0),
-                             (PurchasedSecurities.buyQuant - func.coalesce(func.sum(SoldSecurities.sellQuant),
-                                                                           0)) * SoldSecurities.profit)
-                        ],
-                        else_=0
-                    )
-                )
-            ).join(
-                SoldSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID, isouter=True
-            ).filter(
-                PurchasedSecurities.buyQuant > 0,
-                PurchasedSecurities.serviceType == service_type,
-                PurchasedSecurities.userID == user_id  # Filter by userID
-            ).scalar()
+            """
+                    Calculates the total active invested value for a specific user.
 
-            return float(active_profit) if active_profit else 0.0
+                    :param user_id: The ID of the user whose investment is calculated.
+                    :param security_type: Optional filter for security type (e.g., 'Stocks').
+                    :return: Total active invested value.
+                    """
+            query = self.db.session.query(
+                func.sum(PurchasedSecurities.buyQuant * PurchasedSecurities.buyPrice).label("total_invested")
+            ).filter(
+                PurchasedSecurities.buyQuant > 0,  # Only consider active investments
+                PurchasedSecurities.userID == user_id  # Filter by user
+            )
+
+            # Apply optional security type filter
+            if service_type:
+                query = query.filter(PurchasedSecurities.securityType == service_type)
+
+            # Execute and fetch the scalar result
+            total_invested = query.scalar()
+
+            return float(total_invested) if total_invested else 0.0
 
         except SQLAlchemyError as e:
-            print(f"Database error occurred: {e}")
+            self.logger.error(f"Database error occurred: {e}")
             return 0.0
 
     def getInvestmentHistory(self, service_type=None, user_id=None):
@@ -270,7 +238,7 @@ class Base_MSN:
             return result_json
 
         except SQLAlchemyError as e:
-            print(f"Database error occurred: {e}")
+            self.logger.error(f"Database error occurred: {e}")
             return []
 
     def findIdIfSecurityBought(self, userId, securityCode):
@@ -285,7 +253,32 @@ class Base_MSN:
         else:
             return None
 
-    def updatePriceAndQuant(self, buyId, newPrice, newQuant):
+    def getSecurityCount(self, userId, investment_type):
+        active_securities = self.db.session.query(PurchasedSecurities).filter(
+            PurchasedSecurities.buyQuant > 0,
+            PurchasedSecurities.securityType == investment_type,
+            PurchasedSecurities.userID == userId  # Filter by userID
+        ).all()
+
+        # Check if a result is found
+        if active_securities:
+            return len(active_securities)
+        else:
+            return 0
+
+    def findIfSameSecurityTransactionExists(self, userId, buyID):
+        result = self.db.session.query(PurchasedSecurities).filter(
+            PurchasedSecurities.buyID == buyID,
+            PurchasedSecurities.userID == userId
+        ).first()
+
+        # Check if a result is found
+        if result:
+            return result
+        else:
+            return None
+
+    def updatePriceAndQuant(self, newPrice, newQuant, buyId):
         try:
             # Fetch the record with the given buyID
             security = self.db.session.query(PurchasedSecurities).filter(PurchasedSecurities.buyID == buyId).first()
@@ -295,8 +288,184 @@ class Base_MSN:
             security.buyQuant = newQuant
 
             # Commit the changes to the database
-            self.db.session.commit()
             self.logger.info(f"Record with buyID {buyId} successfully updated.")
         except Exception as e:
-            self.db.session.rollback()  # Roll back in case of error
             self.logger.error(f"An error occurred while updating row {e}")
+
+    def calculateStockRates(self, data_list):
+        with ThreadPoolExecutor() as executor:
+            # Submit tasks to threads and collect Future objects
+            # @TODO Manage changed symbols and edge case for fucking SUZLON-BC
+            futures = [
+                executor.submit(self.findSecurity, data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON") for
+                data in data_list]
+
+            # Use results from completed tasks to call another method
+            rateDictionary = {}
+            for future in futures:
+                result = future.result()
+                # Waits for the thread to complete and gets the return value
+                rate_card = self.genericUtil.fetchStockRates(result)
+                rateDictionary[rate_card['symbol']] = rate_card
+            return rateDictionary
+
+    def calculateProfitAndCurrentValue(self, investment_type: str, user_id: int):
+        """
+        Calculate the profit and current value for each stock.
+
+        :param investment_type: Type of the security to filter (e.g., Stocks, Mutual Funds, NPS).
+        :param user_id: ID of the user to filter.
+        :return: List of dictionaries with profit and current value for each stock.
+        """
+        try:
+            # Fetch active securities
+            active_securities = self.fetchActive(investment_type, user_id)
+
+            if not active_securities:
+                return []
+
+            results = {}
+            if investment_type == MSNENUM.Stocks.value:
+                rate_data = self.calculateStockRates(active_securities)
+                for sec in active_securities:
+                    # Calculate current value and profit
+                    current_value = Decimal(sec["buyQuant"]) * Decimal(rate_data["lastPrice"]).quantize(Decimal('0.01'),
+                                                                                                        rounding=ROUND_DOWN)
+                    buy_value = Decimal(sec["buyQuant"]) * Decimal(sec["buyPrice"]).quantize(Decimal('0.01'),
+                                                                                             rounding=ROUND_DOWN)
+                    profit = (current_value - buy_value).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+                    # Append results
+                    results[sec["buyID"]] = {
+                        "currentValue": float(current_value),
+                        "profit": float(profit),
+                    }
+
+            for sec in active_securities:
+                # Fetch the current rate for the security
+                rate_data = None
+                if investment_type == MSNENUM.NPS.value:
+                    rates = self.JsonDownloadService.getNPSRate(sec['buyCode'])
+                    rate_data = {'lastPrice': rates['nav']}
+                if "error" in rate_data:
+                    self.logger.error(f"Error fetching rate data for {sec['buyCode']}: {rate_data['error']}")
+                    continue
+
+                # Calculate current value and profit
+                current_value = Decimal(sec["buyQuant"]) * Decimal(rate_data["lastPrice"]).quantize(Decimal('0.01'),
+                                                                                                    rounding=ROUND_DOWN)
+                buy_value = Decimal(sec["buyQuant"]) * Decimal(sec["buyPrice"]).quantize(Decimal('0.01'),
+                                                                                         rounding=ROUND_DOWN)
+                profit = (current_value - buy_value).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+                # Append results
+                results[sec["buyID"]] = {
+                    "currentValue": float(current_value),
+                    "profit": float(profit),
+                }
+
+            return results
+
+        except Exception as e:
+            self.logger.error(f"An error occurred: {e}")
+            return []
+
+    def insert_security_transaction(self, transaction_data: dict):
+        """
+        Inserts a new record into the SecurityTransactions table.
+        Args:
+            transaction_data (dict): Dictionary containing transaction details:
+                {
+                    "date": str (format: '%Y-%m-%d'),
+                    "quant": int,
+                    "price": Decimal or float,
+                    "transactionType": str ("buy" or "sell"),
+                    "userID": str,
+                    "securityType": str
+                }
+        Returns:
+            SecurityTransactions: The inserted SecurityTransactions object.
+        """
+        try:
+            # Validate input data
+            required_keys = {"date", "quant", "price", "transactionType", "userID", "securityType"}
+            if not required_keys.issubset(transaction_data):
+                raise ValueError(f"Missing required fields: {required_keys - transaction_data.keys()}")
+
+            # Parse and create SecurityTransactions instance
+            new_transaction = SecurityTransactions(
+                date=transaction_data["date"],
+                quant=transaction_data["quant"],
+                price=Decimal(transaction_data["price"]),
+                transactionType=transaction_data["transactionType"],
+                userID=transaction_data["userID"],
+                securityType=transaction_data["securityType"]
+            )
+
+            # Add and commit the new transaction
+            self.db.session.add(new_transaction)\
+
+            if transaction_data['securityType'] != MSNENUM.Stocks.value:
+                # Only commit when outside stocks transaction loop
+                self.db.session.commit()
+
+            return new_transaction
+        except Exception as e:
+            self.db.session.rollback()  # Rollback in case of error
+            self.logger.error(f"Error inserting security transaction: {e}")
+            return None
+
+    def fetchTransactionsForUserAndService(self, security_type: str, user_id: str, ):
+        try:
+            transactions = (
+                self.db.session.query(SecurityTransactions)
+                .filter(
+                    SecurityTransactions.userID == user_id,
+                    SecurityTransactions.securityType == security_type
+                )
+                .all()
+            )
+            transactionDict = []
+            for transaction in transactions:
+                transactionDict.append( {
+                    'id': transaction.transactionId,
+                    'date': transaction.date,
+                    'price': transaction.price,
+                    'quant': transaction.quant,
+                    'transactionType': transaction.transactionType,
+                })
+            return transactionDict
+        except Exception as ex:
+            # Handle/log exception appropriately
+            self.logger.error(f"Error fetching transactions for user {user_id} and security type {security_type}: {ex}")
+            return []
+
+    def delete_purchased_securities_by_user(self, user_id: str):
+        """
+        Deletes records from the PurchasedSecurities table for a given userID.
+
+        Args:
+            user_id (str): The ID of the user whose records are to be deleted.
+
+        Returns:
+            dict: Status message indicating success or failure.
+        """
+        try:
+            # Fetch records for the given userID
+            records_to_delete = self.db.session.query(PurchasedSecurities).filter(PurchasedSecurities.userID == user_id).all()
+
+            if not records_to_delete:
+                return {"message": f"No records found for userID: {user_id}"}
+
+            # Delete the records
+            for record in records_to_delete:
+                self.db.session.delete(record)
+
+            # Commit the transaction
+            self.db.session.commit()
+            return {"message": f"Successfully deleted all records for userID: {user_id}"}
+
+        except SQLAlchemyError as e:
+            # Rollback in case of an error
+            self.db.session.rollback()
+            return {"error": f"Failed to delete records for userID: {user_id}. Error: {str(e)}"}

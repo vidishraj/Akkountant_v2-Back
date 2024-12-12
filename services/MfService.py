@@ -4,8 +4,9 @@ from sqlalchemy.exc import NoResultFound
 from werkzeug.routing import ValidationError
 
 from enums.MsnEnum import MSNENUM
+
 from models.purchasedSecurities import PurchasedSecurities
-from models.soldSecurities import SoldSecurities
+from models.securities import SoldSecurities
 from services.Base_MSN import Base_MSN
 
 
@@ -32,6 +33,10 @@ class MfService(Base_MSN, ABC):
             date = security_data.get('date')
             if date is None:
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
+            transactionObject = dict(date=date, quant=security_data['buyQuant'], price=security_data['buyPrice'],
+                                     transactionType="buy", userID=userId, securityType=MSNENUM.Mutual_Funds.value)
+            self.insert_security_transaction(transactionObject)
+
             if existingRow is None:
                 # Proceed with insertion if validation passes and not existing
                 new_purchase = PurchasedSecurities(
@@ -74,6 +79,11 @@ class MfService(Base_MSN, ABC):
             date = sell_data.get('date')
             if date is None:
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
+
+            # Insert transaction into separate table
+            transactionObject = dict(date=date, quant=sell_data['sellQuant'], price=sell_data['sellPrice'],
+                                     transactionType="sell", userID=userId, securityType=MSNENUM.Mutual_Funds.value)
+            self.insert_security_transaction(transactionObject)
 
             # Insert into SoldSecurities
             new_sale = SoldSecurities(

@@ -21,6 +21,8 @@ class BaseParser(ABC):
 
     def parseFile(self):
         try:
+            # Reset list to prevent duplicates
+            self._transactionList = []
             self.countPages()
             self.readFirstPage()
             if self.pagesInPDF > 1:
