@@ -2,7 +2,6 @@ import datetime
 
 from enums.DateFormatEnum import DateStatementEnum
 
-# Define a list of common datetime formats
 datetime_formats = [
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
@@ -85,3 +84,20 @@ class DateTimeUtil:
     @staticmethod
     def getCurrentDatetimeSqlFormat():
         return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    @staticmethod
+    def convert_format_for_epf(date_str: str) -> str:
+        """
+        Converts a date from format '%d-%m-%Y' to '%Y-%m'.
+
+        Args:
+            date_str (str): Date string in '%d-%m-%Y' format.
+
+        Returns:
+            str: Date string in '%Y-%m' format.
+        """
+        try:
+            parsed_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            return parsed_date.strftime("%Y-%m")
+        except ValueError as e:
+            raise ValueError(f"Error: Invalid date format. Expected '%d-%m-%Y', got '{date_str}'. {e}")

@@ -3,7 +3,11 @@ import re
 import hashlib
 import shutil
 import uuid
+from decimal import Decimal, ROUND_DOWN
 
+from marshmallow import ValidationError
+
+from dtos.MSNListDto import MSNList
 from enums.EmailRegexEnum import EmailRegexEnum
 from utils.DateTimeUtil import DateTimeUtil
 from utils.logger import Logger
@@ -82,3 +86,32 @@ class GenericUtil:
     def generate_custom_buyID():
         # Custom logic to generate unique IDs; adjust as needed
         return f"CUSTOM-{uuid.uuid4().hex[:8]}"  # Example: CUSTOM-ab12cd34
+
+    @staticmethod
+    def fetchStockRates(response):
+        info = response.get('info', {})
+        price_info = response.get('priceInfo', {})
+
+        # Format data using Decimal quantization
+        data = {
+            "symbol": info.get('symbol', ''),
+            "companyName": info.get('companyName', ''),
+            "industry": info.get('industry', ''),
+            "lastPrice": Decimal(price_info.get('lastPrice', 0)).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+            "change": Decimal(price_info.get('change', 0)).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+            "pChange": Decimal(price_info.get('pChange', 0)).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+            "previousClose": Decimal(price_info.get('previousClose', 0)).quantize(Decimal('0.01'),
+                                                                                  rounding=ROUND_DOWN),
+            "open": Decimal(price_info.get('open', 0)).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+            "close": Decimal(price_info.get('close', 0)).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+            "dayHigh": Decimal(price_info.get('intraDayHighLow', {}).get('max', 0)).quantize(Decimal('0.01'),
+                                                                                             rounding=ROUND_DOWN),
+            "dayLow": Decimal(price_info.get('intraDayHighLow', {}).get('min', 0)).quantize(Decimal('0.01'),
+                                                                                            rounding=ROUND_DOWN),
+        }
+        msn_summary_schema = MSNList()
+        try:
+            result = msn_summary_schema.load(data)
+            return result
+        except ValidationError as err:
+            return {'error': f'Validation Error {err}'}
