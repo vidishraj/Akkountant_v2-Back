@@ -19,4 +19,6 @@ class User(Base):
     transaction_reviews = relationship('TransactionForReview', back_populates='user_relationship')
     user_tokens = relationship('UserToken', back_populates='user_relationship')
     purchased_securities = relationship('PurchasedSecurities', back_populates='user_relationship')
+    deposit_relationship = relationship('DepositSecurities', back_populates='user_relationship')
+    transaction_relationship = relationship('SecurityTransactions', back_populates='user_relationship')
 

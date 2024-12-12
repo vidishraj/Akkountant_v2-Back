@@ -5,6 +5,9 @@ from models.transactionsForReview import TransactionForReview
 from models.savedTags import SavedTags
 from models.statementPasswords import StatementPasswords
 from models.googleTokens import UserToken
-from models.soldSecurities import SoldSecurities
+from models.securities import SoldSecurities
+from models.depositSecurities import DepositSecurities
 from models.purchasedSecurities import PurchasedSecurities
+from models.GoldDetails import GoldDetails
+from models.securityTransactions import SecurityTransactions
 from models.Base import Base

@@ -13,7 +13,7 @@ class FileDetails(Base):
     fileSize = Column(String(64), nullable=False)
     statementCount = Column(Integer, nullable=False)
     bank = Column(String(100), nullable=False)
-    user = Column(String(100), ForeignKey('users.userID'), nullable=False)
+    user = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)
 
     transactions = relationship('Transactions', back_populates='file_details')
     user_relationship = relationship('User', back_populates='file_details')

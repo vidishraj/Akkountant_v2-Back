@@ -15,7 +15,7 @@ class Transactions(Base):
     fileID = Column(String(100), ForeignKey('fileDetails.fileID'), nullable=True)
     source = Column(String(10), nullable=False)
     bank = Column(String(25), nullable=False)
-    user = Column(String(100), ForeignKey('users.userID'), nullable=False)
+    user = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)
 
     file_details = relationship('FileDetails', back_populates='transactions')
     user_relationship = relationship('User', back_populates='transactions')

@@ -9,5 +9,5 @@ class SavedTags(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     details = Column(String(100), nullable=False)
     tag = Column(Date, nullable=False)
-    user = Column(String(100), ForeignKey('users.userID'), nullable=False)
+    user = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)
     user_relationship = relationship('User', back_populates='saved_tags')
