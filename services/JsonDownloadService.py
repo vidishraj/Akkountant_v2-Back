@@ -74,7 +74,7 @@ class JSONDownloadService:
                 })
             filePath = self.getFilePath(self.StockListPrefix, self.listType)
             self.save_json({'data': list_data}, filePath)
-            os.remove(filePath)
+            self.deleteFile(filePath)
         except Exception as ex:
             self.logger.error(f"Error while updating stocks list {ex}")
 
@@ -140,7 +140,7 @@ class JSONDownloadService:
                                 lastFilePath = self.getLatestFile(self.ratesType,
                                                                   self.GoldRatePrefix)  # To delete later
                                 self.save_json(rate_data, filePath)
-                                os.remove(lastFilePath)
+                                self.deleteFile(lastFilePath)
 
 
         else:
@@ -186,7 +186,7 @@ class JSONDownloadService:
         navUrl = "https://nps.purifiedbytes.com/api/nav/latest.json"
         if not self.checkJsonInDirectory(self.listType, self.NpsListPrefix):
             latestFilePath = self.getLatestFile(self.listType, self.NpsListPrefix)
-            os.remove(latestFilePath)
+            self.deleteFile(latestFilePath)
             self.logger.info("Either NPS list file doesn't exist or is older than 6 hours, updating it")
             jsonData = self.make_request(listUrl)
             filePath = self.getFilePath(self.NpsListPrefix, self.listType)
@@ -194,9 +194,8 @@ class JSONDownloadService:
         else:
             self.logger.info("Nps List present. Skipping")
         if not self.checkJsonInDirectory(self.ratesType, self.NpsRatePrefix):
-
             latestFilePath = self.getLatestFile(self.ratesType, self.NpsRatePrefix)
-            os.remove(latestFilePath)
+            self.deleteFile(latestFilePath)
             self.logger.info("Either NPS rate file doesn't exist or is older than 6 hours, updating it")
             jsonData = self.make_request(navUrl)
             navList = jsonData.get('data')
@@ -216,7 +215,6 @@ class JSONDownloadService:
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("Nps Rates present. Skipping")
-
 
     def getNPSList(self):
         fileCheck = self.checkJsonInDirectory(self.listType, self.NpsListPrefix)
@@ -284,7 +282,6 @@ class JSONDownloadService:
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("MF Rates present. Skipping")
-
 
     def getMfList(self):
         fileCheck = self.checkJsonInDirectory(self.listType, self.MfListPrefix)
@@ -515,16 +512,26 @@ class JSONDownloadService:
                 # Extract the timestamp from the most recent file's name
                 file_timestamp = self.extract_timestamp(most_recent_file)
                 time_diff = datetime.now() - file_timestamp
-
-                # Define 6 hours as a timedelta
-                six_hours = timedelta(hours=88)
-                # Compare time difference with six_hours
-                if time_diff <= six_hours:
-                    # File is less than 6 hours old, do nothing it
+                td = None
+                # Define timedelta based on the investment type
+                if filename_prefix == self.PPFRatePrefix:
+                    # Update PPF rate once in 3 months
+                    td = timedelta(days=89)
+                if filename_prefix == self.GoldRatePrefix:
+                    td = timedelta(days=1)
+                if filename_prefix == self.NpsListPrefix or filename_prefix == self.NpsRatePrefix:
+                    td = timedelta(days=1)
+                if filename_prefix == self.MfListPrefix or filename_prefix == self.MfRatePrefix:
+                    td = timedelta(days=30)
+                if filename_prefix == self.StockListPrefix:
+                    td = timedelta(days=20)
+                # Compare time difference
+                if time_diff <= td:
+                    # do nothing it
                     return True
                 else:
                     # Delete the file
-                    os.remove(most_recent_file_path)
+                    self.deleteFile(most_recent_file_path)
                     return False
             return False
         except Exception as e:
@@ -612,3 +619,8 @@ class JSONDownloadService:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         return results
+
+    @staticmethod
+    def deleteFile(filePath):
+        if filePath is not None:
+            os.remove(filePath)
