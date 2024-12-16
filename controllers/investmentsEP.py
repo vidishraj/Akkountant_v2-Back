@@ -184,7 +184,7 @@ class InvestmentController:
         user_id, service_type = params
         # Validate the request JSON body
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
-        return self.InvestmentService.fetchCompleteDataForEPG(service_type, user_id)
+        return self.InvestmentService.fetchActiveSecurities(service_type, user_id)
 
     @staticmethod
     def validate_security_transaction(service_type):
@@ -208,9 +208,13 @@ class InvestmentController:
 
             # Required keys
             required_keys = ["date", "description", "amount"]
-
+            required_keysMF = ["date", "amount", "quantity", "schemeCode"]
             # Ensure all required fields are present
-            missing_keys = [key for key in required_keys if key not in data]
+            if service_type != MSNENUM.Mutual_Funds:
+                missing_keys = [key for key in required_keys if key not in data]
+            else:
+                missing_keys = [key for key in required_keysMF if key not in data]
+
             if missing_keys:
                 return None, (jsonify({"error": f"Missing keys: {', '.join(missing_keys)}"}), 400)
 
@@ -218,17 +222,14 @@ class InvestmentController:
             try:
                 datetime.strptime(data["date"], "%d-%m-%Y")
             except ValueError:
-                return None, (jsonify({"error": "Invalid date format. Use dd/mm/YYYY"}), 400)
+                return None, (jsonify({"error": "Invalid date format. Use dd-mm-YYYY"}), 400)
 
             # Validate 'deposit' and 'amount' fields
-            if not isinstance(data["description"], str) or not data["description"]:
-                return None, (jsonify({"error": "Invalid 'description'. It must be a non-empty string"}), 400)
-            if not isinstance(data["amount"], (int, float)) or data["amount"] <= 0:
-                return None, (jsonify({"error": "Invalid 'amount'. It must be a positive number"}), 400)
-
-            # Additional check for 'Mutual_Funds' service type
-            if service_type == "Mutual_Funds" and "buyID" not in data:
-                return None, (jsonify({"error": "'buyID' is required for Mutual_Funds service type"}), 400)
+            if service_type != MSNENUM.Mutual_Funds:
+                if not isinstance(data["description"], str) or not data["description"]:
+                    return None, (jsonify({"error": "Invalid 'description'. It must be a non-empty string"}), 400)
+                if not isinstance(data["amount"], (int, float)) or data["amount"] <= 0:
+                    return None, (jsonify({"error": "Invalid 'amount'. It must be a positive number"}), 400)
 
             # All validations passed
             return data, None
@@ -275,7 +276,7 @@ class InvestmentController:
         user_id, service_type = params
         buyId = request.args.get('buyId')
         if buyId is None:
-            return jsonify({"Error":"BuyID is missing"}), 406
+            return jsonify({"Error": "BuyID is missing"}), 406
         # Validate the request JSON body
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
         return self.InvestmentService.deleteSingleRecord(service_type, buyId)
