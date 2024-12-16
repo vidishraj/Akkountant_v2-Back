@@ -115,3 +115,7 @@ class GenericUtil:
             return result
         except ValidationError as err:
             return {'error': f'Validation Error {err}'}
+
+    @staticmethod
+    def convertToDecimal(num):
+        return Decimal(num).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
