@@ -629,11 +629,9 @@ class JSONDownloadService:
                         data = await resp.json()  # Use .json() for JSON responses
                         return url.split("/")[-1], data
                 except (ClientConnectorError, asyncio.TimeoutError) as e:
-                    self.logger.info(f"Checking error {e.__name__}")
                     retries += 1
                     await asyncio.sleep(RETRY_DELAY)
                 except ClientResponseError as e:
-                    self.logger.info(f"Checking this too {e}")
                     return url, e.status  # Return specific HTTP error code
                 except Exception as e:
                     self.logger.error(f"Unexpected error for {url}: {e}")
