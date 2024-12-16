@@ -138,6 +138,7 @@ class Akkountant(Flask):
             ('/getFileDetails', 'POST', self.transactionEP.fetchFileDetails),
             ('/getGoogleStatus', 'GET', self.transactionEP.checkGoogleApiStatus),
             ('/updateGoogleTokens', 'POST', self.transactionEP.addUpdateUserToken),
+            ('/setOptedBanks', 'POST', self.transactionEP.setOptedBanks),
         ]
 
         for rule, method, view_func in transactionRoutes:

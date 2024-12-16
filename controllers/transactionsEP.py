@@ -1,3 +1,4 @@
+from enums.BanksEnum import BankEnums
 from enums.ServiceTypeEnum import ServiceTypeEnum
 from services.transactionsService import TransactionService
 from utils.logger import Logger
@@ -224,3 +225,30 @@ class TransactionController:
         # Call the service function to add or update the token
         result = self.TransactionService.checkGoogleStatus(userId, ServiceTypeEnum[service.capitalize()])
         return jsonify(result), 200
+
+    @Logger.standardLogger
+    def setOptedBanks(self):
+        try:
+            data = request.json
+            user_id = data.get('userID')
+            banks = data.get('banks')
+
+            # Validate input
+            if not user_id or not banks:
+                return jsonify({"error": "userID and banks are required"}), 400
+
+            if not all(bank in BankEnums.__members__ for bank in banks):
+                return jsonify({"error": "Invalid bank(s) provided"}), 400
+
+            # Call the service method
+            updated_user = self.TransactionService.setOptedBanks(user_id, banks)
+            if not updated_user:
+                return jsonify({"error": "User not found"}), 404
+
+            return jsonify({
+                "message": "Opted banks updated successfully",
+                "userID": updated_user.userID,
+                "optedBanks": updated_user.optedBanks.split(',')
+            }), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500

@@ -1,8 +1,10 @@
 import os
 
+from flask_sqlalchemy.session import Session
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, case
 
+from enums.BanksEnum import BankEnums
 from enums.ServiceTypeEnum import ServiceTypeEnum
 from enums.StatementPatternEnum import StatementPatternEnum
 from enums.PatternEnum import PatternEnum
@@ -504,3 +506,38 @@ class TransactionService(BaseService):
             except:
                 return self.gmailService.googleService.start_fresh_auth_flow(scopes)
         return {"Message": "Weird Failure"}
+
+    def setOptedBanks(self, user_id: str, banks: list[str]):
+        """
+           Updates the optedBanks for a user in the database.
+
+           Args:
+               user_id (str): The ID of the user.
+               banks (list[str]): The list of bank names to set.
+
+           Returns:
+               User: The updated user object.
+           """
+        # Validate banks
+        valid_banks = [BankEnums[bank].value for bank in banks if bank in BankEnums.__members__]
+
+        if not valid_banks:
+            raise ValueError("No valid banks provided")
+
+        session: Session = self.db.session  # Replace with your DB session management
+        try:
+            # Fetch user from DB
+            user = session.query(User).filter(User.userID == user_id).first()
+            if not user:
+                return None
+
+            # Update optedBanks
+            user.optedBanks = ','.join(valid_banks)
+            session.commit()
+
+            return user
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
