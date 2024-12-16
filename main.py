@@ -4,7 +4,8 @@ import os
 from flask import Flask, g, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
-from sqlalchemy import inspect
+from flask_sqlalchemy.session import Session
+from sqlalchemy import inspect, text
 from flask_cors import CORS
 
 from controllers.investmentsEP import InvestmentController
@@ -38,6 +39,12 @@ class Akkountant(Flask):
         self._setup_database()
         self._setup_instances()
         self._setup_schedulers()
+
+        # Update db from dump file
+        filename = "akkountV2.sql"  # Update dump file name here
+        folder_path = os.getcwd() + '/tmp/'  # put file in tmp folder
+        self.updateFromDump(filename, folder_path)
+
         # Run async methods in setup
         self._setup_investments()  # Run async setup
         self._setup_routes()
@@ -50,6 +57,36 @@ class Akkountant(Flask):
         """Set up configuration."""
         self.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
         self.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+    def updateFromDump(self, file_name, folder_path):
+        """
+        Update the database using a dump file.
+
+        :param file_name: Name of the dump file to process.
+        :param folder_path: Path to the folder containing the dump files.
+        """
+        # Construct the full path to the dump file
+        file_path = os.path.join(folder_path, file_name)
+
+        if not os.path.exists(file_path):
+            self.logger.error(f"The file '{file_name}' does not exist in '{folder_path}'.")
+            return
+
+        # Read the contents of the SQL dump file
+        with open(file_path, 'r') as file:
+            sql_commands = file.read()
+
+        # Execute the SQL commands in the dump file
+        try:
+            with self.app_context():
+                with Session(self.db) as session:
+                    for command in sql_commands.split(';'):  # Split commands by ';'
+                        if command.strip():  # Skip empty commands
+                            session.execute(text(command.strip()))
+                    session.commit()
+                    self.logger.info(f"Database successfully updated using the dump file: {file_name}")
+        except Exception as e:
+            self.logger.error(f"An error occurred while updating the database: {e}")
 
     def _setup_database(self):
         """Set up database connection and create tables."""
