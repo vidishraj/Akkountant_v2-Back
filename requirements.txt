@@ -1,0 +1,12 @@
+marshmallow~=3.23.0
+flask~=3.0.3
+uuid~=1.30
+python-dotenv~=1.0.1
+SQLAlchemy~=2.0.36
+pandas~=2.2.3
+werkzeug~=3.0.6
+requests~=2.32.3
+python-dateutil~=2.9.0.post0
+nsepython~=2.94
+aiohttp~=3.11.7
+beautifulsoup4~=4.12.3
