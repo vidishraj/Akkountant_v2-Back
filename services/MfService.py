@@ -1,4 +1,5 @@
 from abc import ABC
+from decimal import Decimal
 
 from sqlalchemy.exc import NoResultFound
 from werkzeug.routing import ValidationError
@@ -8,6 +9,7 @@ from enums.MsnEnum import MSNENUM
 from models.purchasedSecurities import PurchasedSecurities
 from models.securities import SoldSecurities
 from services.Base_MSN import Base_MSN
+from utils.logger import Logger
 
 
 class MfService(Base_MSN, ABC):
@@ -15,17 +17,21 @@ class MfService(Base_MSN, ABC):
     def __init__(self):
         super().__init__()
         self.baseAPIURL = "https://api.mfapi.in/"
+        self.logger = Logger(__name__).get_logger()
 
     def fetchAllSecurities(self):
         return self.JsonDownloadService.getMfList()
 
     def findSecurity(self, securityCode):
-        return self.JsonDownloadService.getMFRate(securityCode)
+        securityItem = self.JsonDownloadService.getMFRate(securityCode)
+        secName = self.JsonDownloadService.getMfNameForSchemeId(securityCode)
+        securityItem['companyName'] = secName
+        return securityItem
 
     def buySecurity(self, security_data, userId):
         try:
             # Validate the securityCode using the separate function
-            if not self.checkIfSecurityExists(security_data['securityCode']):
+            if not self.checkIfSecurityExists(int(security_data['securityCode'])):
                 return {"error": "Invalid code"}
             # Check if the user has the same security bought already. If yes add
             existingRow: PurchasedSecurities = self.findIdIfSecurityBought(userId, security_data['securityCode'])
@@ -34,27 +40,32 @@ class MfService(Base_MSN, ABC):
             if date is None:
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
             transactionObject = dict(date=date, quant=security_data['buyQuant'], price=security_data['buyPrice'],
-                                     transactionType="buy", userID=userId, securityType=MSNENUM.Mutual_Funds.value)
-            self.insert_security_transaction(transactionObject)
+                                     transactionType="buy", userID=userId, securityType="Mutual_Funds")
 
             if existingRow is None:
                 # Proceed with insertion if validation passes and not existing
+
+                randomBuyId = self.genericUtil.generate_custom_buyID()
+                transactionObject['buyId'] = randomBuyId
                 new_purchase = PurchasedSecurities(
+                    buyID=randomBuyId,
                     securityCode=security_data['securityCode'],
                     date=date,
                     buyQuant=security_data['buyQuant'],
                     buyPrice=security_data['buyPrice'],
                     userID=userId,
-                    securityType=MSNENUM.Mutual_Funds
+                    securityType=MSNENUM.Mutual_Funds.value
                 )
 
                 self.db.session.add(new_purchase)
             else:
                 # We update the old purchase by finding average of price
-                newQuant = existingRow.buyQuant + security_data['buyQuant']
-                newPrice = (existingRow.buyPrice * existingRow.buyQuant) + (
-                        security_data['buyQuant'] * security_data['buyPrice']) / newQuant
+                transactionObject['buyId'] = existingRow.buyID
+                newQuant = existingRow.buyQuant + Decimal(security_data['buyQuant'])
+                newPrice = ((existingRow.buyPrice * existingRow.buyQuant) + (
+                        Decimal(security_data['buyQuant']) * Decimal(security_data['buyPrice']))) / newQuant
                 self.updatePriceAndQuant(newPrice, newQuant, existingRow.buyID)
+            self.insert_security_transaction(transactionObject)
             self.db.session.commit()
             return {"message": "Security purchased successfully"}
 
@@ -82,7 +93,8 @@ class MfService(Base_MSN, ABC):
 
             # Insert transaction into separate table
             transactionObject = dict(date=date, quant=sell_data['sellQuant'], price=sell_data['sellPrice'],
-                                     transactionType="sell", userID=userId, securityType=MSNENUM.Mutual_Funds.value)
+                                     transactionType="sell", userID=userId, securityType=MSNENUM.Mutual_Funds.value,
+                                     buyId=purchase.buyID)
             self.insert_security_transaction(transactionObject)
 
             # Insert into SoldSecurities
@@ -104,6 +116,6 @@ class MfService(Base_MSN, ABC):
         mfList = self.JsonDownloadService.getMfList()
         mfList = mfList['data']
         for scheme in mfList:
-            if symbol == scheme:
+            if symbol == scheme['schemeCode']:
                 return True
         return False

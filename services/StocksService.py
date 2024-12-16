@@ -40,11 +40,11 @@ class StocksService(Base_MSN, ABC):
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
             transactionObject = dict(date=date, quant=security_data['buyQuant'], price=security_data['buyPrice'],
                                      transactionType="buy", userID=userId, securityType=MSNENUM.Stocks.value)
-            self.insert_security_transaction(transactionObject)
             if existingRow is None:
                 # Proceed with insertion if validation passes and not existing
                 buyID = security_data.get('buyID')
                 # Insert Trade
+                transactionObject['buyId'] = buyID
                 newTrade = TradeAssociation(
                     tradeID=security_data['tradeID'],
                     buyID=buyID,
@@ -65,6 +65,7 @@ class StocksService(Base_MSN, ABC):
                     tradeID=security_data['tradeID'],
                     buyID=existingRow.buyID,
                 )
+                transactionObject['buyId'] = existingRow.buyID
                 # We update the old purchase by finding average of price
                 newQuant = existingRow.buyQuant + security_data['buyQuant']
                 newPrice = (((existingRow.buyPrice * existingRow.buyQuant) +
@@ -72,6 +73,7 @@ class StocksService(Base_MSN, ABC):
                             / newQuant).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 self.updatePriceAndQuant(newPrice, newQuant, existingRow.buyID)
             # Finally adding the trade
+            self.insert_security_transaction(transactionObject)
             self.db.session.add(newTrade)
             return {"message": "Security purchased successfully"}
 
@@ -118,7 +120,8 @@ class StocksService(Base_MSN, ABC):
 
             # Insert transaction into separate table
             transactionObject = dict(date=date, quant=sell_data['sellQuant'], price=sell_data['sellPrice'],
-                                     transactionType="sell", userID=userId, securityType=MSNENUM.Stocks.value)
+                                     transactionType="sell", userID=userId, securityType=MSNENUM.Stocks.value,
+                                     buyId=purchase.buyID)
             self.insert_security_transaction(transactionObject)
 
             # Insert into SoldSecurities

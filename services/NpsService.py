@@ -40,11 +40,12 @@ class NPSService(Base_MSN, ABC):
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
             transactionObject = dict(date=date, quant=security_data['buyQuant'], price=security_data['buyPrice'],
                                      transactionType="buy", userID=userId, securityType=MSNENUM.NPS.value)
-            self.insert_security_transaction(transactionObject)
             if existingRow is None:
                 # Proceed with insertion if validation passes and not existing
+                randomBuyId = self.genericUtil.generate_custom_buyID()
+                transactionObject['buyId'] = randomBuyId
                 new_purchase = PurchasedSecurities(
-                    buyID=self.genericUtil.generate_custom_buyID(),
+                    buyID=randomBuyId,
                     securityCode=security_data['securityCode'],
                     date=date,
                     buyQuant=security_data['buyQuant'],
@@ -55,11 +56,13 @@ class NPSService(Base_MSN, ABC):
                 self.db.session.add(new_purchase)
             else:
                 # We update the old purchase by finding average of price
+                transactionObject['buyId'] = existingRow.buyID
                 newQuant = existingRow.buyQuant + Decimal(security_data['buyQuant'])
                 newPrice = (((existingRow.buyPrice * existingRow.buyQuant) +
                              (Decimal(security_data['buyQuant']) * Decimal(security_data['buyPrice'])))
                             / newQuant).quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
                 self.updatePriceAndQuant(newPrice, newQuant, existingRow.buyID)
+            self.insert_security_transaction(transactionObject)
             self.db.session.commit()
             return {"message": "Security purchased successfully"}
 
@@ -87,7 +90,8 @@ class NPSService(Base_MSN, ABC):
 
             # Insert transaction into separate table
             transactionObject = dict(date=date, quant=sell_data['sellQuant'], price=sell_data['sellPrice'],
-                                     transactionType="sell", userID=userId, securityType=MSNENUM.NPS.value)
+                                     transactionType="sell", userID=userId, securityType=MSNENUM.NPS.value,
+                                     buyId=purchase.buyID)
             self.insert_security_transaction(transactionObject)
 
             # Insert into SoldSecurities

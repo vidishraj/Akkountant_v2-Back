@@ -1,5 +1,5 @@
 from abc import ABC
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 
 from flask import jsonify
 from sqlalchemy import and_
@@ -33,7 +33,9 @@ class GoldService(Base_EPG, ABC):
             insertionObject = self.insertDepositFinal(deposit_security)
             self.insertTransactionType(buyId, data['quantity'], data['goldType'])
             self.logger.info("Inserted gold type details to gold details")
-            return insertionObject
+            if 'error' in insertionObject:
+                return jsonify({"Error": "Error in Gold entry"}), 406
+            return jsonify({"Message": "Gold Transaction inserted successfully"}), 200
         except Exception as ex:
             self.logger.error(f"Failed while inserting Gold Transaction {ex}")
             return jsonify({"Error": "Failed while inserting Gold Transaction"}), 5010
@@ -81,8 +83,8 @@ class GoldService(Base_EPG, ABC):
         return {
             'transactions': transactions,
             'deposits': depositDict,
-            'netProfit': netProfit,
-            'net': net,
+            'netProfit': Decimal(netProfit).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+            'net': Decimal(net).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
         }
 
     def fetchRates(self):

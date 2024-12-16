@@ -241,15 +241,20 @@ class JSONDownloadService:
     def getNPSRate(self, schemeCode):
         fileCheck = self.checkJsonInDirectory(self.ratesType, self.NpsRatePrefix)
         if not fileCheck:
-            raise FileNotFoundError("MF Rate file not available right now")
+            raise FileNotFoundError("NPS Rate file not available right now")
         filepath = self.getLatestFile(self.ratesType, self.NpsRatePrefix)
         with open(filepath, 'r') as f:
             jsonData = json.load(f)
         rateList = jsonData['data']
+        result = {}
         for item in rateList:
             if item['scheme_id'] == schemeCode:
-                return item
-        return {}
+                result.update(item)
+        npsList = self.getNPSList()['data']
+        for item in npsList:
+            if item['id'] == schemeCode:
+                result.update(item)
+        return result
 
     def getNpsSchemeCodeSchemeName(self, schemeName: str):
         jsonData = self.getNPSList()
@@ -282,6 +287,14 @@ class JSONDownloadService:
             self.save_json(jsonData, filePath)
         else:
             self.logger.info("MF Rates present. Skipping")
+
+    def getMfNameForSchemeId(self, scheme_id):
+        mfList = self.getMfList()
+        mfList = mfList['data']
+        for item in mfList:
+            if str(item['schemeCode']) == scheme_id:
+                return item['schemeName']
+        return ""
 
     def getMfList(self):
         fileCheck = self.checkJsonInDirectory(self.listType, self.MfListPrefix)
@@ -326,6 +339,14 @@ class JSONDownloadService:
                             "scheme_id": response[0]
                         },
                     )
+                    try:
+                        # will try to add additional information about mf here
+                        result_data[-1]["fundHouse"] = response[1]['meta']['fund_house']
+                        result_data[-1]["schemeType"] = response[1]['meta']['fund_house']
+                        result_data[-1]["lastDate"] = response[1]['data'][1]['date']
+                        result_data[-1]["lastNav"] = response[1]['data'][1]['nav']
+                    except Exception as ex:
+                        self.logger.error(f"Error adding addition info for MF {response[0]} {ex}")
                 except Exception as ex:
                     self.logger.error(f"Error while adding response to the json {ex}")
                     self.logger.error(f"{response}")
@@ -446,8 +467,11 @@ class JSONDownloadService:
         service_type = EPGEnum[serviceType]
         filepath = None
         if service_type == EPGEnum.EPF:
-            filepath = self.getLatestFile(self.ratesType, self.EPFRatePrefix)
-            fileCheck = self.checkJsonInDirectory(self.ratesType, self.EPFRatePrefix)
+            filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
+            fileCheck = False
+            if filepath is not None:
+                fileCheck = True
+
         elif service_type == EPGEnum.PF:
             filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
             fileCheck = self.checkJsonInDirectory(self.ratesType, self.PPFRatePrefix)
@@ -511,6 +535,8 @@ class JSONDownloadService:
                 most_recent_file_path = os.path.join(f"{self.bas_directory}/{type}/", most_recent_file)
                 # Extract the timestamp from the most recent file's name
                 file_timestamp = self.extract_timestamp(most_recent_file)
+                if filename_prefix == self.EPFRatePrefix:
+                    return True
                 time_diff = datetime.now() - file_timestamp
                 td = None
                 # Define timedelta based on the investment type
@@ -592,18 +618,22 @@ class JSONDownloadService:
         while retries < MAX_RETRIES:
             async with semaphore:  # Control concurrency with semaphore
                 try:
-                    async with session.get(url, timeout=10, **kwargs) as resp:
+                    async with session.get(url, timeout=15, **kwargs) as resp:
                         if resp.status == 200:
                             requestsProcessed += 1
                             if requestsProcessed % 100 == 0:
                                 self.logger.info(
                                     f"Request {requestsProcessed} finished in {time.time() - start_time:.2f}s")
+                        else:
+                            self.logger.info(resp.status, resp)
                         data = await resp.json()  # Use .json() for JSON responses
                         return url.split("/")[-1], data
                 except (ClientConnectorError, asyncio.TimeoutError) as e:
+                    self.logger.info(f"Checking error {e.__name__}")
                     retries += 1
                     await asyncio.sleep(RETRY_DELAY)
                 except ClientResponseError as e:
+                    self.logger.info(f"Checking this too {e}")
                     return url, e.status  # Return specific HTTP error code
                 except Exception as e:
                     self.logger.error(f"Unexpected error for {url}: {e}")

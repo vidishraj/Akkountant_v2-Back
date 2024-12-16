@@ -329,8 +329,9 @@ class Base_MSN:
                 rate_data = self.calculateStockRates(active_securities)
                 for sec in active_securities:
                     # Calculate current value and profit
-                    current_value = Decimal(sec["buyQuant"]) * Decimal(rate_data["lastPrice"]).quantize(Decimal('0.01'),
-                                                                                                        rounding=ROUND_DOWN)
+                    current_value = Decimal(sec["buyQuant"]) * Decimal(
+                        rate_data[sec["buyCode"]].get('lastPrice')).quantize(Decimal('0.01'),
+                                                                             rounding=ROUND_DOWN)
                     buy_value = Decimal(sec["buyQuant"]) * Decimal(sec["buyPrice"]).quantize(Decimal('0.01'),
                                                                                              rounding=ROUND_DOWN)
                     profit = (current_value - buy_value).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
@@ -340,12 +341,16 @@ class Base_MSN:
                         "currentValue": float(current_value),
                         "profit": float(profit),
                     }
+                return results
 
             for sec in active_securities:
                 # Fetch the current rate for the security
                 rate_data = None
                 if investment_type == MSNENUM.NPS.value:
                     rates = self.JsonDownloadService.getNPSRate(sec['buyCode'])
+                    rate_data = {'lastPrice': float(rates['nav'])}
+                elif investment_type == MSNENUM.Mutual_Funds.value:
+                    rates = self.JsonDownloadService.getMFRate(sec['buyCode'])
                     rate_data = {'lastPrice': rates['nav']}
                 if "error" in rate_data:
                     self.logger.error(f"Error fetching rate data for {sec['buyCode']}: {rate_data['error']}")
@@ -388,7 +393,7 @@ class Base_MSN:
         """
         try:
             # Validate input data
-            required_keys = {"date", "quant", "price", "transactionType", "userID", "securityType"}
+            required_keys = {"date", "quant", "price", "transactionType", "userID", "securityType", 'buyId'}
             if not required_keys.issubset(transaction_data):
                 raise ValueError(f"Missing required fields: {required_keys - transaction_data.keys()}")
 
@@ -399,11 +404,12 @@ class Base_MSN:
                 price=Decimal(transaction_data["price"]),
                 transactionType=transaction_data["transactionType"],
                 userID=transaction_data["userID"],
-                securityType=transaction_data["securityType"]
+                securityType=transaction_data["securityType"],
+                buyId=transaction_data["buyId"]
             )
 
             # Add and commit the new transaction
-            self.db.session.add(new_transaction)\
+            self.db.session.add(new_transaction)
 
             if transaction_data['securityType'] != MSNENUM.Stocks.value:
                 # Only commit when outside stocks transaction loop
@@ -427,7 +433,7 @@ class Base_MSN:
             )
             transactionDict = []
             for transaction in transactions:
-                transactionDict.append( {
+                transactionDict.append({
                     'id': transaction.transactionId,
                     'date': transaction.date,
                     'price': transaction.price,
@@ -452,7 +458,8 @@ class Base_MSN:
         """
         try:
             # Fetch records for the given userID
-            records_to_delete = self.db.session.query(PurchasedSecurities).filter(PurchasedSecurities.userID == user_id).all()
+            records_to_delete = self.db.session.query(PurchasedSecurities).filter(
+                PurchasedSecurities.userID == user_id).all()
 
             if not records_to_delete:
                 return {"message": f"No records found for userID: {user_id}"}

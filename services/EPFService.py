@@ -1,6 +1,8 @@
 import datetime
 from abc import ABC
 
+from flask import jsonify
+
 from enums.DateFormatEnum import DateStatementEnum
 from enums.EPGEnum import EPGEnum
 from models import DepositSecurities
@@ -23,7 +25,10 @@ class EPFService(Base_EPG, ABC):
             userID=userId,
             securityType=EPGEnum.EPF.value
         )
-        return self.insertDepositFinal(deposit_security)
+        status= self.insertDepositFinal(deposit_security)
+        if 'error' in status:
+            return jsonify({"Error": "Error in EPF entry"}), 406
+        return jsonify({"Message": "EPF Transaction inserted successfully"}), 200
 
     def readFromStatement(self, file_path: str, userId):
         """
@@ -96,10 +101,10 @@ class EPFService(Base_EPG, ABC):
             # Create json response
             return {
                 'transactions': transaction,
-                'netProfit': netProfit,
-                'net': netInvestment,
+                'netProfit': self.genericUtil.convertToDecimal(netProfit),
+                'net': self.genericUtil.convertToDecimal(netInvestment),
                 'deposits': depositDict,
-                'unAccountedProfit': unaccountedProfit
+                'unAccountedProfit': self.genericUtil.convertToDecimal(unaccountedProfit)
             }
         else:
             return {}

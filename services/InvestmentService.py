@@ -5,6 +5,7 @@ from marshmallow import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from dtos.MSNSummaryDto import MSNSummary
+from enums.DateFormatEnum import DateStatementEnum
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities
@@ -14,6 +15,7 @@ from services.MfService import MfService
 from services.NpsService import NPSService
 from services.PPFService import PPFService
 from services.StocksService import StocksService
+from utils.DateTimeUtil import DateTimeUtil
 from utils.GenericUtils import GenericUtil
 from utils.logger import Logger
 from decimal import Decimal, ROUND_DOWN
@@ -85,9 +87,11 @@ class InvestmentService:
         elif securityType == MSNENUM.NPS:
             return self.NPSService.fetchActive(securityType, userId)
         elif securityType == EPGEnum.PF:
-            return self.PPFService.calculateTransactionTable(userId)
+            return self.PPFService.fetchComplete(userId)
         elif securityType == EPGEnum.EPF:
-            return self.EPFService.calculateTransactionTable(userId)
+            return self.EPFService.fetchComplete(userId)
+        elif securityType == EPGEnum.Gold:
+            return self.GoldService.fetchComplete(userId)
 
     def fetchHistory(self, securityType, userId):
         if securityType == MSNENUM.Stocks:
@@ -165,12 +169,32 @@ class InvestmentService:
                 security['info'] = rates[security['buyCode'] if security['buyCode'] != "SUZLON-BE" else "SUZLON"]
             elif securityType == MSNENUM.NPS.value:
                 security['info'] = self.NPSService.findSecurity(security['buyCode'])
+            elif securityType == MSNENUM.Mutual_Funds.value:
+                infoDetails = self.MFService.findSecurity(security['buyCode'])
+                change = float(infoDetails['nav']) - float(infoDetails['lastNav'])
+                changeP = (change / float(infoDetails['lastNav'])) * 100
+                security['info'] = {'lastPrice': self.genericUtil.convertToDecimal(infoDetails['nav']),
+                                    'previousClose': self.genericUtil.convertToDecimal(infoDetails['lastNav']),
+                                    'pChange': self.genericUtil.convertToDecimal(changeP),
+                                    'change': self.genericUtil.convertToDecimal(change),
+                                    'fundHouse': infoDetails['fundHouse'],
+                                    'scheme_id': infoDetails['scheme_id'],
+                                    'schemeType': infoDetails['schemeType']}
         return activeSecurities
 
     def insertSecurityPurchase(self, serviceType, userId, data):
         # Purchase from the UI is only possible for MF, EPF, PF or Gold
-        if serviceType == MSNENUM.Mutual_Funds.value:
-            return
+        if serviceType == MSNENUM.Mutual_Funds:
+            insertionObject = {
+                "securityCode": data['schemeCode'],
+                "date": DateTimeUtil().convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name),
+                "buyQuant": data['quantity'],
+                "buyPrice": data['amount'],
+            }
+            status = self.MFService.buySecurity(insertionObject, userId)
+            if 'error' in status:
+                return jsonify({"Error": "Error in MF entry"}), 406
+            return jsonify({"Message": "MF Transaction inserted successfully"}), 200
         elif serviceType == EPGEnum.EPF:
             return self.EPFService.insertDeposit(data, userId)
         elif serviceType == EPGEnum.PF:
@@ -180,7 +204,7 @@ class InvestmentService:
 
     def fetchRateForEPG(self, serviceType):
         if serviceType == EPGEnum.EPF:
-            return jsonify(self.EPFService.fetchRates()), 200
+            return self.EPFService.fetchRates()
         elif serviceType == EPGEnum.PF:
             return self.PPFService.fetchRates()
         elif serviceType == EPGEnum.Gold:
@@ -211,7 +235,7 @@ class InvestmentService:
         if serviceType == EPGEnum.EPF or serviceType == EPGEnum.PF or serviceType == EPGEnum.Gold:
             if self.delete_records([depositRecordDeletion]):
                 return jsonify({"Message": "Successfully deleted"}), 200
-        elif serviceType == MSNENUM.Mutual_Funds or serviceType == MSNENUM.Stocks or serviceType == MSNENUM.NPS :
+        elif serviceType == MSNENUM.Mutual_Funds or serviceType == MSNENUM.Stocks or serviceType == MSNENUM.NPS:
             if self.delete_records([sellRecordDeletion, purchaseRecordDeletion]):
                 return jsonify({"Message": "Successfully deleted"}), 200
             return jsonify({"Error": "Failed to delete record"}), 501

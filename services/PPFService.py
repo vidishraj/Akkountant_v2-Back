@@ -27,7 +27,7 @@ class PPFService(Base_EPG, ABC):
         status = self.insertDepositFinal(deposit_security)
         if 'error' in status:
             return jsonify({"Message": "Duplicate PF entry"}), 406
-        return jsonify({"Message": "PPF Transaction inserted successfully"}), 406
+        return jsonify({"Message": "PPF Transaction inserted successfully"}), 200
 
     def calculateTransactionTable(self, deposits: [DepositSecurities]):  # Get the deposits here in sorted order
         """
@@ -74,8 +74,8 @@ class PPFService(Base_EPG, ABC):
                     nextMonth = runningInterest  # Adding interest for the year to compound
                     runningInterest = 0
                 transactions.append({
-                    'month': month,
-                    'depositTotal': runningTotal,
+                    'date': month,
+                    'amount': runningTotal,
                     'interest': interest
                 })
             return transactions, netProfit, runningTotal, runningInterest
