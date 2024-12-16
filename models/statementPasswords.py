@@ -8,7 +8,7 @@ class StatementPasswords(Base):
 
     bank = Column(String(100), nullable=False)
     password_hash = Column(String(256), nullable=False)
-    user = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)
+    user = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
 
     __table_args__ = (
         PrimaryKeyConstraint('bank', 'user'),

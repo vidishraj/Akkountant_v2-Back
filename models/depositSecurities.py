@@ -11,7 +11,7 @@ class DepositSecurities(Base):
     date = Column(Date, nullable=False)
     depositDescription = Column(String(250), nullable=False)
     depositAmount = Column(Integer, nullable=False)
-    userID = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)
+    userID = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     securityType = Column(String(10), nullable=False)
 
     user_relationship = relationship('User', back_populates='deposit_relationship')

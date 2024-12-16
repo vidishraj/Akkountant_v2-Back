@@ -7,7 +7,7 @@ from sqlalchemy.ext.declarative import declared_attr
 class UserToken(Base):
     __tablename__ = 'user_tokens'
 
-    user_id = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)  # Foreign key to users table
+    user_id = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)  # Foreign key to users table
     access_token = Column(String(256), nullable=False)
     refresh_token = Column(String(256), nullable=False)
     client_id = Column(String(256), nullable=False)

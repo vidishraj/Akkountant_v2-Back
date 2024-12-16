@@ -12,8 +12,8 @@ class PurchasedSecurities(Base):
     securityCode = Column(String(250), nullable=False)
     buyQuant = Column(Integer, nullable=False)
     buyPrice = Column(Decimal(10, 2), nullable=False)
-    userID = Column(String(100), ForeignKey('users.userID'), ondelete='CASCADE', nullable=False)
-    securityType = Column(String(10), nullable=False)
+    userID = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
+    securityType = Column(String(20), nullable=False)
 
     user_relationship = relationship('User', back_populates='purchased_securities')
 
