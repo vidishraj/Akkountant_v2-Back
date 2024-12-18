@@ -22,6 +22,8 @@ requestsProcessed = 0
 # Retry settings
 MAX_RETRIES = 2  # Number of retries for failed requests
 RETRY_DELAY = 0  # Seconds to wait between retries
+CONCURRENT_REQUESTS2 = 20  # Reduced for stability
+BATCH_SIZE = 50  # Batch size for processing
 
 
 class JSONDownloadService:
@@ -328,7 +330,7 @@ class JSONDownloadService:
         global start_time
         start_time = time.time()
         result_data = []
-        responses = asyncio.run(self.make_requests(urls))
+        responses = asyncio.run(self.make_requests2(urls))
         for response in responses:
             if isinstance(response, tuple):  # Ensure it's a valid JSON response
                 try:
@@ -652,3 +654,33 @@ class JSONDownloadService:
     def deleteFile(filePath):
         if filePath is not None:
             os.remove(filePath)
+
+
+    async def make_requests2(self, urls: list, **kwargs):
+        results = []
+        for i in range(0, len(urls), BATCH_SIZE):
+            batch = urls[i:i + BATCH_SIZE]
+            results.extend(await self._process_batch(batch, **kwargs))
+        return results
+
+    async def _process_batch(self, urls: list, **kwargs):
+        semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS2)
+        connector = TCPConnector(limit_per_host=CONCURRENT_REQUESTS2)
+        async with ClientSession(connector=connector) as session:
+            tasks = [self.fetch_html(url, session, semaphore, **kwargs) for url in urls]
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def fetch_html2(self, url, session, semaphore, **kwargs):
+        async with semaphore:
+            retries = 0
+            while retries <= MAX_RETRIES:
+                try:
+                    async with session.get(url, timeout=30, **kwargs) as response:
+                        if response.status == 200:
+                            return await response.json()
+                        else:
+                            raise Exception(f"HTTP {response.status}")
+                except Exception as ex:
+                    retries += 1
+                    await asyncio.sleep(RETRY_DELAY + retries * 2)
+            return None
