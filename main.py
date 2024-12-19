@@ -43,7 +43,7 @@ class Akkountant(Flask):
         # Update db from dump file
         filename = "akkountV2.sql"  # Update dump file name here
         folder_path = os.getcwd() + '/tmp/'  # put file in tmp folder
-        self.updateFromDump(filename, folder_path)
+        # self.updateFromDump(filename, folder_path)
 
         # Run async methods in setup
         self._setup_investments()  # Run async setup
@@ -139,6 +139,8 @@ class Akkountant(Flask):
             ('/getGoogleStatus', 'GET', self.transactionEP.checkGoogleApiStatus),
             ('/updateGoogleTokens', 'POST', self.transactionEP.addUpdateUserToken),
             ('/setOptedBanks', 'POST', self.transactionEP.setOptedBanks),
+            ('/downloadFile', 'GET', self.transactionEP.downloadFile),
+            ('/deleteFile', 'GET', self.transactionEP.deleteFile),
         ]
 
         for rule, method, view_func in transactionRoutes:
