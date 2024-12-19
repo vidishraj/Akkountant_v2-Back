@@ -8,18 +8,26 @@ from enums.StatementPatternEnum import StatementPatternEnum
 from utils.DateTimeUtil import DateTimeUtil
 from utils.logger import Logger
 
-TEMP_DIR = os.getcwd()+'/tmp'
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 "\
+TEMP_DIR = os.getcwd() + '/tmp'
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 " \
              "Safari/537.36 "
 
 
 class StatementDownloadService:
-    password: str
+    _instance = None  # Class-level variable to hold the singleton instance
 
-    def __init__(self, password, gmailService):
-        self.logger = Logger(__name__).get_logger()
-        self.gmail_service = gmailService
-        self.password = password
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super(StatementDownloadService, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, password=None, gmailService=None):
+        # Avoid reinitializing if already initialized
+        if not hasattr(self, 'initialized'):
+            self.logger = Logger(__name__).get_logger()
+            self.gmail_service = gmailService
+            self.password = password
+            self.initialized = True  # Mark the instance as initialized
 
     def route_download_process(self, bank_type, date_to=None, date_from=None):
         statement_pattern = StatementPatternEnum[bank_type].value
