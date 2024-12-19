@@ -50,7 +50,7 @@ class GenericUtil:
                 if matches:
                     # Extract matched details as a dictionary
                     details = matches.groupdict()
-                    date = DateTimeUtil.convert_to_sql_datetime(details.get('transaction_date'), bankType)
+                    date = DateTimeUtil().convert_to_sql_datetime(details.get('transaction_date'), bankType)
                     description = details.get('merchant')
                     amount = details.get('amount_spent')
                     referenceID = GenericUtil().generate_reference_id(date, description, amount)

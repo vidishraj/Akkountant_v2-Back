@@ -6,5 +6,5 @@ class MSNSummary(Schema):
     currentValue = fields.Decimal(required=True)
     changePercent = fields.Decimal(required=True)
     changeAmount = fields.Decimal(required=True)
-    count = fields.Integer(required=True, validate=lambda s: s > 0)
+    count = fields.Integer(required=True, validate=lambda s: s >= 0)
     marketStatus = fields.Boolean(required=True)

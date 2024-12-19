@@ -21,7 +21,9 @@ class GoogleServiceSingleton:
         return cls._instance
 
     def __init__(self):
-        self.logger = Logger(__name__).get_logger()
+        # Avoid reinitializing if already initialized
+        if not hasattr(self, 'initialized'):
+            self.logger = Logger(__name__).get_logger()
 
     def _initialize_service(self, token_info, service_name, api_version, scopes):
         """Initializes a Google service if token is valid or renews it if expired."""
