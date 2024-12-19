@@ -112,10 +112,6 @@ class InvestmentService:
         activeInvested = self.StockService.getActiveMoneyInvested(securityType, userId)
         activeProfitAll = self.StockService.calculateProfitAndCurrentValue(securityType, userId)
         totalProfit = 0
-        for item in activeProfitAll:
-            totalProfit += activeProfitAll[item]['profit']
-        securityCount = self.StockService.getSecurityCount(userId, MSNENUM[securityType].value)
-
         marketStatus = nsepython.nse_marketStatus()
         if marketStatus is not None:
             marketStatus = marketStatus['marketState'][0]['marketStatus']
@@ -123,19 +119,32 @@ class InvestmentService:
                 marketStatus = False
             else:
                 marketStatus = True
-        changePercent = (((totalProfit + activeInvested) - activeInvested) / activeInvested) * 100
-        data = {
-            "totalValue": Decimal(activeInvested).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
-            "currentValue": Decimal(activeInvested + totalProfit).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
-            "changePercent": Decimal(changePercent).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
-            "changeAmount": Decimal(totalProfit).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
-            "count": securityCount,
-            "marketStatus": marketStatus,
-        }
-
         # Instantiate the schema
         msn_summary_schema = MSNSummary()
+        if activeInvested != 0:
+            for item in activeProfitAll:
+                totalProfit += activeProfitAll[item]['profit']
+            securityCount = self.StockService.getSecurityCount(userId, MSNENUM[securityType].value)
 
+            changePercent = (((totalProfit + activeInvested) - activeInvested) / activeInvested) * 100
+            data = {
+                "totalValue": Decimal(activeInvested).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+                "currentValue": Decimal(activeInvested + totalProfit).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+                "changePercent": Decimal(changePercent).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+                "changeAmount": Decimal(totalProfit).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
+                "count": securityCount,
+                "marketStatus": marketStatus,
+            }
+
+        else:
+            data = {
+                "totalValue": 0,
+                "currentValue": 0,
+                "changePercent": 0,
+                "changeAmount": 0,
+                "count": 0,
+                "marketStatus": marketStatus,
+            }
         try:
             result = msn_summary_schema.load(data)
             return result
