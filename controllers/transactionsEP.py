@@ -244,7 +244,7 @@ class TransactionController:
 
             # Call the service method
             updated_user = self.TransactionService.setOptedBanks(userId, banks)
-            if updated_user is not None:
+            if updated_user is None:
                 return jsonify({"error": "User not found"}), 404
 
             return jsonify({
