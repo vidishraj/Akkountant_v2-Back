@@ -232,18 +232,18 @@ class TransactionController:
     def setOptedBanks(self):
         try:
             data = request.json
-            user_id = data.get('userID')
+            userId = request.headers.get("x-firebase-id")
             banks = data.get('banks')
 
             # Validate input
-            if not user_id or not banks:
+            if not userId or not banks:
                 return jsonify({"error": "userID and banks are required"}), 400
 
             if not all(bank in BankEnums.__members__ for bank in banks):
                 return jsonify({"error": "Invalid bank(s) provided"}), 400
 
             # Call the service method
-            updated_user = self.TransactionService.setOptedBanks(user_id, banks)
+            updated_user = self.TransactionService.setOptedBanks(userId, banks)
             if updated_user is not None:
                 return jsonify({"error": "User not found"}), 404
 
