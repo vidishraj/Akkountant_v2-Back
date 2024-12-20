@@ -552,14 +552,19 @@ class TransactionService(BaseService):
                     return None
                 # Update optedBanks
                 user.optedBanks = ','.join(banks)
-                for index, password in passwords:
-                    statement_password = StatementPasswords(
-                        bank=banks[index],
-                        password_hash=password,
-                        user=user
-                    )
-                    # Add and commit the record
-                    session.add(statement_password)
+                for index, password in enumerate(passwords):
+                    statementPassword = self.db.session.query(StatementPasswords).filter_by(user=user_id) \
+                        .filter_by(bank=banks[index]).first()
+                    if statementPassword is None:
+                        statement_password = StatementPasswords(
+                            bank=banks[index],
+                            password_hash=password,
+                            user=user_id
+                        )
+                        # Add and commit the record
+                        session.add(statement_password)
+                    else:
+                        statementPassword.password_hash = password
             return user
         except Exception as e:
             session.rollback()
