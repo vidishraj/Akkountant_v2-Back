@@ -41,7 +41,7 @@ class Akkountant(Flask):
         self._setup_schedulers()
 
         # Update db from dump file
-        filename = "akkountV2.sql"  # Update dump file name here
+        filename = "akkountantV2.sql"  # Update dump file name here
         folder_path = os.getcwd() + '/tmp/'  # put file in tmp folder
         self.updateFromDump(filename, folder_path)
 
