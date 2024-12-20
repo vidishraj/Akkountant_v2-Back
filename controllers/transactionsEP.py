@@ -234,7 +234,7 @@ class TransactionController:
             data = request.json
             userId = request.headers.get("x-firebase-id")
             banks = data.get('banks')
-            validBanks = list(banks.keys)
+            validBanks = list(banks.keys())
             # Validate input
             if not userId or not banks:
                 return jsonify({"error": "userID and banks are required"}), 400
