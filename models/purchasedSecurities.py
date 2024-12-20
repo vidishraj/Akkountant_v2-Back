@@ -23,5 +23,6 @@ class PurchasedSecurities(Base):
         primaryjoin="and_(PurchasedSecurities.buyID == foreign(SoldSecurities.buyID),SoldSecurities.source_type == "
                     "'purchased')",
         back_populates="purchase_relationship",
-        overlaps="deposit_relationship,sold_securities"
+        overlaps="deposit_relationship,sold_securities",
+        cascade="all, delete-orphan"
     )

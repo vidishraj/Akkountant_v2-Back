@@ -1,4 +1,3 @@
-import datetime
 from abc import ABC
 
 from flask import jsonify
@@ -25,7 +24,7 @@ class EPFService(Base_EPG, ABC):
             userID=userId,
             securityType=EPGEnum.EPF.value
         )
-        status= self.insertDepositFinal(deposit_security)
+        status = self.insertDepositFinal(deposit_security)
         if 'error' in status:
             return jsonify({"Error": "Error in EPF entry"}), 406
         return jsonify({"Message": "EPF Transaction inserted successfully"}), 200
@@ -40,7 +39,7 @@ class EPFService(Base_EPG, ABC):
         rowsInserted = 0
         for transaction in epfTransactions:
             status = self.insertDeposit(transaction, userId)
-            if status.get('error') is None:
+            if status[1] == 200:
                 rowsInserted += 1
         self.logger.info("Finished processing file and inserting statements")
         return {"readFromStatement": {'buy': len(epfTransactions), 'sold': 0},
@@ -79,6 +78,32 @@ class EPFService(Base_EPG, ABC):
                     'amount': amount,
                     'interest': interest,
                 })
+            if len(deposits) > 0:
+                lastDeposit = deposits[-1].depositAmount
+                lastDescription = deposits[-1].depositDescription
+                lastMonth = transactions[-1]['date']
+                for month in self.dateTimeUtil.iterate_months(deposits[-1].date.__str__()):
+                    if month != lastMonth:
+                        date = month
+                        description = lastDescription
+                        amount = lastDeposit
+
+                        rate = self.JsonDownloadService.getRateForMonth(date, EPGEnum.EPF.value)
+                        interest = running * (rate / 1200)
+                        runningInterest += interest
+                        netProfit += interest
+                        if date.endswith("03", len(date) - 2, len(date)):
+                            # END OF FINANCIAL YEAR
+                            # Add interest here, set local variables to zero
+                            running += runningInterest
+                            runningInterest = 0
+                        running += amount
+                        transactions.append({
+                            'date': date,
+                            'description': f"GENERATED ROW {description}",
+                            'amount': amount,
+                            'interest': interest,
+                        })
             return transactions, netProfit, running, runningInterest
         except Exception as ex:
             self.logger.error(f"Error while calculating transaction table for EPF {ex}")

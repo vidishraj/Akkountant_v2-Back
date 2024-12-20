@@ -83,22 +83,30 @@ class TransactionController:
 
     @Logger.standardLogger
     def triggerEmailCheck(self):
-        userId = request.headers.get("FIREBASEID")
+        userId = request.headers.get("x-firebase-id")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         self.logger.info(f"Reading email for user {userId}")
-        self.TransactionService.readTransactionFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId)
-        return jsonify({"Message": "Success"}), 200
+        successCount, errorCount = \
+            self.TransactionService.readTransactionFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId)
+        return jsonify({"Message": {
+            "read": successCount,
+            "conflicts": errorCount
+        }}), 200
 
     @Logger.standardLogger
     def triggerStatementCheck(self):
-        userId = request.headers.get("FIREBASEID")
+        userId = request.headers.get("x-firebase-id")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         bank = request.args.get('bank')
         self.logger.info(f"Reading statements for user {userId}")
-        self.TransactionService.readStatementsFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, bank=bank)
-        return jsonify({"Message": "Success"}), 200
+        successCount, errorCount = \
+            self.TransactionService.readStatementsFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, bank=bank)
+        return jsonify({"Message": {
+            "read": successCount,
+            "conflicts": errorCount
+        }}), 200
 
     @Logger.standardLogger
     def updateTransaction(self):
@@ -159,15 +167,12 @@ class TransactionController:
 
     @Logger.standardLogger
     def deleteFile(self):
-        data = request.get_json()
-
+        userId = g.get('firebase_id')
+        fileId = request.args.get('fileId')
         # Ensure all required fields are present
-        required_fields = ['user_id', 'fileId']
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
-            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
-        # Call the service function to add or update the token
-        result = self.TransactionService.deleteFile(data['userId'], data['fileId'])
+        if userId is None or fileId is None:
+            return jsonify({"error": "Missing required fields"}), 400 # Call the service function to add or update the token
+        result = self.TransactionService.deleteFile(userId, fileId)
         return jsonify(result), 200
 
     @Logger.standardLogger
@@ -185,16 +190,13 @@ class TransactionController:
 
     @Logger.standardLogger
     def downloadFile(self):
-        data = request.get_json()
-
+        userId = g.get('firebase_id')
+        fileId = request.args.get('fileId')
         # Ensure all required fields are present
-        required_fields = ['userId', 'fileId']
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
-            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
-        # Call the service function to add or update the token
-        result = self.TransactionService.downloadFile(data['userId'], data['fileId'])
-        return jsonify(result), 200
+        if userId is None or fileId is None:
+            return jsonify({"error": "Missing required fields"}), 400
+        result = self.TransactionService.downloadFile(userId, fileId)
+        return result
 
     @Logger.standardLogger
     def fetchFileDetails(self):
@@ -242,7 +244,7 @@ class TransactionController:
 
             # Call the service method
             updated_user = self.TransactionService.setOptedBanks(user_id, banks)
-            if not updated_user:
+            if updated_user is not None:
                 return jsonify({"error": "User not found"}), 404
 
             return jsonify({

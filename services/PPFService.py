@@ -1,7 +1,6 @@
 import datetime
 from abc import ABC
 
-from dateutil.relativedelta import relativedelta
 from flask import jsonify
 
 from enums.DateFormatEnum import DateStatementEnum
@@ -53,7 +52,7 @@ class PPFService(Base_EPG, ABC):
             transactions = []
             netProfit = 0
             runningInterest = 0
-            for month in self.iterate_months(deposits[0].date.__str__()):
+            for month in self.dateTimeUtil.iterate_months(deposits[0].date.__str__()):
                 runningTotal += nextMonth
                 nextMonth = 0
                 if depositMap.get(month) is not None:
@@ -107,27 +106,6 @@ class PPFService(Base_EPG, ABC):
             }
         else:
             return {}
-
-    @staticmethod
-    def iterate_months(start_date: str):
-        """
-        Iterates from a given start date to the current month.
-
-        Args:
-            start_date (str): The starting date in '%Y-%m-%d' format.
-
-        Yields:
-            str: The current month in iteration in '%Y-%m' format.
-        """
-        try:
-            start = datetime.datetime.strptime(start_date, "%Y-%m-%d")
-            current = datetime.datetime.now()
-
-            while start <= current:
-                yield start.strftime("%Y-%m")
-                start += relativedelta(months=1)
-        except ValueError as e:
-            raise ValueError(f"Invalid date format: {e}")
 
     def fetchRates(self):
         return {"data": self.JsonDownloadService.getPPFRateFile()}

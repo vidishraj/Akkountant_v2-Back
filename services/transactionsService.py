@@ -1,7 +1,7 @@
 import os
 
 from flask_sqlalchemy.session import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import func, case
 
 from enums.BanksEnum import BankEnums
@@ -162,7 +162,7 @@ class TransactionService(BaseService):
             # Insert the processed transactions in the database
             self.insertTransactions(cleanedMails, bank, userID, conflicts, TransactionTypeEnum.Email.value)
         self.logger.info(f"Finished reading mail. Inserted {totalMails} transactions")
-        return
+        return totalMails, len(conflicts)
 
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None):
         integrityErrors = 0
@@ -196,7 +196,7 @@ class TransactionService(BaseService):
         try:
             self.db.session.commit()
         except IntegrityError as e:
-            self.logger.warning(f"Duplicate entry error occurred: {e.__cause__}")
+            self.logger.warning(f"Duplicate entry error occurred while committing: {e.__cause__}")
             self.db.session.rollback()
         return integrityErrors
 
@@ -262,6 +262,7 @@ class TransactionService(BaseService):
         # Fetch the drive token of the user
         driveToken = self.fetchDriveTokenForUser(userID)
         totalTransactions = 0
+        totalIntegrityErrors = 0
         for bank in optedBanks:
             # Fetch the password for the bank
             self.logger.info(f"Processing bank {bank}")
@@ -292,6 +293,7 @@ class TransactionService(BaseService):
                         integrityErrors = self.insertTransactions(transactions, bank, userID, [],
                                                                   TransactionTypeEnum.Statement.value,
                                                                   fileId)
+                        totalIntegrityErrors += integrityErrors
                         if integrityErrors == len(transactions):
                             # No transaction were inserted, delete the file
                             self.deleteFileDetails(fileId)
@@ -309,7 +311,7 @@ class TransactionService(BaseService):
         self.genericUtil.emptyTemp()
 
         self.logger.info(f"Finished reading mail. Inserted {totalTransactions} transactions")
-        return
+        return totalTransactions, totalIntegrityErrors
 
     def insertFileDetails(self, fileId, fileName, statementCount,
                           bank, user, path):
@@ -334,7 +336,6 @@ class TransactionService(BaseService):
         row = self.db.session.query(FileDetails).filter_by(fileID=fileId).first()
         if row:
             self.db.session.delete(row)
-            self.db.session.commit()
 
     def updateStatementCount(self, fileId, newStatementCount):
         # Find the row by ID to update
@@ -463,11 +464,30 @@ class TransactionService(BaseService):
         return {"message": message}
 
     def deleteFile(self, user_id: str, fileId: str):
-        driveToken = self.fetchDriveTokenForUser(user_id)
-        self.driveService.deleteFile(fileId, user_id, driveToken)
-        self.deleteFileDetails(fileId)
-        self.db.session.commit()
+        session = self.db.session
+        try:
+            with session.begin():  # Start an outer transaction
+                self.logger.info("Fetched drive token")
+                driveToken = self.fetchDriveTokenForUser(user_id)
+                self.deleteFileDetails(fileId)
+                self.logger.info("Deleted file details")
+                self.deleteTransactionsFromAFile(fileId)
+                self.logger.info("Deleted transaction related to file")
+                self.driveService.deleteFile(fileId, user_id, driveToken)
+                self.logger.info("Deleted file on Google Drive")
+        except SQLAlchemyError as e:
+            session.rollback()  # Roll back the entire transaction if any error occurs
+            self.logger.error(f"Error deleting file details. Error: {e}")
+            raise Exception(e.__str__())  # Reraise the exception after logging
+        except Exception as e:
+            session.rollback()  # Roll back the entire transaction if any error occurs
+            self.logger.error(f"Error deleting file. Error: {e}")
+            raise Exception(e.__str__())  # Reraise the exception after logging
         return {"message": "File deleted successfully"}
+
+    def deleteTransactionsFromAFile(self, fileID):
+        result = self.db.session.query(Transactions).filter_by(fileID=fileID).delete(synchronize_session='fetch')
+        return result
 
     def renameFile(self, user_id: str, fileId: str, newName: str):
         driveToken = self.fetchDriveTokenForUser(user_id)
@@ -507,7 +527,7 @@ class TransactionService(BaseService):
                 return self.gmailService.googleService.start_fresh_auth_flow(scopes)
         return {"Message": "Weird Failure"}
 
-    def setOptedBanks(self, user_id: str, banks: list[str]):
+    def setOptedBanks(self, user_id: str, banks:dict):
         """
            Updates the optedBanks for a user in the database.
 
@@ -519,22 +539,31 @@ class TransactionService(BaseService):
                User: The updated user object.
            """
         # Validate banks
+        passwords = list(banks.values())
+        banks = list(banks.keys())
         valid_banks = [BankEnums[bank].value for bank in banks if bank in BankEnums.__members__]
 
         if not valid_banks:
             raise ValueError("No valid banks provided")
 
         session: Session = self.db.session  # Replace with your DB session management
+        user = None
         try:
             # Fetch user from DB
-            user = session.query(User).filter(User.userID == user_id).first()
-            if not user:
-                return None
-
-            # Update optedBanks
-            user.optedBanks = ','.join(valid_banks)
-            session.commit()
-
+            with session.begin():
+                user = session.query(User).filter(User.userID == user_id).first()
+                if not user:
+                    return None
+                # Update optedBanks
+                user.optedBanks = ','.join(valid_banks)
+                for index, password in passwords:
+                    statement_password = StatementPasswords(
+                        bank=banks[index],
+                        password_hash=password,
+                        user=user
+                    )
+                    # Add and commit the record
+                    session.add(statement_password)
             return user
         except Exception as e:
             session.rollback()

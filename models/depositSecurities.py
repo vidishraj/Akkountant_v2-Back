@@ -22,5 +22,6 @@ class DepositSecurities(Base):
         primaryjoin="and_(DepositSecurities.buyID == foreign(SoldSecurities.buyID), SoldSecurities.source_type == "
                     "'deposit')",
         back_populates="deposit_relationship",
-        overlaps="purchase_relationship,sold_securities")
+        overlaps="purchase_relationship,sold_securities",
+        cascade="all, delete-orphan")
     goldDetails = relationship('GoldDetails', back_populates='buyIdRel')
