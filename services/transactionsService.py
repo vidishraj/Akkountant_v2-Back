@@ -541,10 +541,6 @@ class TransactionService(BaseService):
         # Validate banks
         passwords = list(banks.values())
         banks = list(banks.keys())
-        valid_banks = [BankEnums[bank].value for bank in banks if bank in BankEnums.__members__]
-
-        if not valid_banks:
-            raise ValueError("No valid banks provided")
 
         session: Session = self.db.session  # Replace with your DB session management
         user = None
@@ -555,7 +551,7 @@ class TransactionService(BaseService):
                 if not user:
                     return None
                 # Update optedBanks
-                user.optedBanks = ','.join(valid_banks)
+                user.optedBanks = ','.join(banks)
                 for index, password in passwords:
                     statement_password = StatementPasswords(
                         bank=banks[index],
