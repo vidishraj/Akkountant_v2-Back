@@ -247,10 +247,6 @@ class TransactionController:
             if updated_user is None:
                 return jsonify({"error": "User not found"}), 404
 
-            return jsonify({
-                "message": "Opted banks updated successfully",
-                "userID": updated_user.userID,
-                "optedBanks": updated_user.optedBanks.split(',')
-            }), 200
+            return jsonify({"message": "Opted banks updated successfully"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500

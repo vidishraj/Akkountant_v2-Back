@@ -74,8 +74,8 @@ class JSONDownloadService:
                 list_data.append({
                     'stockCode': code
                 })
-            filePath = self.getFilePath(self.StockListPrefix, self.listType)
-            self.save_json({'data': list_data}, filePath)
+            newFilePath = self.getFilePath(self.StockListPrefix, self.listType)
+            self.save_json({'data': list_data}, newFilePath)
             self.deleteFile(filePath)
         except Exception as ex:
             self.logger.error(f"Error while updating stocks list {ex}")
