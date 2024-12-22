@@ -105,7 +105,12 @@ class PPFService(Base_EPG, ABC):
                 'net': netInvestment,
             }
         else:
-            return {}
+            return {
+                'transactions': [],
+                'deposits': [],
+                'netProfit': 0,
+                'unAccountedProfit': 0,
+                'net': 0}
 
     def fetchRates(self):
         return {"data": self.JsonDownloadService.getPPFRateFile()}
