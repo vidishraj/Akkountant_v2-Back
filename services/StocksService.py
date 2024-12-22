@@ -1,4 +1,3 @@
-
 from abc import ABC
 
 from sqlalchemy.exc import NoResultFound, SQLAlchemyError
@@ -33,7 +32,11 @@ class StocksService(Base_MSN, ABC):
         try:
             # Validate the securityCode using the separate function
             if not self.checkIfSecurityExists(security_data['securityCode']):
-                return {"error": "Invalid code"}
+                differentName = self.JsonDownloadService.checkSymbolChange(security_data['securityCode'])
+                if differentName is None:
+                    return {"error": "Invalid code"}
+                else:
+                    security_data['securityCode'] = differentName
 
             # Check if the specific trade has been inserted before
             if self.tradeExists(security_data['tradeID']):
@@ -243,8 +246,6 @@ class StocksService(Base_MSN, ABC):
         stockList = self.JsonDownloadService.getStockList()
         stockList = stockList['data']
         # @TODO CORNER CASE? How to manage changed codes?
-        if symbol == "SUZLON-BE":
-            return True
         for stock in stockList:
             if stock.get('stockCode') == symbol:
                 return True

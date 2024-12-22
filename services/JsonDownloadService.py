@@ -14,11 +14,13 @@ from utils.logger import Logger
 import requests
 
 from dotenv import load_dotenv
+
 load_dotenv()
 if os.getenv('ENV') == "PROD":
     import nsepythonserver as nsepython
 else:
     import nsepython
+import pandas as pd
 
 start_time = None
 # Check this while deploying
@@ -37,6 +39,7 @@ class JSONDownloadService:
     MfListPrefix: str = "MF_details"
     MfRatePrefix: str = "MF_rate"
     StockListPrefix: str = "Stock_details"
+    StockOldDetails: str = "Stock_old_codes"
     # StockRatePrefix: str = "NPS_rate"  #Doesn't exist
     NpsListPrefix: str = "NPS_details"
     NpsRatePrefix: str = "NPS_rate"
@@ -62,32 +65,72 @@ class JSONDownloadService:
     """ Stocks methods """
 
     def handle_stocks(self):
-        filePath = self.getLatestFile(self.listType, self.StockListPrefix)
         # Compare time difference with 72 hours
-        if filePath is not None:
-            file_timestamp = self.extract_timestamp(filePath)
-            time_diff = datetime.now() - file_timestamp
+        if not self.checkJsonInDirectory(self.listType, self.StockListPrefix):
+            try:
+                codeList = nsepython.nse_eq_symbols()
+                list_data = []
+                for code in codeList:
+                    list_data.append({
+                        'stockCode': code
+                    })
+                newFilePath = self.getFilePath(self.StockListPrefix, self.listType)
+                self.save_json({'data': list_data}, newFilePath)
+            except Exception as ex:
+                self.logger.error(f"Error while updating stocks list {ex}")
+        else:
+            self.logger.info("Stocks details list present. Skipping")
+        if not self.checkJsonInDirectory(self.listType, self.StockOldDetails):
+            csvFilePath = os.path.join(os.getcwd(), '/tmp/symbolchange.csv')
+            filePath = self.getFilePath(self.StockOldDetails, self.listType)
+            self.downloadOldSymbolFile("https://nsearchives.nseindia.com/content/equities/symbolchange.csv",
+                                       csvFilePath)
+            self.saveStocksOldSymbolJson(csvFilePath, filePath, 1, 2)
+        else:
+            self.logger.info("Stocks symbol json present. Skipping")
 
-            # Define 72 hours as a timedelta
-            seventyTwo_hours = timedelta(hours=72)
-            if time_diff <= seventyTwo_hours:
-                return
+    def downloadOldSymbolFile(self, url, save_path):
+        """
+        Downloads a CSV file from the given URL and saves it locally.
 
+        :param url: URL of the CSV file.
+        :param save_path: Path to save the downloaded file.
+        """
         try:
-            codeList = nsepython.nse_eq_symbols()
-            list_data = []
-            for code in codeList:
-                list_data.append({
-                    'stockCode': code
-                })
-            newFilePath = self.getFilePath(self.StockListPrefix, self.listType)
-            self.save_json({'data': list_data}, newFilePath)
-            self.deleteFile(filePath)
-        except Exception as ex:
-            self.logger.error(f"Error while updating stocks list {ex}")
+            response = requests.get(url, headers=nsepython.headers)
+            response.raise_for_status()  # Raise an error for bad status codes
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
+            self.logger.info(f"CSV file downloaded successfully from {url} to {save_path}.")
+        except Exception as e:
+            self.logger.error(f"Error downloading CSV: {e}")
+
+    def saveStocksOldSymbolJson(self, csv_file_path, json_file_path, key_col, value_col, encoding='ISO-8859-1'):
+        """
+        Converts a CSV file into a JSON file with specified columns as key-value pairs.
+
+        :param csv_file_path: Path to the input CSV file.
+        :param json_file_path: Path to the output JSON file.
+        :param key_col: Index of the column to be used as keys.
+        :param value_col: Index of the column to be used as values.
+        :param encoding: Encoding of the CSV file.
+        """
+        try:
+            # Read the CSV file
+            data = pd.read_csv(csv_file_path, encoding=encoding)
+
+            # Create a dictionary from the specified columns
+            result = dict(zip(data.iloc[:, key_col], data.iloc[:, value_col]))
+
+            # Write the dictionary to a JSON file
+            with open(json_file_path, 'w') as json_file:
+                json.dump(result, json_file, indent=4)
+
+            self.logger.info(f"JSON file created successfully at {json_file_path}.")
+        except Exception as e:
+            self.logger.error(f"Error: {e}")
 
     def getStockList(self):
-        self.handle_stocks()
         fileCheck = self.checkJsonInDirectory(self.listType, self.StockListPrefix)
         if not fileCheck:
             raise FileNotFoundError("Stock file not available right now")
@@ -95,6 +138,15 @@ class JSONDownloadService:
         with open(filepath, 'r') as f:
             jsonData = json.load(f)
         return jsonData
+
+    def checkSymbolChange(self, oldFileName):
+        fileCheck = self.checkJsonInDirectory(self.listType, self.StockOldDetails)
+        if not fileCheck:
+            raise FileNotFoundError("Stock old symbol not available right now")
+        filepath = self.getLatestFile(self.listType, self.StockListPrefix)
+        with open(filepath, 'r') as f:
+            jsonData = json.load(f)
+        return jsonData.get(oldFileName)
 
     """ Gold methods """
 
@@ -557,7 +609,7 @@ class JSONDownloadService:
                     td = timedelta(days=1)
                 if filename_prefix == self.MfListPrefix or filename_prefix == self.MfRatePrefix:
                     td = timedelta(days=30)
-                if filename_prefix == self.StockListPrefix:
+                if filename_prefix == self.StockListPrefix or filename_prefix == self.StockOldDetails:
                     td = timedelta(days=20)
                 # Compare time difference
                 if time_diff <= td:
@@ -660,7 +712,6 @@ class JSONDownloadService:
     def deleteFile(filePath):
         if filePath is not None:
             os.remove(filePath)
-
 
     async def make_requests2(self, urls: list, **kwargs):
         results = []
