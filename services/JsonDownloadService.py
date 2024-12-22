@@ -151,6 +151,8 @@ class JSONDownloadService:
         return jsonData
 
     def checkSymbolChange(self, oldFileName):
+        if oldFileName == "SUZLON-BE":
+            return "SUZLON" # Corner case
         fileCheck = self.checkJsonInDirectory(self.listType, self.StockOldDetails)
         if not fileCheck:
             raise FileNotFoundError("Stock old symbol not available right now")
