@@ -29,6 +29,7 @@ class Akkountant(Flask):
     def __init__(self, import_name: str):
         load_dotenv()
         super().__init__(import_name)
+        self.app = self.app_context().app
 
         # Initialize logger
         self.logger = Logger(__name__).get_logger()
@@ -197,6 +198,8 @@ class Akkountant(Flask):
         self.run(host=host, port=port, debug=debug)
 
 
+app = Akkountant(__name__)
+flask_app = app.app
+
 if __name__ == "__main__":
-    app = Akkountant(__name__)
     app.run_app()
