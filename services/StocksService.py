@@ -10,7 +10,11 @@ from models import SoldSecurities
 from models.stockTrade import TradeAssociation
 from services.Base_MSN import Base_MSN
 import pandas as pd
-import nsepython
+import os
+if os.getenv('ENV') is "PROD":
+    import nsepythonserver as nsepython
+else:
+    import nsepython
 from decimal import Decimal, ROUND_DOWN
 from utils.logger import Logger
 

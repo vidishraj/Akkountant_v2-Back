@@ -12,7 +12,10 @@ import re
 from enums.EPGEnum import EPGEnum
 from utils.logger import Logger
 import requests
-import nsepython
+if os.getenv('ENV') is "PROD":
+    import nsepythonserver as nsepython
+else:
+    import nsepython
 
 start_time = None
 # Check this while deploying

@@ -1,4 +1,9 @@
-import nsepython
+import os
+
+if os.getenv('ENV') is "PROD":
+    import nsepythonserver as nsepython
+else:
+    import nsepython
 from flask import jsonify
 from flask_sqlalchemy import SQLAlchemy
 from marshmallow import ValidationError
