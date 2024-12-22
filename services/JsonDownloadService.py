@@ -12,7 +12,10 @@ import re
 from enums.EPGEnum import EPGEnum
 from utils.logger import Logger
 import requests
-if os.getenv('ENV') is "PROD":
+
+from dotenv import load_dotenv
+load_dotenv()
+if os.getenv('ENV') == "PROD":
     import nsepythonserver as nsepython
 else:
     import nsepython

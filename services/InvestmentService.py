@@ -1,6 +1,8 @@
 import os
+from dotenv import load_dotenv
 
-if os.getenv('ENV') is "PROD":
+load_dotenv()
+if os.getenv('ENV') == "PROD":
     import nsepythonserver as nsepython
 else:
     import nsepython

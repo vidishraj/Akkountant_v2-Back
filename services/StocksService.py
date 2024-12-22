@@ -11,7 +11,10 @@ from models.stockTrade import TradeAssociation
 from services.Base_MSN import Base_MSN
 import pandas as pd
 import os
-if os.getenv('ENV') is "PROD":
+from dotenv import load_dotenv
+
+load_dotenv()
+if os.getenv('ENV') == "PROD":
     import nsepythonserver as nsepython
 else:
     import nsepython
