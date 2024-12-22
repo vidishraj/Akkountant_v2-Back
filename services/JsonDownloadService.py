@@ -1,8 +1,10 @@
 import os
 import asyncio
 import json
+import subprocess
 import time
 
+import nsepythonserver
 from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientResponseError
 
 from datetime import datetime, timedelta
@@ -97,14 +99,24 @@ class JSONDownloadService:
         :param save_path: Path to save the downloaded file.
         """
         try:
-            response = requests.get(url, headers=nsepython.headers)
-            response.raise_for_status()  # Raise an error for bad status codes
+            # Build the curl command
+            curl_headers = nsepython.curl_headers
+            payload_var = f'curl -b cookies.txt "{url}" {curl_headers}'
+
+            # Execute the curl command
+            result = subprocess.run(payload_var, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # Check for errors in execution
+            if result.returncode != 0:
+                self.logger.error(f"Error during curl execution: {result.stderr.decode(errors='ignore')}")
+
+            # Save the output as binary data
             with open(save_path, 'wb') as file:
-                file.write(response.content)
+                file.write(result.stdout)
+
             self.logger.info(f"CSV file downloaded successfully from {url} to {save_path}.")
         except Exception as e:
             self.logger.error(f"Error downloading CSV: {e}")
-
     def saveStocksOldSymbolJson(self, csv_file_path, json_file_path, key_col, value_col, encoding='ISO-8859-1'):
         """
         Converts a CSV file into a JSON file with specified columns as key-value pairs.
