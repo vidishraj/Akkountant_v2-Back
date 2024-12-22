@@ -154,7 +154,7 @@ class JSONDownloadService:
         fileCheck = self.checkJsonInDirectory(self.listType, self.StockOldDetails)
         if not fileCheck:
             raise FileNotFoundError("Stock old symbol not available right now")
-        filepath = self.getLatestFile(self.listType, self.StockListPrefix)
+        filepath = self.getLatestFile(self.listType, self.StockOldDetails)
         with open(filepath, 'r') as f:
             jsonData = json.load(f)
         return jsonData.get(oldFileName)
