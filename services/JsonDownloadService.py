@@ -4,7 +4,6 @@ import json
 import subprocess
 import time
 
-import nsepythonserver
 from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientResponseError
 
 from datetime import datetime, timedelta
