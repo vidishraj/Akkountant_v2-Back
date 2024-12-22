@@ -119,13 +119,18 @@ class InvestmentService:
         activeInvested = self.StockService.getActiveMoneyInvested(securityType, userId)
         activeProfitAll = self.StockService.calculateProfitAndCurrentValue(securityType, userId)
         totalProfit = 0
-        marketStatus = nsepython.nse_marketStatus()
+        try:
+            marketStatus = nsepython.nse_marketStatus()
+        except:
+            marketStatus = None
         if marketStatus is not None:
             marketStatus = marketStatus['marketState'][0]['marketStatus']
             if marketStatus == 'Closed':
                 marketStatus = False
             else:
                 marketStatus = True
+        else:
+            marketStatus = False
         # Instantiate the schema
         msn_summary_schema = MSNSummary()
         if activeInvested != 0:
