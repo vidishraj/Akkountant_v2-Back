@@ -17,7 +17,7 @@ class HDFCDebitParser(BaseParser, ABC):
         # (top,left,bottom,right)
         extraction_area = [266, 8, 800, 765]
         try:
-            tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+            tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                 self.filePath, area=extraction_area, guess=False,
                 pages="all",
                 lattice=True, silent=True,
@@ -26,7 +26,7 @@ class HDFCDebitParser(BaseParser, ABC):
         except:
             extraction_area = [228, 27, 800, 700]
             columns = [67, 272, 357, 397, 475, 551, 700]
-            tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+            tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                 self.filePath, area=extraction_area, guess=False,
                 pages="all",
                 stream=True, silent=True,
