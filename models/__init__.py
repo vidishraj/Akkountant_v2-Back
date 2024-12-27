@@ -10,4 +10,5 @@ from models.depositSecurities import DepositSecurities
 from models.purchasedSecurities import PurchasedSecurities
 from models.GoldDetails import GoldDetails
 from models.securityTransactions import SecurityTransactions
+from models.Jobs import Job
 from models.Base import Base
