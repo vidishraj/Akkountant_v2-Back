@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 
@@ -7,15 +8,17 @@ from dotenv import load_dotenv
 from flask_sqlalchemy.session import Session
 from sqlalchemy import inspect, text
 from flask_cors import CORS
+from sqlalchemy.exc import SQLAlchemyError
 
 from controllers.investmentsEP import InvestmentController
 from controllers.transactionsEP import TransactionController
+from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.JsonDownloadService import JSONDownloadService
 from services.tasks.scheduler import TaskScheduler
 from services.transactionsService import TransactionService
 from utils.logger import Logger
-from models import *
+import models
 
 
 class Akkountant(Flask):
@@ -47,7 +50,7 @@ class Akkountant(Flask):
         # self.updateFromDump(filename, folder_path)
 
         # Run async methods in setup
-        self._setup_investments()  # Run async setup
+        # self._setup_investments()  # Run async setup
         self._setup_routes()
         self._setup_hooks()
 
@@ -91,7 +94,7 @@ class Akkountant(Flask):
 
     def _setup_database(self):
         """Set up database connection and create tables."""
-        self.db = SQLAlchemy(self, model_class=Base)
+        self.db = SQLAlchemy(self, model_class=models.Base)
         with self.app_context():
             self.logger.info("Creating database tables if not exist.")
             inspector = inspect(self.db.engine)
@@ -99,6 +102,14 @@ class Akkountant(Flask):
             existing_tables_before = inspector.get_table_names()
             self.db.create_all()
 
+            self._insert_initial_jobs("SetNPSRate", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetNPSDetails", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetStocksOldDetails", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetStocksDetails", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetMFRate", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetMFDetails", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetGoldRate", "Pending", "High", datetime.datetime.now())
+            self._insert_initial_jobs("SetPPFRate", "Pending", "High", datetime.datetime.now())
             existing_tables_after = inspector.get_table_names()
             new_tables = set(existing_tables_after) - set(existing_tables_before)
             if new_tables:
@@ -115,18 +126,41 @@ class Akkountant(Flask):
 
     def _setup_schedulers(self):
         """Set up background tasks."""
-        self.scheduler = TaskScheduler()
-        self.logger.info("Background schedulers initialized.")
+        with self.app_context():
+            self.scheduler = TaskScheduler(self.db, self)
+            self.scheduler.start_scheduler()
+            self.logger.info("Background schedulers initialized.")
+
+    def _insert_initial_jobs(self, title, status, priority, due_date, user_id=None):
+        try:
+            # Check if a job with the same title and status exists
+            existing_job = self.db.session.query(models.Job).filter(models.Job.status.in_([JobStatus.OVERDUE.value,
+                                                                                           JobStatus.PENDING.value])).filter_by(title=title).first()
+
+            if existing_job:
+                return False  # Job already exists
+
+            # Insert a new job
+            new_job = models.Job(
+                title=title,
+                status=status,
+                priority=priority,
+                due_date=due_date,
+                user_id=user_id,
+                result=None,
+            )
+            self.db.session.add(new_job)
+            self.db.session.commit()
+            return True  # Job inserted successfully
+        except SQLAlchemyError as e:
+            self.db.session.rollback()
+            self.logger.error(f"Error inserting job: {e}")
+            return False
 
     @staticmethod
     def _setup_investments():
         """Read from the JSON file, call the JSON service individually for rates and lists."""
-        json_service = JSONDownloadService(save_directory=f"{os.getcwd()}/services/assets/")
-        json_service.handle_stocks()
-        json_service.handle_nps()
-        json_service.handle_gold()
-        json_service.handle_mf()
-        json_service.handle_ppf()
+        pass
 
     def _setup_routes(self):
         """Define application routes."""
@@ -202,4 +236,4 @@ app = Akkountant(__name__)
 flask_app = app.app
 
 if __name__ == "__main__":
-    app.run_app()
+    app.run_app(debug=False)
