@@ -12,7 +12,7 @@ aiohttp~=3.11.7
 beautifulsoup4~=4.12.3
 flask_sqlalchemy
 flask_cors
-tabula
+tabula-py
 PyMuPDF
 google-auth-httplib2
 google-auth-oauthlib
