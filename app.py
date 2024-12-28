@@ -126,10 +126,11 @@ class Akkountant(Flask):
 
     def _setup_schedulers(self):
         """Set up background tasks."""
-        with self.app_context():
-            self.scheduler = TaskScheduler(self.db, self)
-            self.scheduler.start_scheduler()
-            self.logger.info("Background schedulers initialized.")
+        pass
+        # with self.app_context():
+        #     self.scheduler = TaskScheduler(self.db, self)
+        #     self.scheduler.start_scheduler()
+        #     self.logger.info("Background schedulers initialized.")
 
     def _insert_initial_jobs(self, title, status, priority, due_date, user_id=None):
         try:
