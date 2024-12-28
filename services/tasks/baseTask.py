@@ -40,7 +40,7 @@ class BaseTask(ABC):
         if not hasattr(self, 'initialized'):  # Prevent multiple initializations
             # Initialise singleton with only title and priority
             self.title = title
-            self.jsonService = JsonDownloadService.JSONDownloadService(os.getcwd() + 'services/assets')
+            self.jsonService = JsonDownloadService.JSONDownloadService(os.getcwd() + '/services/assets')
             self.priority = priority
             # Make tmp_dir if it doesnt exist
             os.makedirs(self.tmp_dir, exist_ok=True)
