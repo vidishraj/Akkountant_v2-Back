@@ -139,7 +139,7 @@ class SetMFRate(BaseTask):
                 except ClientResponseError as e:
                     return url, e.status  # Return specific HTTP error code
                 except Exception as e:
-                    self.logger.error(f"Unexpected error for {url}: {e}")
+                    self.logger.error(f"Unexpected error for {url}: {e.__str__()}")
                     return url, 500  # General server error
 
         return url, 408  # Return timeout status after retries
