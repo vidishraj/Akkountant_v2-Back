@@ -130,7 +130,7 @@ class SetMFRate(BaseTask):
                                 self.logger.info(
                                     f"Request {requestsProcessed} finished in {time.time() - start_time:.2f}s")
                         else:
-                            self.logger.info(resp.status, resp)
+                            self.logger.info(f" Status {resp.status}, Response {resp.text()}")
                         data = await resp.json()  # Use .json() for JSON responses
                         return url.split("/")[-1], data
                 except (ClientConnectorError, asyncio.TimeoutError) as e:
