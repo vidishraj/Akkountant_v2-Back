@@ -242,7 +242,7 @@ class TransactionService(BaseService):
         """
         We download all the files first. Then individually process and upload them. Current approach is to upload the
         file first. If there is a failure during processing and insertion, then we delete the file from googleDrive.
-            /:param dateTo: Date Range Info
+            :param dateTo: Date Range Info
             :param dateTo:
             :param dateFrom: Date Range Info
             :param userID: UserID firebase
