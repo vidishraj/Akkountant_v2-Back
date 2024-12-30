@@ -4,7 +4,7 @@ from utils.logger import Logger
 from utils.GoogleServiceSingleton import GoogleServiceSingleton
 
 
-class CheckMailTask(BaseTask):
+class CheckStatementTask(BaseTask):
     _instance = None
 
     def __new__(cls, *args, **kwargs):
