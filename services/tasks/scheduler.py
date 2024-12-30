@@ -16,6 +16,8 @@ from services.tasks.SetMfRate import SetMFRate
 from services.tasks.SetMfDetails import SetMFDetails
 from services.tasks.SetGoldRate import SetGoldRate
 from services.tasks.SetPpfRate import SetPPFRate
+from services.tasks.checkMailTask import CheckMailTask
+from services.tasks.checkStatementsTask import CheckStatementTask
 from utils.logger import Logger
 
 
@@ -95,7 +97,9 @@ class TaskScheduler:
             "SetMFRate": SetMFRate,
             "SetMFDetails": SetMFDetails,
             "SetGoldRate": SetGoldRate,
-            "SetPPFRate": SetPPFRate
+            "SetPPFRate": SetPPFRate,
+            "CheckMail": CheckMailTask,
+            "CheckStatement": CheckStatementTask
         }
         return task_mapping.get(title)
 
