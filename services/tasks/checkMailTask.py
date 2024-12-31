@@ -1,7 +1,5 @@
 from services.tasks.baseTask import BaseTask
-from utils.DateTimeUtil import DateTimeUtil
 from utils.logger import Logger
-from utils.GoogleServiceSingleton import GoogleServiceSingleton
 
 
 class CheckMailTask(BaseTask):

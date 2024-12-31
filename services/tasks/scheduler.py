@@ -115,28 +115,30 @@ class TaskScheduler:
             self.threads_initialized = True
 
     def _run_overdue_scheduler(self):
-        while True:
-            try:
-                self._update_overdue_jobs()
-                time.sleep(120)
-            except Exception as e:
-                self.logger.error(f"Error in overdue scheduler: {e}")
+        with app.app_context():  # Push the app context for this thread
+            while True:
+                try:
+                    self._update_overdue_jobs()
+                    time.sleep(120)
+                except Exception as e:
+                    self.logger.error(f"Error in overdue scheduler: {e}")
 
     def _run_job_processor(self):
-        while True:
-            try:
-                self._process_pending_and_overdue_jobs()
-                time.sleep(300)
-            except Exception as e:
-                self.logger.error(f"Error in job processor: {e}")
+        with app.app_context():  # Push the app context for this thread
+            while True:
+                try:
+                    self._process_pending_and_overdue_jobs()
+                    time.sleep(300)
+                except Exception as e:
+                    self.logger.error(f"Error in job processor: {e}")
 
 
+app = Flask(__name__)
 if __name__ == "__main__":
     # Replace with your database URL
     DATABASE_URL = os.getenv('DATABASE_URL')
 
     scheduler = TaskScheduler(DATABASE_URL)
     scheduler.start_scheduler()
-    app = Flask(__name__)
 
     app.run(port=5000, debug=False)

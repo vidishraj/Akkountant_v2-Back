@@ -1,7 +1,6 @@
 from services.tasks.baseTask import BaseTask
 from utils.DateTimeUtil import DateTimeUtil
 from utils.logger import Logger
-from utils.GoogleServiceSingleton import GoogleServiceSingleton
 
 
 class CheckStatementTask(BaseTask):
@@ -9,7 +8,7 @@ class CheckStatementTask(BaseTask):
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
-            cls._instance = super(CheckMailTask, cls).__new__(cls)
+            cls._instance = super(CheckStatementTask, cls).__new__(cls)
         return cls._instance
 
     def __init__(self, title, priority):
