@@ -70,15 +70,20 @@ class TaskScheduler:
                 self.logger.info(f"Job result: {result}, status: {status}")
                 job.result = result
                 job.status = JobStatus[status.upper()].value
+                if status == JobStatus.FAILED.value and job.failures < 10:
+                    job.failures += 1
+                if job.failures == 10:
+                    self.logger.error(f"Reached failure limit for job {job.title}")
                 session.add(job)
 
-                if interval and status != JobStatus.FAILED.value:
+                if interval and job.failures < 10:
                     new_job = Job(
                         title=job.title,
                         priority=job.priority,
                         status=JobStatus.PENDING.value,
                         due_date=datetime.now() + timedelta(minutes=interval),
                         user_id=job.user_id,
+                        failures=job.failures
                     )
                     session.add(new_job)
                 session.commit()
