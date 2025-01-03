@@ -15,7 +15,7 @@ class CheckMailTask(BaseTask):
             super().__init__(title, priority)
             self.logger = Logger(__name__).get_logger()
             # 4 hours
-            self.interval = 300
+            self.interval = 5
 
     def run(self):
         try:
