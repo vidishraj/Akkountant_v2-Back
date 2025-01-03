@@ -39,7 +39,7 @@ class TaskScheduler:
             for job in pending_jobs:
                 if job.due_date < current_time:
                     job.status = JobStatus.OVERDUE.value
-                    session.add(job)
+                    # session.add(job)
             session.commit()
         except Exception as e:
             self.logger.error(f"Error updating overdue jobs: {e}")
@@ -74,7 +74,7 @@ class TaskScheduler:
                     job.failures += 1
                 if job.failures == 10:
                     self.logger.error(f"Reached failure limit for job {job.title}")
-                session.add(job)
+                # session.add(job)
 
                 if interval and job.failures < 10:
                     new_job = Job(

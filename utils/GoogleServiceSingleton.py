@@ -14,16 +14,17 @@ class GoogleServiceSingleton:
 
     _instance = None
     _user_services = {}
+    logger = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(GoogleServiceSingleton, cls).__new__(cls)
+            cls.logger = Logger(__name__).get_logger()
         return cls._instance
 
     def __init__(self):
         # Avoid reinitializing if already initialized
-        if not hasattr(self, 'initialized'):
-            self.logger = Logger(__name__).get_logger()
+        return
 
     def _initialize_service(self, token_info, service_name, api_version, scopes):
         """Initializes a Google service if token is valid or renews it if expired."""
