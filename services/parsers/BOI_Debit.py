@@ -45,7 +45,7 @@ class BOIDebitParser(BaseParser, ABC):
     def readFirstPage(self):
         extraction_area = [244, 59, 796, 541]
         columns = [116, 188, 363, 413, 466, 537]
-        tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+        tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             pages='1', area=extraction_area, guess=False,
             stream=True, silent=True,
@@ -55,7 +55,7 @@ class BOIDebitParser(BaseParser, ABC):
     def readMiddlePages(self):
         extraction_area = [1, 59, 1000, 541]
         columns = [116, 188, 363, 413, 466, 537]
-        tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+        tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             pages=f'2-{self.pagesInPDF}', area=extraction_area, guess=True,
             stream=True, silent=True,

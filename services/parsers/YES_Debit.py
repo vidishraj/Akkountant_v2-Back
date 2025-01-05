@@ -19,7 +19,7 @@ class YESBankDebitParser(BaseParser, ABC):
         columns = [92, 144, 282, 354, 420, 482, 700]
         extraction_area = [250, 44, 800, 700]
         try:
-            tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+            tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                 self.filePath, guess=True,
                 area=extraction_area, stream=True,
                 pages="all", silent=True,

@@ -17,13 +17,13 @@ class HDFCMilleniaParse(BaseParser, ABC):
         extraction_area = [429, 23, 677, 588]
         columns = [104, 476, 677]
         try:
-            tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+            tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                 self.filePath,
                 pages='1', area=extraction_area, guess=False,
                 stream=True, silent=True,
                 columns=columns, password=self.password)
         except:
-            tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+            tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                 self.filePath,
                 pages='1', area=extraction_area, guess=False,
                 stream=True, silent=True,
@@ -36,13 +36,13 @@ class HDFCMilleniaParse(BaseParser, ABC):
         columns = [104, 476, 677]
         for i in range(2, self.pagesInPDF):
             try:
-                tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+                tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                     self.filePath,
                     pages=i, area=extraction_area, guess=False,
                     stream=True, silent=True,
                     columns=columns, password=self.password)
             except:
-                tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+                tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
                     self.filePath,
                     pages=i, area=extraction_area, guess=False,
                     stream=True, silent=True,

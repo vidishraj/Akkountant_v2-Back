@@ -40,7 +40,7 @@ class PPFService(Base_EPG, ABC):
         """
         depositMap = {}
         if len(deposits) == 0:
-            return None, None, None
+            return None, None, None, None
         try:
             for deposit in deposits:
                 dateString = self.dateTimeUtil.convert_format_for_epf(deposit.date.__str__())
@@ -80,7 +80,7 @@ class PPFService(Base_EPG, ABC):
             return transactions, netProfit, runningTotal, runningInterest
         except Exception as ex:
             self.logger.error(f"Error while calculating transaction table for PF {ex}")
-            return None, None
+            return None, None, None, None
 
     def fetchComplete(self, userId):
         # Fetch all the deposits
@@ -105,7 +105,12 @@ class PPFService(Base_EPG, ABC):
                 'net': netInvestment,
             }
         else:
-            return {}
+            return {
+                'transactions': [],
+                'deposits': [],
+                'netProfit': 0,
+                'unAccountedProfit': 0,
+                'net': 0}
 
     def fetchRates(self):
         return {"data": self.JsonDownloadService.getPPFRateFile()}

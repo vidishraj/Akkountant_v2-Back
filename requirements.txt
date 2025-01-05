@@ -10,3 +10,13 @@ python-dateutil~=2.9.0.post0
 nsepython~=2.94
 aiohttp~=3.11.7
 beautifulsoup4~=4.12.3
+flask_sqlalchemy
+flask_cors
+tabula-py
+PyMuPDF
+google-auth-httplib2
+google-auth-oauthlib
+google-api-python-client
+mysql-connector-python
+openpyxl
+nsepythonserver

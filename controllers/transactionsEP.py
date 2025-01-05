@@ -83,7 +83,7 @@ class TransactionController:
 
     @Logger.standardLogger
     def triggerEmailCheck(self):
-        userId = request.headers.get("x-firebase-id")
+        userId = request.headers.get("X-Firebase-ID")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         self.logger.info(f"Reading email for user {userId}")
@@ -96,7 +96,7 @@ class TransactionController:
 
     @Logger.standardLogger
     def triggerStatementCheck(self):
-        userId = request.headers.get("x-firebase-id")
+        userId = request.headers.get("X-Firebase-ID")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         bank = request.args.get('bank')
@@ -232,7 +232,7 @@ class TransactionController:
     def setOptedBanks(self):
         try:
             data = request.json
-            userId = request.headers.get("x-firebase-id")
+            userId = request.headers.get("X-Firebase-ID")
             banks = data.get('banks')
             validBanks = list(banks.keys())
             # Validate input
@@ -247,10 +247,6 @@ class TransactionController:
             if updated_user is None:
                 return jsonify({"error": "User not found"}), 404
 
-            return jsonify({
-                "message": "Opted banks updated successfully",
-                "userID": updated_user.userID,
-                "optedBanks": updated_user.optedBanks.split(',')
-            }), 200
+            return jsonify({"message": "Opted banks updated successfully"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500

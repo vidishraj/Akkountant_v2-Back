@@ -1,4 +1,11 @@
-import nsepython
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+if os.getenv('ENV') == "PROD":
+    import nsepythonserver as nsepython
+else:
+    import nsepython
 from flask import jsonify
 from flask_sqlalchemy import SQLAlchemy
 from marshmallow import ValidationError
@@ -8,7 +15,7 @@ from dtos.MSNSummaryDto import MSNSummary
 from enums.DateFormatEnum import DateStatementEnum
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
-from models import PurchasedSecurities
+from models import PurchasedSecurities, Jobs
 from services.EPFService import EPFService
 from services.GoldService import GoldService
 from services.MfService import MfService
@@ -112,13 +119,18 @@ class InvestmentService:
         activeInvested = self.StockService.getActiveMoneyInvested(securityType, userId)
         activeProfitAll = self.StockService.calculateProfitAndCurrentValue(securityType, userId)
         totalProfit = 0
-        marketStatus = nsepython.nse_marketStatus()
+        try:
+            marketStatus = nsepython.nse_marketStatus()
+        except:
+            marketStatus = None
         if marketStatus is not None:
             marketStatus = marketStatus['marketState'][0]['marketStatus']
             if marketStatus == 'Closed':
                 marketStatus = False
             else:
                 marketStatus = True
+        else:
+            marketStatus = False
         # Instantiate the schema
         msn_summary_schema = MSNSummary()
         if activeInvested != 0:
@@ -276,3 +288,23 @@ class InvestmentService:
             self.db.session.rollback()
             self.logger.error(f"Deletion failed: {ex}")
             return False
+
+    def getJobsTable(self, page, page_size=10, limit=10):
+        paginationQuery = self.db.session.query(Jobs).offset((page - 1) * page_size).limit(limit)
+        results = paginationQuery.all()
+        return {
+            "results": results,
+            "page": page,
+            "jobs": {
+                "SetNPSRate": "Set NPS Rate",
+                "SetNPSDetails": "Set NPS Details",
+                "SetStocksOldDetails": "Set Stocks Old Codes",
+                "SetStocksDetails": "Set Stocks Details",
+                "SetMFRate": "Set Mutual Funds Rate",
+                "SetMFDetails": "Set Mutual Funds Details",
+                "SetGoldRate": "Set Gold Rates",
+                "SetPPFRate": "Set PPF Rates",
+                "CheckMail": "Check Mail",
+                "CheckStatement": "Check Statements"
+            }
+        }

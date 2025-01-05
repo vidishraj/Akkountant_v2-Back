@@ -26,7 +26,7 @@ class NPSParser(BaseParser, ABC):
         # Middle page tables is a little smaller.
         columns = [250, 291, 329, 371, 410, 452, 495]
 
-        tables: [pandas.DataFrame] = tabula.read_pdf(
+        tables: [pandas.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             pages=f'2-{self.pagesInPDF}', guess=False, pandas_options={'header': None},
             stream=True, silent=True,
@@ -38,7 +38,7 @@ class NPSParser(BaseParser, ABC):
         extraction_area = [507, 8, 800, 581]
         columns = [237, 281, 320, 362, 402, 447, 493]
 
-        tables: [pandas.DataFrame] = tabula.read_pdf(
+        tables: [pandas.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             pages='all', guess=False, pandas_options={'header': None},
             stream=True, silent=True,
@@ -122,7 +122,7 @@ class NPSParser(BaseParser, ABC):
         columns = [129, 493]
 
         percentagePattern = r"^\d{1,3}(\.\d{2})?%$"
-        tables: [pandas.DataFrame] = tabula.read_pdf(
+        tables: [pandas.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             area=extraction_area,
             pages='all', guess=False, pandas_options={'header': None},

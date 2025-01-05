@@ -19,7 +19,7 @@ class YESBankCreditParser(BaseParser, ABC):
         columns = [96, 485, 650]
         for i in range(1, 1000):
             try:
-                tables += tabula.read_pdf(
+                tables += tabula.io.read_pdf(
                     self.filePath, guess=True, silent=True,
                     area=extraction_area, stream=True,
                     pages=f'{i}',

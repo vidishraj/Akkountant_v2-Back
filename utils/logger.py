@@ -14,12 +14,12 @@ class Logger:
         self._logger.setLevel(logging.DEBUG)  # Setting the logging level
 
         # Creating the logs directory if it doesn't exist
-        log_dir = 'logs'
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        # log_dir = 'logs'
+        # if not os.path.exists(log_dir):
+        #     os.makedirs(log_dir)
 
         # Creating handlers for different log levels
-        self._setup_handlers(log_dir)
+        self._setup_handlers("")
 
     def _setup_handlers(self, log_dir: str):
         """Set up file handlers for different log levels."""
@@ -40,22 +40,22 @@ class Logger:
         console_handler.setFormatter(formatter)
         self._logger.addHandler(console_handler)
 
-        # Creating file handlers for different log levels
-        for level_name, level_value in levels.items():
-            level_dir = os.path.join(log_dir, level_name.lower())
-            if not os.path.exists(level_dir):
-                os.makedirs(level_dir)
-
-            # Creating a timed rotating file handler
-            file_handler = TimedRotatingFileHandler(
-                os.path.join(level_dir, f'{level_name.lower()}_log.log'),
-                when='midnight',
-                interval=1,
-                backupCount=7  # Keep the last 7 log files
-            )
-            file_handler.setLevel(level_value)
-            file_handler.setFormatter(formatter)
-            self._logger.addHandler(file_handler)
+        # # Creating file handlers for different log levels
+        # for level_name, level_value in levels.items():
+        #     level_dir = os.path.join(log_dir, level_name.lower())
+        #     if not os.path.exists(level_dir):
+        #         os.makedirs(level_dir)
+        #
+        #     # Creating a timed rotating file handler
+        #     file_handler = TimedRotatingFileHandler(
+        #         os.path.join(level_dir, f'{level_name.lower()}_log.log'),
+        #         when='midnight',
+        #         interval=1,
+        #         backupCount=7  # Keep the last 7 log files
+        #     )
+        #     file_handler.setLevel(level_value)
+        #     file_handler.setFormatter(formatter)
+        #     self._logger.addHandler(file_handler)
 
     @staticmethod
     def standardLogger(func):

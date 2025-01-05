@@ -18,7 +18,7 @@ class ICICICreditCardStatementParser(BaseParser, ABC):
     def readFirstPage(self):
         extraction_area = [365, 199, 623, 568]
         columns = [243, 299, 435, 473, 515, 568]
-        tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+        tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             pages='1', area=extraction_area, guess=False,
             stream=True, silent=True,
@@ -28,7 +28,7 @@ class ICICICreditCardStatementParser(BaseParser, ABC):
     def readMiddlePages(self):
         extraction_area = [58, 30, 834, 589]
         columns = [86, 169, 366, 437, 507, 562]
-        tables: [pandas.core.frame.DataFrame] = tabula.read_pdf(
+        tables: [pandas.core.frame.DataFrame] = tabula.io.read_pdf(
             self.filePath,
             pages='2', area=extraction_area, guess=False,
             stream=True, silent=True,

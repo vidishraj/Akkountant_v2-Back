@@ -15,7 +15,7 @@ class EPFStatementParser(BaseParser, ABC):
         # (top,left,bottom,right)
         extraction_area = [222, 25, 520, 560]
         columns = [82, 138, 168, 283, 339, 397, 453, 515]
-        tables: [DataFrame] = tabula.read_pdf(
+        tables: [DataFrame] = tabula.io.read_pdf(
             self.filePath, area=extraction_area, guess=False,
             pages=1,
             columns=columns,
