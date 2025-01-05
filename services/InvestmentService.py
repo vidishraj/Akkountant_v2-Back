@@ -15,7 +15,7 @@ from dtos.MSNSummaryDto import MSNSummary
 from enums.DateFormatEnum import DateStatementEnum
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
-from models import PurchasedSecurities
+from models import PurchasedSecurities, Jobs
 from services.EPFService import EPFService
 from services.GoldService import GoldService
 from services.MfService import MfService
@@ -288,3 +288,23 @@ class InvestmentService:
             self.db.session.rollback()
             self.logger.error(f"Deletion failed: {ex}")
             return False
+
+    def getJobsTable(self, page, page_size=10, limit=10):
+        paginationQuery = self.db.session.query(Jobs).offset((page - 1) * page_size).limit(limit)
+        results = paginationQuery.all()
+        return {
+            "results": results,
+            "page": page,
+            "jobs": {
+                "SetNPSRate": "Set NPS Rate",
+                "SetNPSDetails": "Set NPS Details",
+                "SetStocksOldDetails": "Set Stocks Old Codes",
+                "SetStocksDetails": "Set Stocks Details",
+                "SetMFRate": "Set Mutual Funds Rate",
+                "SetMFDetails": "Set Mutual Funds Details",
+                "SetGoldRate": "Set Gold Rates",
+                "SetPPFRate": "Set PPF Rates",
+                "CheckMail": "Check Mail",
+                "CheckStatement": "Check Statements"
+            }
+        }

@@ -280,3 +280,12 @@ class InvestmentController:
         # Validate the request JSON body
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
         return self.InvestmentService.deleteSingleRecord(service_type, buyId)
+
+    @Logger.standardLogger
+    def getJobsTable(self):
+        # Get user ID from context
+        page = request.args.get('page')
+        if page is None:
+            return jsonify({"Error": "Page is missing"}), 406
+        return jsonify(self.InvestmentService.getJobsTable(page)), 200
+
