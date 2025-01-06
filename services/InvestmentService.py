@@ -11,6 +11,7 @@ from enums.DateFormatEnum import DateStatementEnum
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities, Jobs
+from services.Base_Service import BaseService
 from services.EPFService import EPFService
 from services.GoldService import GoldService
 from services.MfService import MfService
@@ -30,7 +31,7 @@ else:
     import nsepython
 
 
-class InvestmentService:
+class InvestmentService(BaseService):
     db: SQLAlchemy
     logger: LG
     jobsObject = {
@@ -47,6 +48,7 @@ class InvestmentService:
     }
 
     def __init__(self):
+        super().__init__()
         self.logger = Logger(__name__).get_logger()
         self.StockService = StocksService()
         self.NPSService = NPSService()
@@ -303,13 +305,15 @@ class InvestmentService:
             return False
 
     def getJobsTable(self, page, page_size=10, limit=10):
-        paginationQuery = self.db.session.query(Jobs.Job).offset((int(page) - 1) * page_size).limit(limit)
+        column_attr = getattr(Jobs.Job, 'due_date')
+        paginationQuery = self.db.session.query(Jobs.Job).order_by(column_attr.desc()).\
+            offset((int(page) - 1) * page_size).limit(limit)
         results = paginationQuery.all()
         res = [{
                 "Title": result.title,
                 "Result": result.result,
                 "Status": result.status,
-                "Due Time": result.due_date,
+                "DueTime": result.due_date,
                 "Failures": result.failures
             } for result in results]
         return {
