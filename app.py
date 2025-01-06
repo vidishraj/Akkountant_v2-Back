@@ -193,6 +193,7 @@ class Akkountant(Flask):
             ('/fetchCompleteEPG', 'GET', self.investmentEP.fetchCompleteDataForEPG),
             ('/fetchRates', 'GET', self.investmentEP.fetchRateForEPG),
             ('/getsJobs', 'GET', self.investmentEP.getJobsTable),
+            ('/startJob', 'GET', self.investmentEP.setJobs),
             ('/deleteSingleInvestment', 'GET', self.investmentEP.deleteSingleRecord),
             ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
         ]

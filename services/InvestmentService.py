@@ -1,11 +1,6 @@
+import datetime
 import os
 from dotenv import load_dotenv
-
-load_dotenv()
-if os.getenv('ENV') == "PROD":
-    import nsepythonserver as nsepython
-else:
-    import nsepython
 from flask import jsonify
 from flask_sqlalchemy import SQLAlchemy
 from marshmallow import ValidationError
@@ -28,10 +23,28 @@ from utils.logger import Logger
 from decimal import Decimal, ROUND_DOWN
 from logging import Logger as LG
 
+load_dotenv()
+if os.getenv('ENV') == "PROD":
+    import nsepythonserver as nsepython
+else:
+    import nsepython
+
 
 class InvestmentService:
     db: SQLAlchemy
     logger: LG
+    jobsObject = {
+        "SetNPSRate": "Set NPS Rate",
+        "SetNPSDetails": "Set NPS Details",
+        "SetStocksOldDetails": "Set Stocks Old Codes",
+        "SetStocksDetails": "Set Stocks Details",
+        "SetMFRate": "Set Mutual Funds Rate",
+        "SetMFDetails": "Set Mutual Funds Details",
+        "SetGoldRate": "Set Gold Rates",
+        "SetPPFRate": "Set PPF Rates",
+        "CheckMail": "Check Mail",
+        "CheckStatement": "Check Statements"
+    }
 
     def __init__(self):
         self.logger = Logger(__name__).get_logger()
@@ -295,16 +308,20 @@ class InvestmentService:
         return {
             "results": results,
             "page": page,
-            "jobs": {
-                "SetNPSRate": "Set NPS Rate",
-                "SetNPSDetails": "Set NPS Details",
-                "SetStocksOldDetails": "Set Stocks Old Codes",
-                "SetStocksDetails": "Set Stocks Details",
-                "SetMFRate": "Set Mutual Funds Rate",
-                "SetMFDetails": "Set Mutual Funds Details",
-                "SetGoldRate": "Set Gold Rates",
-                "SetPPFRate": "Set PPF Rates",
-                "CheckMail": "Check Mail",
-                "CheckStatement": "Check Statements"
-            }
+            "jobs": self.jobsObject
         }
+
+    def setJobsTable(self, jobId: str, user_id: str):
+        if jobId not in list(self.jobsObject.keys()):
+            return jsonify({"Error": "Invalid Job"}), 406
+        newJob = Jobs.Job(
+                title=jobId,
+                status="Pending",
+                priority="High",
+                due_date=datetime.datetime.now(),
+                user_id=user_id,
+                result=None,
+        )
+        self.db.session.add(newJob)
+        self.db.session.commit()
+        return jsonify({"Success": "Job inserted"}), 200
