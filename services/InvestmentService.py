@@ -303,10 +303,17 @@ class InvestmentService:
             return False
 
     def getJobsTable(self, page, page_size=10, limit=10):
-        paginationQuery = self.db.session.query(Jobs).offset((page - 1) * page_size).limit(limit)
+        paginationQuery = self.db.session.query(Jobs.Job).offset((int(page) - 1) * page_size).limit(limit)
         results = paginationQuery.all()
+        res = [{
+                "Title": result.title,
+                "Result": result.result,
+                "Status": result.status,
+                "Due Time": result.due_date,
+                "Failures": result.failures
+            } for result in results]
         return {
-            "results": results,
+            "results": res,
             "page": page,
             "jobs": self.jobsObject
         }
