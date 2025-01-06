@@ -23,7 +23,6 @@ class TransactionService(BaseService):
 
     def __init__(self):
         super().__init__()
-        self.logger = Logger(__name__).get_logger()
 
     def fetchTransactions(self, page: int, filters: dict, page_size: int = 100):
         query = self.db.session.query(Transactions)
@@ -180,24 +179,34 @@ class TransactionService(BaseService):
                 user=userId
             )
             try:
-                self.db.session.add(transaction)
-                self.db.session.commit()
+                if isinstance(self.db, dict):
+                    with self.db.session() as session:
+                        session.add(transaction)
+                        session.commit()
+                else:
+                    self.db.session.add(transaction)
+                    self.db.session.commit()
             except IntegrityError as e:
                 self.logger.warning(f"Duplicate entry error occurred: {e.__cause__}")
                 self.db.session.rollback()
                 integrityErrors += 1
 
         for conflict in conflicts:
-            conflict = TransactionForReview(
+            conflictOuter = TransactionForReview(
                 user=userId,
                 conflict=conflict
             )
-            self.db.session.add(conflict)
-        try:
-            self.db.session.commit()
-        except IntegrityError as e:
-            self.logger.warning(f"Duplicate entry error occurred while committing: {e.__cause__}")
-            self.db.session.rollback()
+            try:
+                if isinstance(self.db, dict):
+                    with self.db.session() as session:
+                        session.add(conflictOuter)
+                        session.commit()
+                else:
+                    self.db.session.add(conflictOuter)
+                    self.db.session.commit()
+            except IntegrityError as e:
+                self.logger.warning(f"Duplicate entry error occurred while committing: {e.__cause__}")
+                self.db.session.rollback()
         return integrityErrors
 
     @staticmethod
@@ -325,8 +334,13 @@ class TransactionService(BaseService):
             user=user
         )
         try:
-            self.db.session.add(fileDetails)
-            self.db.session.commit()
+            if isinstance(self.db, dict):
+                with self.db.session() as session:
+                    session.add(fileDetails)
+                    session.commit()
+            else:
+                self.db.session.add(fileDetails)
+                self.db.session.commit()
         except IntegrityError as e:
             self.logger.warning(f"Duplicate file details entry error occurred: {e.__cause__}")
             self.db.session.rollback()
@@ -335,14 +349,24 @@ class TransactionService(BaseService):
         # Find the row by ID and delete it
         row = self.db.session.query(FileDetails).filter_by(fileID=fileId).first()
         if row:
-            self.db.session.delete(row)
+            if isinstance(self.db, dict):
+                with self.db.session() as session:
+                    session.delete(row)
+                    session.commit()
+            else:
+                self.db.session.delete(row)
+                self.db.session.commit()
 
     def updateStatementCount(self, fileId, newStatementCount):
         # Find the row by ID to update
         row = self.db.session.query(FileDetails).filter_by(fileID=fileId).first()
         if row:
             setattr(row, 'statementCount', newStatementCount)
-            self.db.session.commit()
+            if isinstance(self.db, dict):
+                with self.db.session() as session:
+                    session.commit()
+            else:
+                self.db.session.commit()
 
     def fetchFileDetails(self, page: int, filters: dict, page_size: int = 100):
         query = self.db.session.query(FileDetails)
@@ -527,7 +551,7 @@ class TransactionService(BaseService):
                 return self.gmailService.googleService.start_fresh_auth_flow(scopes)
         return {"Message": "Weird Failure"}
 
-    def setOptedBanks(self, user_id: str, banks:dict):
+    def setOptedBanks(self, user_id: str, banks: dict):
         """
            Updates the optedBanks for a user in the database.
 
