@@ -289,3 +289,13 @@ class InvestmentController:
             return jsonify({"Error": "Page is missing"}), 406
         return jsonify(self.InvestmentService.getJobsTable(page)), 200
 
+    @Logger.standardLogger
+    def setJobs(self):
+        # Get user ID from context
+        jobId = request.args.get('jobId')
+        userId = request.headers.get("X-Firebase-ID")
+        if jobId is None:
+            return jsonify({"Error": "JobID is missing"}), 406
+        return self.InvestmentService.setJobsTable(jobId, userId)
+
+
