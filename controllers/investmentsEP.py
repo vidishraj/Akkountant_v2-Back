@@ -298,4 +298,6 @@ class InvestmentController:
             return jsonify({"Error": "JobID is missing"}), 406
         return self.InvestmentService.setJobsTable(jobId, userId)
 
-
+    @Logger.standardLogger
+    def fetchTimeStamps(self):
+        return jsonify(self.InvestmentService.getFileTimeStamps()), 200
