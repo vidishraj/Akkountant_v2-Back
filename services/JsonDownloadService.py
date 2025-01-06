@@ -139,7 +139,6 @@ class JSONDownloadService:
 
     """ MF methods """
 
-
     def getMfNameForSchemeId(self, scheme_id):
         mfList = self.getMfList()
         mfList = mfList['data']
@@ -233,6 +232,31 @@ class JSONDownloadService:
             return os.path.join(f"{self.bas_directory}/{type}/", most_recent_file)
         return None
 
+    def getTimeStampsOfAllFiles(self):
+        return {
+            'NPSRate': self.getTimeStamp(self.ratesType, self.NpsRatePrefix),
+            'GoldRate': self.getTimeStamp(self.ratesType, self.GoldRatePrefix),
+            'MFRate': self.getTimeStamp(self.ratesType, self.MfRatePrefix),
+            'EPFRate': self.getTimeStamp(self.ratesType, self.EPFRatePrefix),
+            'PPFRate': self.getTimeStamp(self.ratesType, self.PPFRatePrefix),
+            'MFDetails': self.getTimeStamp(self.listType, self.MfListPrefix),
+            'NPSDetails': self.getTimeStamp(self.listType, self.NpsListPrefix),
+            'StockDetails': self.getTimeStamp(self.listType, self.StockListPrefix),
+            'StocksOldCode': self.getTimeStamp(self.listType, self.StockOldDetails),
+        }
+
+    def getTimeStamp(self, type, filename_prefix):
+        try:
+            files_in_directory = os.listdir(f"{self.bas_directory}/{type}")
+            matching_files = [f for f in files_in_directory if f.startswith(filename_prefix)]
+            if matching_files:
+                most_recent_file = max(matching_files, key=lambda f: self.extract_timestamp(f))
+                file_timestamp = self.extract_timestamp(most_recent_file)
+                return file_timestamp
+        except Exception as ex:
+            self.logger.error(f"Error while getting timestamp {ex}")
+            return None
+
     def checkJsonInDirectory(self, type, filename_prefix):
         """
                 Check if a file with the same prefix exists and is less than 6 hours old.
@@ -320,4 +344,3 @@ class JSONDownloadService:
     def deleteFile(filePath):
         if filePath is not None:
             os.remove(filePath)
-

@@ -194,6 +194,7 @@ class Akkountant(Flask):
             ('/fetchRates', 'GET', self.investmentEP.fetchRateForEPG),
             ('/getsJobs', 'GET', self.investmentEP.getJobsTable),
             ('/startJob', 'GET', self.investmentEP.setJobs),
+            ('/fetchTimeStamps', 'GET', self.investmentEP.fetchTimeStamps),
             ('/deleteSingleInvestment', 'GET', self.investmentEP.deleteSingleRecord),
             ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
         ]
@@ -235,8 +236,8 @@ class Akkountant(Flask):
         self.run(host=host, port=port, debug=debug)
 
 
-app = Akkountant(__name__)
-flask_app = app.app
 
 if __name__ == "__main__":
+    app = Akkountant(__name__)
+    flask_app = app.app
     app.run_app(debug=False)

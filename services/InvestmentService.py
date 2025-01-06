@@ -336,3 +336,6 @@ class InvestmentService(BaseService):
         self.db.session.add(newJob)
         self.db.session.commit()
         return jsonify({"Success": "Job inserted"}), 200
+
+    def getFileTimeStamps(self):
+        return self.StockService.JsonDownloadService.getTimeStampsOfAllFiles()
