@@ -20,6 +20,13 @@ from utils.logger import Logger
 
 
 class TransactionService(BaseService):
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(TransactionService, cls).__new__(cls)
+            cls.logger = Logger(__name__).get_logger()
+        return cls._instance
 
     def __init__(self):
         super().__init__()

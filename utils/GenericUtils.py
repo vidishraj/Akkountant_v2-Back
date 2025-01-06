@@ -15,10 +15,12 @@ from utils.logger import Logger
 
 class GenericUtil:
     _instance = None
+    logger = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(GenericUtil, cls).__new__(cls)
+            cls.logger = Logger(__name__).get_logger()
         return cls._instance
 
     @staticmethod
@@ -36,9 +38,7 @@ class GenericUtil:
 
         return reference_id
 
-    @staticmethod
-    def extractDetailsFromEmail(emails, bankType):
-        logger = Logger(__name__).get_logger()
+    def extractDetailsFromEmail(self, emails, bankType):
         try:
             # Retrieve the regex pattern from the enum
             pattern = EmailRegexEnum[bankType].value
@@ -63,10 +63,10 @@ class GenericUtil:
                 else:
                     # Insert this into conflicts here
                     conflicts.append(email)
-                    logger.error(f"No match found for: {email}")
+                    self.logger.error(f"No match found for: {email}")
             return cleanedMails, conflicts
         except KeyError:
-            logger.error(f"Error: '{bankType}' is not a valid EmailRegexEnum member.")
+            self.logger.error(f"Error: '{bankType}' is not a valid EmailRegexEnum member.")
 
     @staticmethod
     def emptyTemp():
