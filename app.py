@@ -236,8 +236,8 @@ class Akkountant(Flask):
         self.run(host=host, port=port, debug=debug)
 
 
+app = Akkountant(__name__)
+flask_app = app.app
 
 if __name__ == "__main__":
-    app = Akkountant(__name__)
-    flask_app = app.app
     app.run_app(debug=False)
