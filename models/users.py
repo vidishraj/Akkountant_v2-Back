@@ -21,4 +21,4 @@ class User(Base):
     purchased_securities = relationship('PurchasedSecurities', back_populates='user_relationship')
     deposit_relationship = relationship('DepositSecurities', back_populates='user_relationship')
     transaction_relationship = relationship('SecurityTransactions', back_populates='user_relationship')
-
+    investment_history = relationship('InvestmentHistory', back_populates='user_relationship')

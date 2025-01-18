@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from models.Jobs import Job
 from enums.TaskStatusEnum import JobStatus
+from services.tasks.InvestmentHistoryTask import InvestmentHistoryTask
 from services.tasks.SetNPSRate import SetNPSRate
 from services.tasks.SetNPSDetails import SetNPSDetails
 from services.tasks.SetStockDetails import SetStockDetails
@@ -104,7 +105,8 @@ class TaskScheduler:
             "SetGoldRate": SetGoldRate,
             "SetPPFRate": SetPPFRate,
             "CheckMail": CheckMailTask,
-            "CheckStatement": CheckStatementTask
+            "CheckStatement": CheckStatementTask,
+            "InvestmentHistoryTask": InvestmentHistoryTask
         }
         return task_mapping.get(title)
 

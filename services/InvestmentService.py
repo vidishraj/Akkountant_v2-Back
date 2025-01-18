@@ -11,6 +11,7 @@ from enums.DateFormatEnum import DateStatementEnum
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities, Jobs
+from models.investmentHistory import InvestmentHistory
 from services.Base_Service import BaseService
 from services.EPFService import EPFService
 from services.GoldService import GoldService
@@ -336,6 +337,21 @@ class InvestmentService(BaseService):
         self.db.session.add(newJob)
         self.db.session.commit()
         return jsonify({"Success": "Job inserted"}), 200
+
+    def setInvestmentHistory(self, data, user_id: str):
+        newHistory = InvestmentHistory(
+            date=datetime.datetime.now().strftime('%Y-%m-%d'),
+            stocks=data['stocks'],
+            mf=data['mf'],
+            nps=data['nps'],
+            epf=data['epf'],
+            ppf=data['ppf'],
+            gold=data['gold'],
+            user=user_id,
+        )
+        self.db.session.add(newHistory)
+        self.db.session.commit()
+        return jsonify({"Success": "History inserted"}), 200
 
     def getFileTimeStamps(self):
         return self.StockService.JsonDownloadService.getTimeStampsOfAllFiles()

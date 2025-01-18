@@ -8,6 +8,7 @@ import requests
 
 from models.Jobs import Job
 from services import JsonDownloadService
+from services.InvestmentService import InvestmentService
 from services.transactionsService import TransactionService
 from utils.logger import Logger
 
@@ -44,6 +45,7 @@ class BaseTask(ABC):
             self.jsonService = JsonDownloadService.JSONDownloadService(os.getcwd() + '/services/assets')
             self.priority = priority
             self.transactionService = TransactionService()
+            self.investmentService = InvestmentService()
             # Make tmp_dir if it doesnt exist
             os.makedirs(self.tmp_dir, exist_ok=True)
 
