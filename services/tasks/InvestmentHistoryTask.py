@@ -18,7 +18,7 @@ class InvestmentHistoryTask(BaseTask):
             super().__init__(title, priority)
             self.logger = Logger(__name__).get_logger()
             # 24 hours
-            self.interval = 1
+            self.interval = 60*24
 
     def run(self):
         try:
