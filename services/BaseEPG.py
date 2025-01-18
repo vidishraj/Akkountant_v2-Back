@@ -5,13 +5,15 @@ from logging import Logger as LG
 from flask import g
 from flask_sqlalchemy import session
 from flask_sqlalchemy.session import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, create_engine
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import scoped_session, sessionmaker
 
 from enums.EPGEnum import EPGEnum
 from models import DepositSecurities
 from services.JsonDownloadService import JSONDownloadService
 from utils.DateTimeUtil import DateTimeUtil
+from utils.DotDict import DotDict
 from utils.GenericUtils import GenericUtil
 from utils.logger import Logger
 
@@ -26,7 +28,15 @@ class Base_EPG:
 
     @property
     def db(self):
-        """Retrieve the database session from the Flask global `g`."""
+        """Retrieve the database session from the Flask global `g`.""""""Retrieve the database session from the Flask global `g`."""
+        if g.get('db') is None:
+            DATABASE_URL = os.getenv('DATABASE_URL')
+
+            engine = create_engine(DATABASE_URL)
+            db_session = scoped_session(sessionmaker(autocommit=False,
+                                                     autoflush=False,
+                                                     bind=engine))
+            return DotDict({'session': db_session})
         return g.db
 
     def __init__(self):

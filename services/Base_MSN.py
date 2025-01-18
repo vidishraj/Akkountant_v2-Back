@@ -2,14 +2,15 @@ from abc import abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_DOWN
 
-from sqlalchemy import func
+from sqlalchemy import func, create_engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, scoped_session, sessionmaker
 from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities, SoldSecurities
 from models.securityTransactions import SecurityTransactions
 from services.JsonDownloadService import JSONDownloadService
 from utils.DateTimeUtil import DateTimeUtil
+from utils.DotDict import DotDict
 from utils.GenericUtils import GenericUtil
 from flask_sqlalchemy import session
 from logging import Logger
@@ -29,6 +30,15 @@ class Base_MSN:
     @property
     def db(self):
         """Retrieve the database session from the Flask global `g`."""
+        """Retrieve the database session from the Flask global `g`."""
+        if g.get('db') is None:
+            DATABASE_URL = os.getenv('DATABASE_URL')
+
+            engine = create_engine(DATABASE_URL)
+            db_session = scoped_session(sessionmaker(autocommit=False,
+                                                     autoflush=False,
+                                                     bind=engine))
+            return DotDict({'session': db_session})
         return g.db
 
     def __init__(self):
