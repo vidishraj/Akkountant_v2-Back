@@ -1,3 +1,10 @@
 /venv/
 /.idea/
 client_secret.json
+**/__pycache__/
+/services/tasks/logs/**
+/services/parsers/logs/**
+/services/tasks/task_tmp/**
+/services/assets/**
+/logs/**
+/tests/**
