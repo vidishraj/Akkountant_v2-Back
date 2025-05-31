@@ -1,0 +1,30 @@
+name: Deploy to Linux Server
+
+on:
+  push:
+    branches:
+      - Personal  # or your deployment branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Pull latest changes and restart service
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          cd /home/opc/Akkountant_v2-Back/
+          sudo git pull
+          # If using a virtualenv, activate it here
+          # source venv/bin/activate
+          # Restart your service (systemd example)
+          sudo systemctl restart app.service
+        EOF
