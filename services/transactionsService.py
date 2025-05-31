@@ -17,6 +17,7 @@ from services.parsers.YES_Credit import YESBankCreditParser
 from services.parsers.YES_Debit import YESBankDebitParser
 from services.Base_Service import BaseService
 from utils.logger import Logger
+from services.jobApplicationEmailService import JobApplicationEmailService
 
 
 class TransactionService(BaseService):
@@ -146,28 +147,45 @@ class TransactionService(BaseService):
             "statement_dates": statement_dates,
         }
 
-    def readTransactionFromMail(self, dateTo, dateFrom, userID):
+    def readTransactionFromMail(self, dateTo, dateFrom, userID, jobsOnly=False):
         if dateTo is None or dateFrom is None:
             # If we are not reading for a specific range, read for current month
             dateFrom, dateTo = self.dateTimeUtil.currentMonthDatesForEmail()
 
-        # Fetch the banks the user has opted for
-        optedBanks = self.fetchBanksOptedByUser(userID)
-
-        # Fetch the gmail token of the user
         token = self.fetchGmailTokenForUser(userID)
         totalMails = 0
-        for bank in optedBanks:
-            patternString = getattr(PatternEnum, bank)
-            # Fetch the emails in the date range
-            mails = self.gmailService.findEmailInIntervalForPattern(userID, token, patternString.value,
-                                                                    dateFrom, dateTo)
-            # Process the items to get them all in the required format
-            cleanedMails, conflicts = self.genericUtil.extractDetailsFromEmail(mails, bank)
-            totalMails += len(cleanedMails)
-            # Insert the processed transactions in the database
-            self.insertTransactions(cleanedMails, bank, userID, conflicts, TransactionTypeEnum.Email.value)
-        self.logger.info(f"Finished reading mail. Inserted {totalMails} transactions")
+        conflicts = 0
+        if not jobsOnly:
+            # Fetch the banks the user has opted for
+            optedBanks = self.fetchBanksOptedByUser(userID)
+
+            # Fetch the gmail token of the user
+            for bank in optedBanks:
+                patternString = getattr(PatternEnum, bank)
+                # Fetch the emails in the date range
+                mails = self.gmailService.findEmailInIntervalForPattern(userID, token, patternString.value,
+                                                                        dateFrom, dateTo)
+                # Process the items to get them all in the required format
+                cleanedMails, conflicts = self.genericUtil.extractDetailsFromEmail(mails, bank)
+                totalMails += len(cleanedMails)
+                # Insert the processed transactions in the database
+                self.insertTransactions(cleanedMails, bank, userID, conflicts, TransactionTypeEnum.Email.value)
+                # Collect raw emails for job application extraction
+            self.logger.info(f"Finished reading mail. Inserted {totalMails} transactions.")
+        # Integrate job application extraction
+        
+        all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+        emailsCleaned = []
+        for mail in all_raw_emails:
+            emailsCleaned.append({
+                'date': mail.get('time'),
+                'subject': mail.get('message'),  # If you have subject separately, use it
+                'body': mail.get('message')      # If you have body separately, use it
+            })
+        results = JobApplicationEmailService().process_emails_safely(emailsCleaned)
+        self.logger.info(f"Finished reading job applications.")
+        if jobsOnly:
+            return results
         return totalMails, len(conflicts)
 
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None):

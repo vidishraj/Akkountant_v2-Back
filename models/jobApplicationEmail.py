@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, Text
 from models.Base import Base
 from datetime import datetime
 
+
 class JobApplicationEmail(Base):
     __tablename__ = 'job_application_emails'
     id = Column(Integer, primary_key=True)
@@ -11,3 +12,4 @@ class JobApplicationEmail(Base):
     email_subject = Column(String(255), nullable=True)
     email_body = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    verdict = Column(Integer, default=1)
