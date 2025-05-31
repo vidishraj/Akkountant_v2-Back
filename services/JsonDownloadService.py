@@ -88,7 +88,7 @@ class JSONDownloadService:
     def getNPSList(self):
         fileCheck = self.checkJsonInDirectory(self.listType, self.NpsListPrefix)
         if not fileCheck:
-            raise FileNotFoundError("MF file not available right now")
+            raise FileNotFoundError("NPS file not available right now")
         filepath = self.getLatestFile(self.listType, self.NpsListPrefix)
         with open(filepath, 'r') as f:
             jsonData = json.load(f)
@@ -97,7 +97,7 @@ class JSONDownloadService:
     def getNPSListDetailsForScheme(self, schemeCode):
         fileCheck = self.checkJsonInDirectory(self.listType, self.NpsListPrefix)
         if not fileCheck:
-            raise FileNotFoundError("MF file not available right now")
+            raise FileNotFoundError("NPS file not available right now")
         filepath = self.getLatestFile(self.listType, self.NpsListPrefix)
         with open(filepath, 'r') as f:
             jsonData = json.load(f)

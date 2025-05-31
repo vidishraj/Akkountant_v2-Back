@@ -45,7 +45,11 @@ class GenericUtil:
             cleanedMails = []
             conflicts = []
             for email in emails:
-                matches = re.search(pattern, email)
+                matches = re.search(pattern, email['message'])
+                if bankType == EmailRegexEnum.Millenia_Credit.name and matches is None:
+                    matches = re.search(
+                        r"Dear Customer, Thank you for using HDFC Bank Card (?P<card_number>XX\d{4}) for Rs\. (?P<amount_spent>[\d,]+(?:\.\d+)?) at (?P<merchant>.+?) on (?P<transaction_date>\d{2}-\d{2}-\d{4}) (?P<transaction_time>\d{2}:\d{2}:\d{2}) Authorization code:- (?P<authorization_code>\d+)",
+                        email['message'])
 
                 if matches:
                     # Extract matched details as a dictionary
@@ -53,7 +57,7 @@ class GenericUtil:
                     date = DateTimeUtil().convert_to_sql_datetime(details.get('transaction_date'), bankType)
                     description = details.get('merchant')
                     amount = details.get('amount_spent')
-                    referenceID = GenericUtil().generate_reference_id(date, description, amount)
+                    referenceID = GenericUtil().generate_reference_id(email['time'], description, amount)
                     cleanedMails.append({
                         'reference': referenceID,
                         'date': date,
@@ -62,8 +66,8 @@ class GenericUtil:
                     })
                 else:
                     # Insert this into conflicts here
-                    conflicts.append(email)
-                    self.logger.error(f"No match found for: {email}")
+                    conflicts.append(email['message'])
+                    self.logger.error(f"No match found for: {email['message']}")
             return cleanedMails, conflicts
         except KeyError:
             self.logger.error(f"Error: '{bankType}' is not a valid EmailRegexEnum member.")
