@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text
+from sqlalchemy import Column, Integer, String, DateTime, Text, UniqueConstraint
 from models.Base import Base
 from datetime import datetime
 
@@ -13,3 +13,8 @@ class JobApplicationEmail(Base):
     email_body = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     verdict = Column(Integer, default=1)
+    gmail_message_id = Column(String(50), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('gmail_message_id', name='uq_gmail_message_id'),
+    )

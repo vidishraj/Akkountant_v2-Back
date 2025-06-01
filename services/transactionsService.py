@@ -179,8 +179,9 @@ class TransactionService(BaseService):
         for mail in all_raw_emails:
             emailsCleaned.append({
                 'date': mail.get('time'),
-                'subject': mail.get('message'),  # If you have subject separately, use it
-                'body': mail.get('message')      # If you have body separately, use it
+                'subject': mail.get('subject'),
+                'body': mail.get('message'),
+                'message_id': mail.get('message_id')  # Include the Gmail message ID
             })
         results = JobApplicationEmailService().process_emails_safely(emailsCleaned)
         self.logger.info(f"Finished reading job applications.")

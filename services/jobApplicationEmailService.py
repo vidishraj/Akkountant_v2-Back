@@ -331,7 +331,8 @@ class JobApplicationEmailService(BaseService):
             'processed': 0,
             'job_emails_found': 0,
             'errors': [],
-            'skipped': 0
+            'skipped': 0,
+            'duplicates': 0
         }
 
         try:
@@ -345,10 +346,18 @@ class JobApplicationEmailService(BaseService):
                     email_date = email.get('date', 'No date')
                     email_subject = email.get('subject', 'No subject')
                     email_body_length = len(email.get('body', ''))
+                    gmail_message_id = email.get('message_id')
+
+                    # Skip if no message ID (shouldn't happen, but just in case)
+                    if not gmail_message_id:
+                        self.logger.warning(f"Email {current_email_num} has no message ID, skipping")
+                        results['skipped'] += 1
+                        continue
 
                     self.logger.info(f"Email Date: {email_date}")
                     self.logger.info(f"Email Subject: '{email_subject}'")
                     self.logger.info(f"Email Body Length: {email_body_length} characters")
+                    self.logger.info(f"Gmail Message ID: {gmail_message_id}")
 
                     # Check for empty emails
                     if not email_subject and not email.get('body'):
@@ -375,13 +384,24 @@ class JobApplicationEmailService(BaseService):
                             employer, role = self.extract_details(subject, body)
                             self.logger.info(f"Extraction results - Employer: '{employer}', Role: '{role}'")
 
+                            # Check if this email has already been processed
+                            existing_email = self.db.session.query(JobApplicationEmail).filter_by(
+                                gmail_message_id=gmail_message_id
+                            ).first()
+
+                            if existing_email:
+                                self.logger.info(f"Email {gmail_message_id} already processed, skipping")
+                                results['duplicates'] += 1
+                                continue
+
                             # Create job email object
                             job_email = JobApplicationEmail(
                                 email_date=email.get('date', datetime.utcnow()),
                                 employer=employer,
                                 role=role,
                                 email_subject=email.get('subject'),
-                                email_body=email.get('body')
+                                email_body=email.get('body'),
+                                gmail_message_id=gmail_message_id
                             )
 
                             # Save to database
@@ -413,6 +433,7 @@ class JobApplicationEmailService(BaseService):
                         self.logger.info("\n" + "=" * 50)
                         self.logger.info(f"PROGRESS REPORT - Email {current_email_num}/{len(email_list)}")
                         self.logger.info(f"Job emails found: {results['job_emails_found']}")
+                        self.logger.info(f"Duplicates skipped: {results['duplicates']}")
                         self.logger.info(f"Errors: {len(results['errors'])}")
                         self.logger.info(f"Elapsed time: {elapsed_time:.1f}s")
                         self.logger.info(f"Avg time per email: {avg_time_per_email:.2f}s")
@@ -440,6 +461,7 @@ class JobApplicationEmailService(BaseService):
             self.logger.info("=" * 60)
             self.logger.info(f"Total emails processed: {results['processed']}")
             self.logger.info(f"Job-related emails found: {results['job_emails_found']}")
+            self.logger.info(f"Duplicates skipped: {results['duplicates']}")
             self.logger.info(f"Emails skipped: {results['skipped']}")
             self.logger.info(f"Errors encountered: {len(results['errors'])}")
             self.logger.info(f"Total processing time: {total_time:.2f} seconds")

@@ -71,7 +71,8 @@ class GmailServiceUtils:
         return {
             'time': email_time,
             'subject': subject,
-            'message': snippet  # Using snippet instead of full body
+            'message': snippet,  # Using snippet instead of full body
+            'message_id': email_id  # Include the Gmail message ID
         }
 
     def iter_emails_in_interval(self, userId: str, token: str, dateFrom: str, dateTo: str) -> Iterator[Dict[str, Any]]:
