@@ -12,11 +12,27 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from controllers.investmentsEP import InvestmentController
 from controllers.transactionsEP import TransactionController
-from controllers.jobApplicationEmailEP import JobApplicationEmailController
+from controllers.customerEP import CustomerController
+from controllers.invoiceEP import InvoiceController
+from controllers.dashboardEP import DashboardController
+from controllers.pdfEP import PDFController
+from controllers.templateEP import TemplateController
+from controllers.signatureEP import SignatureController
+from controllers.paymentEP import PaymentController
+from controllers.customFieldEP import CustomFieldController
+# from controllers.jobApplicationEmailEP import JobApplicationEmailController
 from enums.TaskStatusEnum import JobStatus  
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
 from services.transactionsService import TransactionService
+from services.customerService import CustomerService
+from services.invoiceService import InvoiceService
+from services.dashboardService import DashboardService
+from services.pdfService import PDFService
+from services.templateService import TemplateService
+from services.signatureService import SignatureService
+from services.paymentService import PaymentService
+from services.customFieldService import CustomFieldService
 from utils.logger import Logger
 import models
 
@@ -120,10 +136,26 @@ class Akkountant(Flask):
     def _setup_instances(self):
         """Initialize application instances."""
         self.transactionService = TransactionService()
-        self.jobApplicationEmailEP = JobApplicationEmailController(self.transactionService)
+        # self.jobApplicationEmailEP = JobApplicationEmailController(self.transactionService)
         self.transactionEP = TransactionController(self.transactionService)
         self.investmentService = InvestmentService()
         self.investmentEP = InvestmentController(self.investmentService)
+        self.customerService = CustomerService()
+        self.customerEP = CustomerController(self.customerService)
+        self.invoiceService = InvoiceService()
+        self.invoiceEP = InvoiceController(self.invoiceService)
+        self.dashboardService = DashboardService()
+        self.dashboardEP = DashboardController(self.dashboardService)
+        self.pdfService = PDFService()
+        self.pdfEP = PDFController(self.pdfService, self.invoiceService)
+        self.templateService = TemplateService()
+        self.templateEP = TemplateController(self.templateService)
+        self.signatureService = SignatureService()
+        self.signatureEP = SignatureController(self.signatureService)
+        self.paymentService = PaymentService()
+        self.paymentEP = PaymentController(self.paymentService)
+        self.customFieldService = CustomFieldService()
+        self.customFieldEP = CustomFieldController(self.customFieldService)
 
     def _setup_schedulers(self):
         """Set up background tasks."""
@@ -210,6 +242,67 @@ class Akkountant(Flask):
         ]
 
         for rule, method, view_func in investmentRoutes:
+            self.add_url_rule(rule, methods=[method], view_func=view_func)
+
+        # Freelance Management API Routes
+        
+        # Dashboard endpoints
+        dashboardRoutes = [
+            ('/freelance/dashboard', 'GET', self.dashboardEP.get_dashboard_analytics),
+            ('/freelance/earnings', 'GET', self.dashboardEP.get_earnings_by_date_range),
+        ]
+
+        # Invoice management endpoints
+        invoiceRoutes = [
+            ('/freelance/invoices', 'POST', self.invoiceEP.create_invoice),
+            ('/freelance/invoices', 'GET', self.invoiceEP.get_invoices),
+            ('/freelance/invoices/<invoice_number>', 'GET', self.invoiceEP.get_invoice_by_id),
+            ('/freelance/invoices/<invoiceId>', 'PUT', self.invoiceEP.update_invoice),
+            ('/freelance/invoices/<invoiceId>', 'DELETE', self.invoiceEP.delete_invoice),
+        ]
+
+        # PDF generation endpoints
+        pdfRoutes = [
+            ('/freelance/invoices/pdf', 'POST', self.pdfEP.generate_invoice_pdf),
+            ('/freelance/invoices/<invoiceId>/sign', 'POST', self.pdfEP.sign_invoice_pdf),
+        ]
+
+        # Customer management endpoints
+        customerRoutes = [
+            ('/freelance/customers', 'GET', self.customerEP.get_customers),
+            ('/freelance/customers', 'POST', self.customerEP.create_customer),
+            ('/freelance/customers/<customerId>', 'PUT', self.customerEP.update_customer),
+            ('/freelance/customers/<customerId>', 'DELETE', self.customerEP.delete_customer),
+            ('/freelance/customers/<customerId>/template', 'PUT', self.templateEP.update_customer_template),
+        ]
+
+        # Template management endpoints
+        templateRoutes = [
+            ('/freelance/templates', 'GET', self.templateEP.get_templates),
+            ('/freelance/templates', 'POST', self.templateEP.create_template),
+            ('/freelance/templates/<templateId>', 'PUT', self.templateEP.update_template),
+            ('/freelance/templates/<templateId>', 'DELETE', self.templateEP.delete_template),
+        ]
+
+        # Signature management endpoints
+        signatureRoutes = [
+            ('/freelance/signatures', 'GET', self.signatureEP.get_signatures),
+            ('/freelance/signatures', 'POST', self.signatureEP.upload_signature),
+            ('/freelance/signatures/<signatureId>', 'GET', self.signatureEP.get_signature_data),
+            ('/freelance/signatures/<signatureId>', 'DELETE', self.signatureEP.delete_signature),
+        ]
+
+        # Register all routes
+        all_routes = [
+            *dashboardRoutes,
+            *invoiceRoutes, 
+            *pdfRoutes,
+            *customerRoutes,
+            *templateRoutes,
+            *signatureRoutes,
+        ]
+
+        for rule, method, view_func in all_routes:
             self.add_url_rule(rule, methods=[method], view_func=view_func)
 
         self.logger.info("Application routes initialized.")
