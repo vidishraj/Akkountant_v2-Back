@@ -212,14 +212,14 @@ class Akkountant(Flask):
             ('/deleteFile', 'GET', self.transactionEP.deleteFile),
         ]
 
-        emailJobRoutes = [
-            ('/processJobEmails', 'POST', self.jobApplicationEmailEP.processEmails),
-            ('/jobApplications', 'GET', self.jobApplicationEmailEP.fetchJobApplications),
-            ('/jobUpdate', 'POST', self.jobApplicationEmailEP.updateJobApplication),
-        ]   
+        # emailJobRoutes = [
+        #     ('/processJobEmails', 'POST', self.jobApplicationEmailEP.processEmails),
+        #     ('/jobApplications', 'GET', self.jobApplicationEmailEP.fetchJobApplications),
+        #     ('/jobUpdate', 'POST', self.jobApplicationEmailEP.updateJobApplication),
+        # ]   
 
-        for rule, method, view_func in emailJobRoutes:
-            self.add_url_rule(rule, methods=[method], view_func=view_func)
+        # for rule, method, view_func in emailJobRoutes:
+        #     self.add_url_rule(rule, methods=[method], view_func=view_func)
 
         for rule, method, view_func in transactionRoutes:
             self.add_url_rule(rule, methods=[method], view_func=view_func)
