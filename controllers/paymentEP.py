@@ -51,3 +51,19 @@ class PaymentController:
         except Exception as e:
             self.logger.error(f"Error deleting payment: {str(e)}")
             return jsonify({"error": "Internal server error"}), 500
+
+    def replace_payment(self, invoiceId):
+        try:
+            payment_data = request.get_json()
+            if not payment_data:
+                return jsonify({"error": "Payment data is required"}), 400
+
+            result = self.payment_service.replace_payment(invoiceId, payment_data)
+            return jsonify({"payment": result}), 200
+
+        except ValueError as e:
+            self.logger.error(f"Validation error replacing payment: {str(e)}")
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            self.logger.error(f"Error replacing payment: {str(e)}")
+            return jsonify({"error": "Internal server error"}), 500

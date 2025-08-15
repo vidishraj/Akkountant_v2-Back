@@ -73,7 +73,7 @@ class InvoiceService(BaseService):
 
             # Handle payment if provided
             if 'payment' in invoice_data and invoice_data['payment']:
-                self._create_payment(invoice.id, invoice_data['payment'])
+                self._replace_payment(invoice.id, invoice_data['payment'])
 
             # Handle custom fields if provided
             if 'customFields' in invoice_data and invoice_data['customFields']:
@@ -233,7 +233,7 @@ class InvoiceService(BaseService):
 
             # Handle payment if provided
             if 'payment' in invoice_data and invoice_data['payment']:
-                self._create_payment(invoice.id, invoice_data['payment'])
+                self._replace_payment(invoice.id, invoice_data['payment'])
 
             # Handle custom fields if provided
             if 'customFields' in invoice_data:
@@ -295,17 +295,17 @@ class InvoiceService(BaseService):
                 "amount": float(invoice.tax_amount or 0)
             }
 
-        # Format payments
+        # Format payments (only one payment allowed per invoice)
         payment = None
         if invoice.payments:
-            # Get the latest payment
-            latest_payment = max(invoice.payments, key=lambda p: p.created_at)
+            # Get the single payment (only one should exist)
+            single_payment = invoice.payments[0]
             payment = {
-                "paymentMethod": latest_payment.payment_method,
-                "amountReceived": float(latest_payment.amount_received),
-                "breakdown": latest_payment.breakdown or {},
-                "paymentDate": latest_payment.payment_date.strftime('%Y-%m-%d') if latest_payment.payment_date else None,
-                "notes": latest_payment.notes
+                "paymentMethod": single_payment.payment_method,
+                "amountReceived": float(single_payment.amount_received),
+                "breakdown": single_payment.breakdown or {},
+                "paymentDate": single_payment.payment_date.strftime('%Y-%m-%d') if single_payment.payment_date else None,
+                "notes": single_payment.notes
             }
 
         # Format custom fields
@@ -355,6 +355,40 @@ class InvoiceService(BaseService):
 
     def _create_payment(self, invoice_id, payment_data):
         """Helper method to create a payment for an invoice"""
+        # Check if payment already exists for this invoice
+        existing_payment = self.db.session.query(InvoicePayment).filter_by(
+            invoice_id=invoice_id
+        ).first()
+        
+        if existing_payment:
+            raise ValueError("Payment already exists for this invoice. Only one payment per invoice is allowed.")
+        
+        payment = InvoicePayment(
+            invoice_id=invoice_id,
+            payment_method=payment_data['paymentMethod'],
+            amount_received=float(payment_data['amountReceived']),
+            payment_date=datetime.strptime(payment_data['paymentDate'], '%Y-%m-%d').date() if payment_data.get('paymentDate') else None,
+            notes=payment_data.get('notes'),
+            breakdown=payment_data.get('breakdown', {})
+        )
+        self.db.session.add(payment)
+        
+        # Update invoice status to paid if payment covers the full amount
+        invoice = self.db.session.query(Invoice).filter_by(id=invoice_id).first()
+        if invoice and float(payment_data['amountReceived']) >= float(invoice.total):
+            invoice.status = 'paid'
+    
+    def _replace_payment(self, invoice_id, payment_data):
+        """Helper method to replace existing payment or create new one for an invoice"""
+        # Delete existing payment if it exists
+        existing_payment = self.db.session.query(InvoicePayment).filter_by(
+            invoice_id=invoice_id
+        ).first()
+        
+        if existing_payment:
+            self.db.session.delete(existing_payment)
+        
+        # Create new payment
         payment = InvoicePayment(
             invoice_id=invoice_id,
             payment_method=payment_data['paymentMethod'],

@@ -139,22 +139,7 @@ class Invoice(Base):
     invoice_signatures = relationship('InvoiceSignature', back_populates='invoice', cascade='all, delete')
     payments = relationship('InvoicePayment', back_populates='invoice', cascade='all, delete')
     custom_fields = relationship('InvoiceCustomField', back_populates='invoice', cascade='all, delete')
-    payment_records = relationship('Payment', back_populates='invoice', cascade='all, delete')
 
-class Payment(Base):
-    __tablename__ = 'payments'
-    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    invoice_id = Column(CHAR(36), ForeignKey('invoices.id', ondelete='CASCADE'), nullable=False)
-    amount_received = Column(DECIMAL(12, 2), nullable=False)
-    currency = Column(Enum(CurrencyEnum), default=CurrencyEnum.INR, nullable=False)
-    payment_date = Column(Date, nullable=False)
-    payment_method = Column(String(100))
-    reference_number = Column(String(255))
-    notes = Column(Text)
-    status = Column(Enum(PaymentStatusEnum), default=PaymentStatusEnum.completed, nullable=False)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    invoice = relationship('Invoice', back_populates='payment_records')
 
 class InvoiceCustomField(Base):
     __tablename__ = 'invoice_custom_fields'
