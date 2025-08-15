@@ -20,3 +20,5 @@ google-api-python-client
 mysql-connector-python
 openpyxl
 nsepythonserver
+pytest
+reportlab
