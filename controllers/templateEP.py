@@ -95,7 +95,8 @@ class TemplateController:
             # Prepare the data for the service
             service_data = {
                 'templateData': template_data,
-                'customerId': customerId
+                'customerId': customerId,
+                'name': data.get('name')  # Pass name if provided
             }
 
             template = self.template_service.update_customer_default_template(customerId, service_data)

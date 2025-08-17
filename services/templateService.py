@@ -144,22 +144,37 @@ class TemplateService(BaseService):
             if not customer:
                 raise ValueError("Customer not found")
 
-            # Reset any existing default template for this customer
-            self.db.session.query(InvoiceTemplate).filter_by(
+            template_name = template_data.get('name', f"Default Template for {customer.name}")
+            template_content = template_data.get('templateData') or template_data.get('template_data')
+            
+            # Check if a template with this name already exists for this customer
+            existing_template = self.db.session.query(InvoiceTemplate).filter_by(
                 customer_id=customer_id,
-                is_customer_default=True
-            ).update({"is_customer_default": False})
-
-            # Create or update the default template
-            template = InvoiceTemplate(
                 user_id=user_id,
-                customer_id=customer_id,
-                name=template_data.get('name', f"Default Template for {customer.name}"),
-                template_data=template_data.get('templateData') or template_data.get('template_data'),
-                is_customer_default=True
-            )
+                name=template_name
+            ).first()
 
-            self.db.session.add(template)
+            if existing_template:
+                # Template exists - mark it as default and update its name
+                existing_template.template_data = template_content
+                existing_template.make_default_for_customer(self.db.session)
+                template = existing_template
+                self.logger.info(f"Existing template marked as default: {existing_template.id}")
+            else:
+                # Template doesn't exist - create new one and mark as default
+                template = InvoiceTemplate(
+                    user_id=user_id,
+                    customer_id=customer_id,
+                    name=template_name,
+                    template_data=template_content,
+                    is_customer_default=False  # Will be set by make_default_for_customer
+                )
+                
+                self.db.session.add(template)
+                self.db.session.flush()  # Get the ID
+                template.make_default_for_customer(self.db.session)
+                self.logger.info(f"New template created and marked as default: {template.id}")
+
             self.db.session.commit()
             
             self.logger.info(f"Customer default template updated: {customer_id}")
