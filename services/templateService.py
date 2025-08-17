@@ -23,15 +23,27 @@ class TemplateService(BaseService):
             if not user_id:
                 raise ValueError("User ID is required")
 
+            is_default = template_data.get('isCustomerDefault', False)
+            customer_id = template_data.get('customerId')
+
             template = InvoiceTemplate(
                 user_id=user_id,
-                customer_id=template_data.get('customerId'),  # Handle camelCase
+                customer_id=customer_id,
                 name=template_data['name'],
                 template_data=template_data['templateData'],  # Handle camelCase
-                is_customer_default=template_data.get('isCustomerDefault', False)  # Handle camelCase
+                is_customer_default=False  # Will be set by make_default_for_customer if needed
             )
 
             self.db.session.add(template)
+            self.db.session.flush()  # Get the ID for the template
+            
+            # If this template should be default for a customer, handle the default logic
+            if is_default and customer_id:
+                template.make_default_for_customer(self.db.session)
+            elif is_default and not customer_id:
+                # If it's marked as default but has no customer, just set the flag
+                template.is_customer_default = True
+
             self.db.session.commit()
             
             self.logger.info(f"Template created successfully: {template.id}")
