@@ -8,3 +8,7 @@ client_secret.json
 /services/assets/**
 /logs/**
 /tests/**
+/PROJECT_DOCS/*
+/services/assets/*
+CLAUDE.md
+.env
