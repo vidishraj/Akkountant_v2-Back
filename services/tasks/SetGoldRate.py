@@ -28,7 +28,7 @@ class SetGoldRate(BaseTask):
             # Delete existing file if it exists, else
             jsonData = self.getGoldData()
             try:
-                filePath = self.tmp_dir + 'GOLDRATE.json'
+                filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

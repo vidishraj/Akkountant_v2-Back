@@ -27,7 +27,7 @@ class SetMFDetails(BaseTask):
             jsonData = self.make_request(listUrl)
             jsonData = {'data': jsonData}
             try:
-                filePath = self.tmp_dir + 'MFDetails.json'
+                filePath = os.path.join(self.tmp_dir, 'MFDetails.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

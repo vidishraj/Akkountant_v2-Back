@@ -39,7 +39,7 @@ class SetStockDetails(BaseTask):
                 })
             jsonData = {'data': list_data}
             try:
-                filePath = self.tmp_dir + 'StockDetails.json'
+                filePath = os.path.join(self.tmp_dir, 'StockDetails.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

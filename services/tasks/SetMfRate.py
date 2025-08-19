@@ -44,7 +44,7 @@ class SetMFRate(BaseTask):
 
             jsonData = self.buildJsonForMF(listUrl, latestListFile)
             try:
-                filePath = self.tmp_dir + 'MFRate.json'
+                filePath = os.path.join(self.tmp_dir, 'MFRate.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

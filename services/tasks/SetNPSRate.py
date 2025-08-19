@@ -29,7 +29,7 @@ class SetNPSRate(BaseTask):
             jsonData = self.fetchNPSRatesFromExcel()
             
             try:
-                filePath = self.tmp_dir + 'NPSRATE.json'
+                filePath = os.path.join(self.tmp_dir, 'NPSRATE.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

@@ -28,7 +28,7 @@ class BaseTask(ABC):
     due_date: datetime
     user_id: str = None
 
-    tmp_dir: str = os.getcwd() + '/task_tmp/'
+    tmp_dir: str = os.path.join(os.getcwd(), 'task_tmp')
 
     # Unique for every task
     interval: int
@@ -42,7 +42,7 @@ class BaseTask(ABC):
         if not hasattr(self, 'initialized'):  # Prevent multiple initializations
             # Initialise singleton with only title and priority
             self.title = title
-            self.jsonService = JsonDownloadService.JSONDownloadService(os.getcwd() + '/services/assets')
+            self.jsonService = JsonDownloadService.JSONDownloadService(os.path.join(os.getcwd(), 'services', 'assets'))
             self.priority = priority
             self.transactionService = TransactionService()
             self.investmentService = InvestmentService()

@@ -33,7 +33,7 @@ class SetPPFRate(BaseTask):
             else:
                 jsonData = {'data': jsonData}
             try:
-                filePath = self.tmp_dir + 'PPFRate.json'
+                filePath = os.path.join(self.tmp_dir, 'PPFRate.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

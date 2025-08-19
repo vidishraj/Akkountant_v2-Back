@@ -39,7 +39,7 @@ class SetStocksOldDetails(BaseTask):
             if not status:
                 return "Error saving csv file", "Failed"
             try:
-                filePath = self.tmp_dir + 'StocksOldCode.json'
+                filePath = os.path.join(self.tmp_dir, 'StocksOldCode.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)

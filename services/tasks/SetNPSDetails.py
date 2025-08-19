@@ -28,7 +28,7 @@ class SetNPSDetails(BaseTask):
             jsonData = self.fetchNPSDetailsFromExcel()
             
             try:
-                filePath = self.tmp_dir + 'NPSDetails.json'
+                filePath = os.path.join(self.tmp_dir, 'NPSDetails.json')
                 # delete file if it exists
                 try:
                     os.remove(filePath)
@@ -65,31 +65,53 @@ class SetNPSDetails(BaseTask):
         # Iterate through all PFM IDs (PFM001 to PFM014)
         for pfm_num in range(1, 15):
             pfm_id = f"PFM0{pfm_num:02d}"
+            pfm_schemes_found = []
             
-            # Try to get schemes for this PFM by testing scheme 001
-            # This will give us the PFM details
-            test_scheme_id = f"SM0{pfm_num:02d}001"
+            # Try all possible schemes for this PFM (001 to 016)
+            for scheme_num in range(1, 17):
+                scheme_id = f"SM0{pfm_num:02d}{scheme_num:03d}"
+                
+                try:
+                    excel_data = self.downloadNPSExcel(pfm_id, scheme_id)
+                    if excel_data is not None and not excel_data.empty:
+                        # Extract schemes from this file
+                        schemes = self.extractSchemesFromExcel(excel_data, pfm_id)
+                        
+                        # Add any new schemes we haven't seen before
+                        for scheme in schemes:
+                            if not any(existing['id'] == scheme['id'] for existing in pfm_schemes_found):
+                                pfm_schemes_found.append(scheme)
+                        
+                        self.logger.debug(f"Found data for {scheme_id}")
+                    else:
+                        self.logger.debug(f"No data for {scheme_id}")
+                        
+                except Exception as e:
+                    self.logger.debug(f"Error downloading {scheme_id}: {str(e)}")
+                    continue
             
-            try:
-                excel_data = self.downloadNPSExcel(pfm_id, test_scheme_id)
-                if excel_data is not None and not excel_data.empty:
-                    # Extract unique schemes from this PFM
-                    pfm_schemes = self.extractSchemesFromExcel(excel_data, pfm_id)
-                    all_schemes.extend(pfm_schemes)
-                    successful_downloads += 1
-                    self.logger.info(f"Successfully processed {pfm_id} with {len(pfm_schemes)} schemes")
-                else:
-                    self.logger.warning(f"No data found for {pfm_id}")
-                    
-            except Exception as e:
-                self.logger.error(f"Error processing {pfm_id}: {str(e)}")
-                continue
+            if pfm_schemes_found:
+                all_schemes.extend(pfm_schemes_found)
+                successful_downloads += 1
+                self.logger.info(f"Successfully processed {pfm_id} with {len(pfm_schemes_found)} schemes")
+            else:
+                self.logger.warning(f"No schemes found for {pfm_id}")
         
-        self.logger.info(f"Total schemes collected: {len(all_schemes)} from {successful_downloads} PFMs")
+        # Remove any duplicate schemes across PFMs (based on scheme ID)
+        unique_schemes = []
+        seen_ids = set()
+        for scheme in all_schemes:
+            if scheme['id'] not in seen_ids:
+                unique_schemes.append(scheme)
+                seen_ids.add(scheme['id'])
+            else:
+                self.logger.debug(f"Removing duplicate scheme: {scheme['id']}")
+        
+        self.logger.info(f"Total unique schemes collected: {len(unique_schemes)} from {successful_downloads} PFMs")
         
         return {
-            "data": all_schemes,
-            "total_schemes": len(all_schemes),
+            "data": unique_schemes,
+            "total_schemes": len(unique_schemes),
             "successful_pfms": successful_downloads
         }
     
