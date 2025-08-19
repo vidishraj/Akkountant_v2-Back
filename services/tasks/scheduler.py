@@ -11,8 +11,7 @@ from enums.TaskStatusEnum import JobStatus
 from services.tasks.InvestmentHistoryTask import InvestmentHistoryTask
 from services.tasks.SetNPSRate import SetNPSRate
 from services.tasks.SetNPSDetails import SetNPSDetails
-from services.tasks.SetStockDetails import SetStockDetails
-from services.tasks.SetStocksOldData import SetStocksOldDetails
+from services.tasks.SetKiteStockDetails import SetKiteStockDetails
 from services.tasks.SetMfRate import SetMFRate
 from services.tasks.SetMfDetails import SetMFDetails
 from services.tasks.SetGoldRate import SetGoldRate
@@ -98,8 +97,7 @@ class TaskScheduler:
         task_mapping = {
             "SetNPSRate": SetNPSRate,
             "SetNPSDetails": SetNPSDetails,
-            "SetStocksOldDetails": SetStocksOldDetails,
-            "SetStocksDetails": SetStockDetails,
+            "SetStocksDetails": SetKiteStockDetails,
             "SetMFRate": SetMFRate,
             "SetMFDetails": SetMFDetails,
             "SetGoldRate": SetGoldRate,

@@ -158,3 +158,18 @@ class KiteService(BaseService):
         except Exception as e:
             self.logger.error(f"Error generating login URL: {str(e)}")
             raise
+
+    def get_all_instruments(self, user_id):
+        """Fetch all instruments from Kite (CSV format) - Used by background task"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+            
+            self.kite.set_access_token(access_token)
+            instruments = self.kite.instruments()
+            self.logger.info(f"Fetched {len(instruments)} instruments from Kite for user {user_id}")
+            return instruments
+        except Exception as e:
+            self.logger.error(f"Error fetching instruments: {str(e)}")
+            raise

@@ -38,8 +38,7 @@ class InvestmentService(BaseService):
     jobsObject = {
         "SetNPSRate": "Set NPS Rate",
         "SetNPSDetails": "Set NPS Details",
-        "SetStocksOldDetails": "Set Stocks Old Codes",
-        "SetStocksDetails": "Set Stocks Details",
+        "SetStocksDetails": "Set Stocks Details (Kite)",
         "SetMFRate": "Set Mutual Funds Rate",
         "SetMFDetails": "Set Mutual Funds Details",
         "SetGoldRate": "Set Gold Rates",
@@ -375,3 +374,4 @@ class InvestmentService(BaseService):
     def generateKiteSession(self, userId, request_token):
         """Generate Kite session and store access token for user"""
         return self.StockService.generate_kite_session(userId, request_token)
+    
