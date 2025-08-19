@@ -45,7 +45,7 @@ class Akkountant(Flask):
     transactionEP: TransactionController
     transactionService: TransactionService
 
-    def __init__(self, import_name: str):
+    def __init__(self, import_name: str, test_config: dict = None):
         load_dotenv()
         super().__init__(import_name)
         self.app = self.app_context().app
@@ -53,6 +53,8 @@ class Akkountant(Flask):
         # Initialize logger
         self.logger = Logger(__name__).get_logger()
         self.logger.info("Starting Akkountant")
+        if test_config:
+            self.config.update(test_config)
 
         # Set up application components
         self._setup_config()
@@ -239,6 +241,12 @@ class Akkountant(Flask):
             ('/fetchTimeStamps', 'GET', self.investmentEP.fetchTimeStamps),
             ('/deleteSingleInvestment', 'GET', self.investmentEP.deleteSingleRecord),
             ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
+            # Kite Connect API endpoints
+            ('/kite/login-url', 'GET', self.investmentEP.getKiteLoginUrl),
+            ('/kite/generate-session', 'POST', self.investmentEP.generateKiteSession),
+            ('/kite/holdings', 'GET', self.investmentEP.fetchKiteHoldings),
+            ('/kite/positions', 'GET', self.investmentEP.fetchKitePositions),
+            ('/kite/sync-holdings', 'GET', self.investmentEP.syncKiteHoldings),
         ]
 
         for rule, method, view_func in investmentRoutes:
@@ -333,14 +341,13 @@ class Akkountant(Flask):
         #     g.pop('db', None)
         #     self.db.session.remove()
 
-    def run_app(self, host='0.0.0.0', port=8000, debug=True):
+    def run_app(self, host='0.0.0.0', port=8080, debug=True):
         """Run the application."""
         self.logger.info(f"Running the app on {host}:{port} with debug={debug}.")
         self.run(host=host, port=port, debug=debug)
-
 
 app = Akkountant(__name__)
 flask_app = app.app
 
 if __name__ == "__main__":
-    app.run_app(debug=False)
+    app.run_app(debug=True)

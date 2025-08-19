@@ -301,3 +301,81 @@ class InvestmentController:
     @Logger.standardLogger
     def fetchTimeStamps(self):
         return jsonify(self.InvestmentService.getFileTimeStamps()), 200
+
+    @Logger.standardLogger
+    def fetchKiteHoldings(self):
+        """Fetch holdings from Kite Connect API"""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        
+        try:
+            holdings = self.InvestmentService.fetchKiteHoldings(user_id)
+            return jsonify({"holdings": holdings}), 200
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite holdings: {str(e)}")
+            return jsonify({"error": "Failed to fetch holdings"}), 500
+
+    @Logger.standardLogger
+    def fetchKitePositions(self):
+        """Fetch positions from Kite Connect API"""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        
+        try:
+            positions = self.InvestmentService.fetchKitePositions(user_id)
+            return jsonify({"positions": positions}), 200
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite positions: {str(e)}")
+            return jsonify({"error": "Failed to fetch positions"}), 500
+
+    @Logger.standardLogger
+    def syncKiteHoldings(self):
+        """Sync Kite holdings to local database"""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        
+        try:
+            result = self.InvestmentService.syncKiteHoldings(user_id)
+            return jsonify({
+                "message": "Holdings synced successfully", 
+                "result": result
+            }), 200
+        except Exception as e:
+            self.logger.error(f"Error syncing Kite holdings: {str(e)}")
+            return jsonify({"error": "Failed to sync holdings"}), 500
+
+    @Logger.standardLogger
+    def getKiteLoginUrl(self):
+        """Get Kite Connect login URL for frontend"""
+        try:
+            login_url = self.InvestmentService.getKiteLoginUrl()
+            return jsonify({"login_url": login_url}), 200
+        except Exception as e:
+            self.logger.error(f"Error getting Kite login URL: {str(e)}")
+            return jsonify({"error": "Failed to get login URL"}), 500
+
+    @Logger.standardLogger
+    def generateKiteSession(self):
+        """Generate Kite session using request token from frontend"""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        data = request.get_json()
+        if not data or 'request_token' not in data:
+            return jsonify({"error": "Request token is required"}), 400
+
+        request_token = data['request_token']
+        
+        try:
+            session_data = self.InvestmentService.generateKiteSession(user_id, request_token)
+            return jsonify({
+                "message": "Session generated successfully",
+                "session_data": session_data
+            }), 200
+        except Exception as e:
+            self.logger.error(f"Error generating Kite session: {str(e)}")
+            return jsonify({"error": "Failed to generate session"}), 500

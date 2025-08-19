@@ -19,6 +19,7 @@ else:
     import nsepython
 from decimal import Decimal, ROUND_DOWN
 from utils.logger import Logger
+from services.KiteService import KiteService
 
 
 class StocksService(Base_MSN, ABC):
@@ -27,6 +28,7 @@ class StocksService(Base_MSN, ABC):
         super().__init__()
         self.baseAPIURL = "https://api.mfapi.in/"
         self.logger = Logger(__name__).get_logger()
+        self.kite_service = KiteService()
 
     def buySecurity(self, security_data, userId):
         try:
@@ -250,3 +252,122 @@ class StocksService(Base_MSN, ABC):
             if stock.get('stockCode') == symbol:
                 return True
         return False
+
+    def fetch_kite_holdings(self, userId):
+        """Fetch holdings from Kite and sync with local database"""
+        try:
+            holdings = self.kite_service.get_holdings(userId)
+            formatted_holdings = []
+            
+            for holding in holdings:
+                formatted_holding = {
+                    'symbol': holding.get('tradingsymbol'),
+                    'quantity': holding.get('quantity', 0),
+                    'average_price': holding.get('average_price', 0),
+                    'last_price': holding.get('last_price', 0),
+                    'pnl': holding.get('pnl', 0),
+                    'product': holding.get('product'),
+                    'exchange': holding.get('exchange'),
+                    'isin': holding.get('isin')
+                }
+                formatted_holdings.append(formatted_holding)
+            
+            self.logger.info(f"Fetched {len(formatted_holdings)} holdings from Kite for user {userId}")
+            return formatted_holdings
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite holdings for user {userId}: {str(e)}")
+            raise
+
+    def fetch_kite_positions(self, userId):
+        """Fetch positions from Kite"""
+        try:
+            positions = self.kite_service.get_positions(userId)
+            day_positions = positions.get('day', [])
+            net_positions = positions.get('net', [])
+            
+            formatted_positions = {
+                'day': [],
+                'net': []
+            }
+            
+            for position in day_positions:
+                formatted_positions['day'].append({
+                    'symbol': position.get('tradingsymbol'),
+                    'quantity': position.get('quantity', 0),
+                    'average_price': position.get('average_price', 0),
+                    'last_price': position.get('last_price', 0),
+                    'pnl': position.get('pnl', 0),
+                    'product': position.get('product'),
+                    'exchange': position.get('exchange')
+                })
+            
+            for position in net_positions:
+                formatted_positions['net'].append({
+                    'symbol': position.get('tradingsymbol'),
+                    'quantity': position.get('quantity', 0),
+                    'average_price': position.get('average_price', 0),
+                    'last_price': position.get('last_price', 0),
+                    'pnl': position.get('pnl', 0),
+                    'product': position.get('product'),
+                    'exchange': position.get('exchange')
+                })
+            
+            self.logger.info(f"Fetched positions from Kite for user {userId}")
+            return formatted_positions
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite positions for user {userId}: {str(e)}")
+            raise
+
+    def generate_kite_session(self, userId, request_token):
+        """Generate Kite session using request token"""
+        try:
+            return self.kite_service.generate_session(userId, request_token)
+        except Exception as e:
+            self.logger.error(f"Error generating Kite session for user {userId}: {str(e)}")
+            raise
+
+    def sync_kite_holdings_to_db(self, userId):
+        """Sync Kite holdings to local database"""
+        try:
+            holdings = self.fetch_kite_holdings(userId)
+            synced_count = 0
+            
+            for holding in holdings:
+                if holding['quantity'] > 0:  # Only sync holdings with positive quantity
+                    # Check if this holding already exists in our database
+                    existing = self.db.session.query(PurchasedSecurities).filter(
+                        PurchasedSecurities.userID == userId,
+                        PurchasedSecurities.securityCode == holding['symbol']
+                    ).first()
+                    
+                    if not existing:
+                        # Create new entry
+                        randomBuyId = self.genericUtil.generate_custom_buyID()
+                        new_holding = PurchasedSecurities(
+                            buyID=randomBuyId,
+                            userID=userId,
+                            securityCode=holding['symbol'],
+                            buyQuant=holding['quantity'],
+                            buyPrice=holding['average_price'],
+                            date=self.dateTimeUtil.getCurrentDatetimeSqlFormat(),
+                            securityType=MSNENUM.Stocks.value
+                        )
+                        self.db.session.add(new_holding)
+                        synced_count += 1
+                    else:
+                        # Update existing entry if quantities differ
+                        if existing.buyQuant != holding['quantity']:
+                            existing.buyQuant = holding['quantity']
+                            existing.buyPrice = holding['average_price']
+                            synced_count += 1
+            
+            self.db.session.commit()
+            self.logger.info(f"Synced {synced_count} holdings from Kite to database for user {userId}")
+            return {"synced": synced_count, "total_holdings": len(holdings)}
+            
+        except Exception as e:
+            self.db.session.rollback()
+            self.logger.error(f"Error syncing Kite holdings to database for user {userId}: {str(e)}")
+            raise

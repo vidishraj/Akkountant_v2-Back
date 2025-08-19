@@ -355,3 +355,23 @@ class InvestmentService(BaseService):
 
     def getFileTimeStamps(self):
         return self.StockService.JsonDownloadService.getTimeStampsOfAllFiles()
+
+    def fetchKiteHoldings(self, userId):
+        """Fetch holdings from Kite Connect API"""
+        return self.StockService.fetch_kite_holdings(userId)
+
+    def fetchKitePositions(self, userId):
+        """Fetch positions from Kite Connect API"""
+        return self.StockService.fetch_kite_positions(userId)
+
+    def syncKiteHoldings(self, userId):
+        """Sync Kite holdings to local database"""
+        return self.StockService.sync_kite_holdings_to_db(userId)
+
+    def getKiteLoginUrl(self):
+        """Get Kite Connect login URL"""
+        return self.StockService.kite_service.get_login_url()
+
+    def generateKiteSession(self, userId, request_token):
+        """Generate Kite session and store access token for user"""
+        return self.StockService.generate_kite_session(userId, request_token)
