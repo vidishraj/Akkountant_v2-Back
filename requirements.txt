@@ -22,3 +22,4 @@ openpyxl
 nsepythonserver
 pytest
 reportlab
+kiteconnect
