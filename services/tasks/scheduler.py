@@ -14,7 +14,7 @@ from services.tasks.SetNPSDetails import SetNPSDetails
 from services.tasks.SetKiteStockDetails import SetKiteStockDetails
 from services.tasks.SetMfRate import SetMFRate
 from services.tasks.SetMfDetails import SetMFDetails
-from services.tasks.SetGoldRate import SetGoldRate
+from services.tasks.SetIBJAGoldRate import SetIBJAGoldRate
 from services.tasks.SetPpfRate import SetPPFRate
 from services.tasks.checkMailTask import CheckMailTask
 from services.tasks.checkStatementsTask import CheckStatementTask
@@ -100,7 +100,7 @@ class TaskScheduler:
             "SetStocksDetails": SetKiteStockDetails,
             "SetMFRate": SetMFRate,
             "SetMFDetails": SetMFDetails,
-            "SetGoldRate": SetGoldRate,
+            "SetGoldRate": SetIBJAGoldRate,
             "SetPPFRate": SetPPFRate,
             "CheckMail": CheckMailTask,
             "CheckStatement": CheckStatementTask,
