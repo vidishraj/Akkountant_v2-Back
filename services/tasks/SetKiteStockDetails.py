@@ -87,14 +87,27 @@ class SetKiteStockDetails(BaseTask):
         """Get the first user ID that has a Kite access token"""
         try:
             from models.googleTokens import UserToken
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+            import os
             
-            user_token = self.db.session.query(UserToken).filter_by(
-                service_type='kite'
-            ).first()
+            # Create database session
+            DATABASE_URL = os.getenv('DATABASE_URL')
+            engine = create_engine(DATABASE_URL)
+            Session = sessionmaker(bind=engine)
+            session = Session()
             
-            if user_token and user_token.access_token:
-                return user_token.user_id
-            return None
+            try:
+                user_token = session.query(UserToken).filter_by(
+                    service_type='kite'
+                ).first()
+                
+                if user_token and user_token.access_token:
+                    return user_token.user_id
+                return None
+            finally:
+                session.close()
+                
         except Exception as e:
             self.logger.error(f"Error getting Kite user: {str(e)}")
             return None
