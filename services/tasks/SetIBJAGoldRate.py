@@ -163,13 +163,24 @@ class SetIBJAGoldRate(BaseTask):
                         gold_999_avg = (int(rates[0]) + int(rates[1])) // 2
                         gold_916_avg = (int(rates[4]) + int(rates[5])) // 2
                         gold_750_avg = (int(rates[6]) + int(rates[7])) // 2
+                        gold_995_avg = (int(rates[2]) + int(rates[3])) // 2
+                        gold_585_avg = (int(rates[8]) + int(rates[9])) // 2
+                        silver_999_avg = (int(rates[10]) + int(rates[11])) // 2
+                        
+                        # Calculate GST inclusive rates (average + 3% GST)
+                        gold_999_gst = int(gold_999_avg * 1.03)
+                        gold_916_gst = int(gold_916_avg * 1.03)
+                        gold_750_gst = int(gold_750_avg * 1.03)
+                        gold_995_gst = int(gold_995_avg * 1.03)
+                        gold_585_gst = int(gold_585_avg * 1.03)
+                        silver_999_gst = int(silver_999_avg * 1.03)
                         
                         # Create backward compatible format with enhanced data
                         rate_data = {
                             # Backward compatibility - existing code expects these keys
-                            "24 Carat": gold_999_avg,  # 999 purity = 24 carat
-                            "22 Carat": gold_916_avg,  # 916 purity = 22 carat  
-                            "18 Carat": gold_750_avg,  # 750 purity = 18 carat
+                            "24 Carat": gold_999_gst,  # 999 purity = 24 carat (with GST)
+                            "22 Carat": gold_916_gst,  # 916 purity = 22 carat (with GST)
+                            "18 Carat": gold_750_gst,  # 750 purity = 18 carat (with GST)
                             
                             # Enhanced IBJA data structure
                             "ibja_data": {
@@ -178,34 +189,40 @@ class SetIBJAGoldRate(BaseTask):
                                     "999": {
                                         "am_price_10g": int(rates[0]),
                                         "pm_price_10g": int(rates[1]),
-                                        "avg_price_10g": gold_999_avg
+                                        "avg_price_10g": gold_999_avg,
+                                        "avg_with_gst": gold_999_gst
                                     },
                                     "995": {
                                         "am_price_10g": int(rates[2]),
                                         "pm_price_10g": int(rates[3]),
-                                        "avg_price_10g": (int(rates[2]) + int(rates[3])) // 2
+                                        "avg_price_10g": gold_995_avg,
+                                        "avg_with_gst": gold_995_gst
                                     },
                                     "916": {
                                         "am_price_10g": int(rates[4]),
                                         "pm_price_10g": int(rates[5]),
-                                        "avg_price_10g": gold_916_avg
+                                        "avg_price_10g": gold_916_avg,
+                                        "avg_with_gst": gold_916_gst
                                     },
                                     "750": {
                                         "am_price_10g": int(rates[6]),
                                         "pm_price_10g": int(rates[7]),
-                                        "avg_price_10g": gold_750_avg
+                                        "avg_price_10g": gold_750_avg,
+                                        "avg_with_gst": gold_750_gst
                                     },
                                     "585": {
                                         "am_price_10g": int(rates[8]),
                                         "pm_price_10g": int(rates[9]),
-                                        "avg_price_10g": (int(rates[8]) + int(rates[9])) // 2
+                                        "avg_price_10g": gold_585_avg,
+                                        "avg_with_gst": gold_585_gst
                                     }
                                 },
                                 "silver": {
                                     "999": {
                                         "am_price_1kg": int(rates[10]),
                                         "pm_price_1kg": int(rates[11]),
-                                        "avg_price_1kg": (int(rates[10]) + int(rates[11])) // 2
+                                        "avg_price_1kg": silver_999_avg,
+                                        "avg_with_gst": silver_999_gst
                                     }
                                 },
                                 "currency": "INR",
