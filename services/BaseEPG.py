@@ -75,20 +75,30 @@ class Base_EPG:
             # Validate the security type
             security_type = self.validate_security_type(deposit.securityType)
 
-            # Check for PF service type
-            if security_type == EPGEnum.PF:
+            # Check for PF and EPF service types to prevent duplicates
+            if security_type in [EPGEnum.PF, EPGEnum.EPF]:
                 # Query to check for duplicate deposits on the same date
                 existing_deposit = self.db.session.query(DepositSecurities).filter_by(
                     date=deposit.date,
                     userID=deposit.userID,
-                    securityType=EPGEnum.PF.value
+                    securityType=security_type.value
                 ).first()
 
                 if existing_deposit:
+                    service_name = "PF" if security_type == EPGEnum.PF else "EPF"
                     self.logger.warning(
-                        f"Duplicate PF deposit found for date {deposit.date} and userID {deposit.userID}. Skipping "
-                        f"insertion.")
-                    return {'error': "Duplicate PF data"}
+                        f"Duplicate {service_name} deposit found for date {deposit.date} and userID {deposit.userID}. "
+                        f"Updating existing record instead of creating duplicate.")
+                    
+                    # Update the existing deposit with new values from the statement
+                    existing_deposit.depositDescription = deposit.depositDescription
+                    existing_deposit.depositAmount = deposit.depositAmount
+                    self.db.session.commit()
+                    
+                    self.logger.info(f"Updated existing {service_name} deposit for user {deposit.userID} on {deposit.date}.")
+                    return {'message': 'updated existing deposit'}
+
+                self.logger.info(f"No existing {service_name} deposit found for {deposit.date}. Creating new record.")
 
             # Insert the deposit record
             self.db.session.add(deposit)
