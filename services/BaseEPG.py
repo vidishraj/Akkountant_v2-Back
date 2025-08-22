@@ -84,8 +84,8 @@ class Base_EPG:
                     securityType=security_type.value
                 ).first()
 
+                service_name = "PF" if security_type == EPGEnum.PF else "EPF"
                 if existing_deposit:
-                    service_name = "PF" if security_type == EPGEnum.PF else "EPF"
                     self.logger.warning(
                         f"Duplicate {service_name} deposit found for date {deposit.date} and userID {deposit.userID}. "
                         f"Updating existing record instead of creating duplicate.")
