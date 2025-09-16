@@ -15,8 +15,8 @@ class CheckStatementTask(BaseTask):
         if not hasattr(self, 'initialized'):  # Prevent multiple initializations
             super().__init__(title, priority)
             self.logger = Logger(__name__).get_logger()
-            # 12 hours
-            self.interval = 60*12
+            # Once per day (1440 minutes)
+            self.interval = 1440
 
     def run(self):
         try:

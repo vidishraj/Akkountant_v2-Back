@@ -14,8 +14,8 @@ class CheckMailTask(BaseTask):
         if not hasattr(self, 'initialized'):  # Prevent multiple initializations
             super().__init__(title, priority)
             self.logger = Logger(__name__).get_logger()
-            # 4 hours
-            self.interval = 5
+            # 25 times per day (every ~58 minutes)
+            self.interval = 58
 
     def run(self):
         try:

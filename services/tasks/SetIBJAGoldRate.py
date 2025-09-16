@@ -149,7 +149,9 @@ class SetIBJAGoldRate(BaseTask):
                             elif 'UploadedFiles' in href:
                                 # Extract from onclick or relative path
                                 if not href.startswith('http'):
-                                    pdf_link = f"https://ibjarates.com/{href}"
+                                    # Clean up relative paths like "../UploadedFiles"
+                                    clean_href = href.lstrip('./')
+                                    pdf_link = f"https://ibjarates.com/{clean_href}"
                                 else:
                                     pdf_link = href
                             
