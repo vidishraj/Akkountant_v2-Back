@@ -24,9 +24,13 @@ class SetIBJAGoldRate(BaseTask):
             self.logger = Logger(__name__).get_logger()
             # 4 hours
             self.interval = 300
+            self.initialized = True
 
     def run(self):
         try:
+            # Ensure tmp directory exists with proper permissions
+            os.makedirs(self.tmp_dir, mode=0o755, exist_ok=True)
+            
             # Get IBJA gold and silver rates from PDF
             jsonData = self.getIBJAData()
             try:
