@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timedelta
 import PyPDF2
 from io import BytesIO
+from bs4 import BeautifulSoup
 
 from services.tasks.baseTask import BaseTask
 from utils.logger import Logger
@@ -58,63 +59,157 @@ class SetIBJAGoldRate(BaseTask):
 
     def getIBJAData(self):
         """
-        Fetches and parses IBJA gold and silver rates from PDF
+        Fetches and parses IBJA gold and silver rates from PDF by scraping the homepage
         """
         try:
-            # Try current date first, then previous days if not available
-            for days_back in range(7):  # Try up to 7 days back
-                target_date = datetime.now() - timedelta(days=days_back)
-                pdf_url = self.construct_ibja_url(target_date)
-                
-                self.logger.info(f"Attempting to fetch IBJA rates from: {pdf_url}")
-                
-                response = requests.get(pdf_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-                }, timeout=30)
-                
-                if response.status_code == 200:
-                    # Parse the PDF content
-                    rates_data = self.parse_ibja_pdf(response.content)
-                    if rates_data:
-                        self.logger.info(f"Successfully parsed IBJA rates from {target_date.strftime('%Y-%m-%d')}")
-                        return rates_data
-                else:
-                    self.logger.warning(f"Failed to fetch PDF for {target_date.strftime('%Y-%m-%d')}, status: {response.status_code}")
+            # First, scrape the IBJA homepage to find the PDF link
+            pdf_url = self.find_pdf_from_homepage()
             
-            raise Exception("Could not fetch IBJA rates for any recent date")
+            if not pdf_url:
+                raise Exception("Could not find PDF link on IBJA homepage")
+            
+            self.logger.info(f"Found PDF URL: {pdf_url}")
+            
+            # Fetch the PDF
+            response = requests.get(pdf_url, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            }, timeout=30)
+            
+            if response.status_code == 200:
+                # Parse the PDF content
+                rates_data = self.parse_ibja_pdf(response.content)
+                if rates_data:
+                    self.logger.info("Successfully parsed IBJA rates from homepage PDF")
+                    return rates_data
+                else:
+                    raise Exception("Failed to parse PDF content")
+            else:
+                raise Exception(f"Failed to fetch PDF, status: {response.status_code}")
             
         except Exception as e:
             self.logger.error(f"Error fetching IBJA data: {str(e)}")
             raise
 
+    def find_pdf_from_homepage(self):
+        """
+        Scrape the IBJA homepage to find the "Previous 30 days" PDF link
+        """
+        try:
+            homepage_url = "https://ibjarates.com/"
+            self.logger.info(f"Scraping IBJA homepage: {homepage_url}")
+            
+            response = requests.get(homepage_url, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            }, timeout=30)
+            
+            if response.status_code != 200:
+                self.logger.error(f"Failed to fetch homepage, status: {response.status_code}")
+                return None
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Look for "Previous 30 days" button or link
+            # This could be in various forms: button, link, etc.
+            pdf_link = None
+            
+            # Try different selectors to find the PDF link
+            selectors = [
+                'a[href*="30DaysPdf"]',  # Links containing 30DaysPdf
+                'a[href*="pdf"]',  # Any PDF links
+                'button[onclick*="30DaysPdf"]',  # Buttons with PDF onclick
+                'a:contains("Previous 30 days")',  # Text-based search
+                'a:contains("30 days")',  # Partial text search
+                'a:contains("PDF")',  # PDF text search
+            ]
+            
+            for selector in selectors:
+                try:
+                    if ':contains(' in selector:
+                        # For text-based selectors, use find with string search
+                        if 'Previous 30 days' in selector:
+                            links = soup.find_all('a', string=re.compile(r'Previous.*30.*days', re.I))
+                        elif '30 days' in selector:
+                            links = soup.find_all('a', string=re.compile(r'30.*days', re.I))
+                        elif 'PDF' in selector:
+                            links = soup.find_all('a', string=re.compile(r'PDF', re.I))
+                        else:
+                            links = []
+                    else:
+                        # For CSS selectors
+                        links = soup.select(selector)
+                    
+                    for link in links:
+                        href = link.get('href') or link.get('onclick', '')
+                        if href:
+                            # Extract PDF URL from href or onclick
+                            if href.startswith('http'):
+                                pdf_link = href
+                            elif href.startswith('/'):
+                                pdf_link = f"https://ibjarates.com{href}"
+                            elif 'UploadedFiles' in href:
+                                # Extract from onclick or relative path
+                                if not href.startswith('http'):
+                                    pdf_link = f"https://ibjarates.com/{href}"
+                                else:
+                                    pdf_link = href
+                            
+                            if pdf_link and '30DaysPdf' in pdf_link:
+                                self.logger.info(f"Found PDF link: {pdf_link}")
+                                return pdf_link
+                                
+                except Exception as e:
+                    self.logger.debug(f"Error with selector {selector}: {str(e)}")
+                    continue
+            
+            # If no specific link found, try to find any recent PDF in the page source
+            # Look for PDF URLs in the HTML content
+            pdf_urls = re.findall(r'https?://[^"\s]+30DaysPdf[^"\s]+\.pdf', response.text)
+            if pdf_urls:
+                pdf_link = pdf_urls[0]  # Take the first one
+                self.logger.info(f"Found PDF URL in page source: {pdf_link}")
+                return pdf_link
+            
+            self.logger.warning("Could not find PDF link on homepage")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error scraping homepage: {str(e)}")
+            return None
+
     def construct_ibja_url(self, date):
         """
         Construct IBJA PDF URL for a given date
-        Format: https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_9447_YYYYMMDDHHMMSS_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf
+        Format: https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_4038_YYYYMMDDHHMMSS_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf
         """
         date_str = date.strftime('%Y%m%d')
-        # Try multiple common time patterns
+        
+        # Try both new and old PDF IDs
+        pdf_ids = ["4038", "9447"]  # New format first, then fallback to old
+        
+        # Try multiple common time patterns for each PDF ID
         time_patterns = [
-            "170724682",  # From the example
+            "121048339",  # New observed pattern
+            "170724682",  # Old pattern
             "170000000",  # 5 PM
             "120000000",  # 12 PM  
             "180000000",  # 6 PM
             "160000000",  # 4 PM
         ]
         
-        # Try each time pattern
-        for time_str in time_patterns:
-            url = f"https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_9447_{date_str}{time_str}_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf"
-            try:
-                # Quick HEAD request to check if URL exists
-                response = requests.head(url, timeout=10)
-                if response.status_code == 200:
-                    return url
-            except:
-                continue
+        # Try each PDF ID with each time pattern
+        for pdf_id in pdf_ids:
+            for time_str in time_patterns:
+                url = f"https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_{pdf_id}_{date_str}{time_str}_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf"
+                try:
+                    # Quick HEAD request to check if URL exists
+                    response = requests.head(url, timeout=10)
+                    if response.status_code == 200:
+                        return url
+                except:
+                    continue
         
-        # Fallback to the example pattern
-        return f"https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_9447_{date_str}170724682_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf"
+        # Fallback to the new pattern
+        return f"https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_4038_{date_str}121048339_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf"
 
     def parse_ibja_pdf(self, pdf_content):
         """
