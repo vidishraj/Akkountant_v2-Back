@@ -104,14 +104,50 @@ class DashboardService(BaseService):
                     earnings = (float(invoice.total) if invoice.currency == CurrencyEnum.INR 
                               else sum(float(payment.amount_received) for payment in invoice.payments))
                 else:
-                    # For unpaid invoices, use the total amount as potential earnings
-                    earnings = float(invoice.total) if invoice.currency == CurrencyEnum.INR else float(invoice.total)
+                    # For unpaid invoices, use the total amount (no conversion for non-INR currencies yet)
+                    # Note: This should be enhanced with proper currency conversion rates
+                    earnings = float(invoice.total)
                 
                 client_earnings[client_name] += earnings
 
             earnings_by_client = [
                 {"client": client, "earnings": earnings}
                 for client, earnings in sorted(client_earnings.items(), 
+                                             key=lambda x: x[1], reverse=True)[:10]
+            ]
+
+            # Earnings by client combined with currency conversion to INR
+            # Simple exchange rates (should be made dynamic in production)
+            exchange_rates = {
+                'USD': 83.0,  # 1 USD = 83 INR (approximate)
+                'GBP': 105.0,  # 1 GBP = 105 INR (approximate)
+                'INR': 1.0
+            }
+            
+            client_earnings_combined = {}
+            for invoice in all_invoices:
+                client_name = invoice.customer.name if invoice.customer else invoice.to_name
+                if client_name not in client_earnings_combined:
+                    client_earnings_combined[client_name] = 0
+                
+                currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
+                exchange_rate = exchange_rates.get(currency, 1.0)
+                
+                if invoice.status == InvoiceStatusEnum.paid:
+                    if invoice.currency == CurrencyEnum.INR:
+                        earnings_inr = float(invoice.total)
+                    else:
+                        # For paid non-INR invoices, use payment amounts (already converted)
+                        earnings_inr = sum(float(payment.amount_received) for payment in invoice.payments)
+                else:
+                    # For unpaid invoices, convert using exchange rates
+                    earnings_inr = float(invoice.total) * exchange_rate
+                
+                client_earnings_combined[client_name] += earnings_inr
+
+            earnings_by_client_combined = [
+                {"client": client, "earnings": int(earnings)}
+                for client, earnings in sorted(client_earnings_combined.items(), 
                                              key=lambda x: x[1], reverse=True)[:10]
             ]
 
@@ -164,11 +200,11 @@ class DashboardService(BaseService):
             return {
                 "totalEarnings": int(total_earnings),
                 "monthlyEarnings": int(monthly_earnings),
-                "pendingAmount": int(pending_amount),
                 "completedProjects": completed_projects,
                 "activeClients": active_clients,
                 "earningsByMonth": earnings_by_month,
                 "earningsByClient": earnings_by_client,
+                "earningsByClientCombined": earnings_by_client_combined,
                 "recentInvoices": recent_invoices_formatted,
                 "unpaidByCurrency": unpaid_by_currency_formatted
             }
