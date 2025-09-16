@@ -88,15 +88,25 @@ class DashboardService(BaseService):
                     "earnings": float(month_earnings)
                 })
 
-            # Earnings by client (paid only, in INR)
+            # Earnings by client (all invoices, in INR)
+            all_invoices = self.db.session.query(Invoice).options(
+                joinedload(Invoice.payments),
+                joinedload(Invoice.customer)
+            ).filter_by(user_id=user_id).all()
+            
             client_earnings = {}
-            for invoice in paid_invoices:
+            for invoice in all_invoices:
                 client_name = invoice.customer.name if invoice.customer else invoice.to_name
                 if client_name not in client_earnings:
                     client_earnings[client_name] = 0
                 
-                earnings = (float(invoice.total) if invoice.currency == CurrencyEnum.INR 
-                          else sum(float(payment.amount_received) for payment in invoice.payments))
+                if invoice.status == InvoiceStatusEnum.paid:
+                    earnings = (float(invoice.total) if invoice.currency == CurrencyEnum.INR 
+                              else sum(float(payment.amount_received) for payment in invoice.payments))
+                else:
+                    # For unpaid invoices, use the total amount as potential earnings
+                    earnings = float(invoice.total) if invoice.currency == CurrencyEnum.INR else float(invoice.total)
+                
                 client_earnings[client_name] += earnings
 
             earnings_by_client = [
