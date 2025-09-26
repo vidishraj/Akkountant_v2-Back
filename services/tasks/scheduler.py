@@ -98,6 +98,7 @@ class TaskScheduler:
             "SetNPSRate": SetNPSRate,
             "SetNPSDetails": SetNPSDetails,
             "SetStocksDetails": SetKiteStockDetails,
+            "SetStocksOldDetails": SetKiteStockDetails,  # Add missing mapping
             "SetMFRate": SetMFRate,
             "SetMFDetails": SetMFDetails,
             "SetGoldRate": SetIBJAGoldRate,

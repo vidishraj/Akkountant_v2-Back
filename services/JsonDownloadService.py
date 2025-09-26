@@ -178,10 +178,8 @@ class JSONDownloadService:
         service_type = EPGEnum[serviceType]
         filepath = None
         if service_type == EPGEnum.EPF:
-            filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
-            fileCheck = False
-            if filepath is not None:
-                fileCheck = True
+            filepath = self.getLatestFile(self.ratesType, self.EPFRatePrefix)
+            fileCheck = self.checkJsonInDirectory(self.ratesType, self.EPFRatePrefix)
 
         elif service_type == EPGEnum.PF:
             filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
@@ -193,8 +191,22 @@ class JSONDownloadService:
         rateList = jsonData['data']
         for item in rateList:
             if item['Year'] == monthString:
-                return item['Interest Rate']
-        return {}
+                rate_value = item['Interest Rate']
+                # Ensure we return a numeric value
+                if isinstance(rate_value, (int, float)):
+                    return rate_value
+                elif isinstance(rate_value, str):
+                    try:
+                        return float(rate_value)
+                    except ValueError:
+                        self.logger.warning(f"Could not convert rate '{rate_value}' to float for year {monthString}")
+                        return 0.0
+                else:
+                    self.logger.warning(f"Unexpected rate format: {rate_value} for year {monthString}")
+                    return 0.0
+        # Return default EPF rate if month not found (8.5% as of recent years)
+        self.logger.warning(f"No rate found for month {monthString}, using default EPF rate of 8.5%")
+        return 8.5
 
     def getPPFRateFile(self):
         filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)

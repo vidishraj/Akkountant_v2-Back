@@ -42,7 +42,10 @@ class BaseTask(ABC):
         if not hasattr(self, 'initialized'):  # Prevent multiple initializations
             # Initialise singleton with only title and priority
             self.title = title
-            self.jsonService = JsonDownloadService.JSONDownloadService(os.path.join(os.getcwd(), 'services', 'assets'))
+            # Fix path issue - get the root directory and build absolute path
+            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            assets_path = os.path.join(root_dir, 'services', 'assets')
+            self.jsonService = JsonDownloadService.JSONDownloadService(assets_path)
             self.priority = priority
             self.transactionService = TransactionService()
             self.investmentService = InvestmentService()
