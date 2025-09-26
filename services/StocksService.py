@@ -1,4 +1,6 @@
 from abc import ABC
+import time
+from datetime import datetime, timedelta
 
 from sqlalchemy.exc import NoResultFound, SQLAlchemyError
 from werkzeug.routing import ValidationError
@@ -29,6 +31,9 @@ class StocksService(Base_MSN, ABC):
         self.baseAPIURL = "https://api.mfapi.in/"
         self.logger = Logger(__name__).get_logger()
         self.kite_service = KiteService()
+        # Add in-memory cache with 5-minute expiry
+        self._stock_cache = {}
+        self._cache_expiry = 300  # 5 minutes in seconds
 
     def buySecurity(self, security_data, userId):
         try:
@@ -228,15 +233,46 @@ class StocksService(Base_MSN, ABC):
     def getSecurityList(self):
         self.JsonDownloadService.getStockList()
 
+    def _cleanup_cache(self):
+        """Remove expired entries from cache to prevent memory bloat"""
+        current_time = time.time()
+        expired_keys = [
+            key for key, value in self._stock_cache.items()
+            if current_time - value['timestamp'] >= self._cache_expiry
+        ]
+        for key in expired_keys:
+            del self._stock_cache[key]
+        if expired_keys:
+            self.logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
+
     def findSecurity(self, securityCode):
+        # Check cache first
+        current_time = time.time()
+        if securityCode in self._stock_cache:
+            cache_entry = self._stock_cache[securityCode]
+            if current_time - cache_entry['timestamp'] < self._cache_expiry:
+                self.logger.debug(f"Cache hit for {securityCode}")
+                return cache_entry['data']
+        
+        # Clean up cache periodically (every 50 requests)
+        if len(self._stock_cache) > 50:
+            self._cleanup_cache()
+        
         try:
             quote = nsepython.nse_eq(securityCode)
-            self.logger.info(f"Successfully fetched live data for {securityCode}")
-            # @TODO Decide the format of the stocks for frontend
-            return quote
+            if quote:  # Only cache successful responses
+                self._stock_cache[securityCode] = {
+                    'data': quote,
+                    'timestamp': current_time
+                }
+                self.logger.info(f"Successfully fetched live data for {securityCode}")
+                return quote
+            else:
+                self.logger.warning(f"No data returned for {securityCode}")
+                return None
         except Exception as ex:
             self.logger.error(f"Error while fetching symbol from NSEPYTHON {ex}")
-        pass
+            return None
 
     def tradeExists(self, tradeId: str):
         tradeRow = self.db.session.query(TradeAssociation).filter(TradeAssociation.tradeID == tradeId).first()

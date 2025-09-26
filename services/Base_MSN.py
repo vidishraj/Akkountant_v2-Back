@@ -303,20 +303,46 @@ class Base_MSN:
             self.logger.error(f"An error occurred while updating row {e}")
 
     def calculateStockRates(self, data_list):
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=min(20, len(data_list))) as executor:
             # Submit tasks to threads and collect Future objects
             # @TODO Manage changed symbols and edge case for fucking SUZLON-BC
-            futures = [
-                executor.submit(self.findSecurity, data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON") for
-                data in data_list]
+            futures = {
+                executor.submit(self.findSecurity, data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON"): data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON"
+                for data in data_list
+            }
 
             # Use results from completed tasks to call another method
             rateDictionary = {}
             for future in futures:
-                result = future.result()
-                # Waits for the thread to complete and gets the return value
-                rate_card = self.genericUtil.fetchStockRates(result)
-                rateDictionary[rate_card['symbol']] = rate_card
+                try:
+                    result = future.result(timeout=10)  # Add timeout to prevent hanging
+                    if result:  # Check if result is valid
+                        rate_card = self.genericUtil.fetchStockRates(result)
+                        rateDictionary[rate_card['symbol']] = rate_card
+                    else:
+                        # Handle failed API calls
+                        symbol = futures[future]
+                        self.logger.warning(f"Failed to fetch data for {symbol}, using fallback")
+                        rateDictionary[symbol] = {
+                            'symbol': symbol,
+                            'lastPrice': 0,
+                            'change': 0,
+                            'pChange': 0,
+                            'previousClose': 0,
+                            'error': 'API_FAILED'
+                        }
+                except Exception as e:
+                    symbol = futures[future]
+                    self.logger.error(f"Error fetching rates for {symbol}: {str(e)}")
+                    # Provide fallback data to prevent endpoint failure
+                    rateDictionary[symbol] = {
+                        'symbol': symbol,
+                        'lastPrice': 0,
+                        'change': 0,
+                        'pChange': 0,
+                        'previousClose': 0,
+                        'error': 'TIMEOUT_OR_ERROR'
+                    }
             return rateDictionary
 
     def calculateProfitAndCurrentValue(self, investment_type: str, user_id: int):
