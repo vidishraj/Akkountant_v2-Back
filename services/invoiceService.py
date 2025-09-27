@@ -4,6 +4,7 @@ from sqlalchemy import func, desc
 from sqlalchemy.orm import joinedload
 from models.freelance_management import Invoice, InvoiceItem, Customer, InvoicePayment, CurrencyEnum, InvoiceCustomField
 from services.Base_Service import BaseService
+from services.currencyService import CurrencyService
 from utils.logger import Logger
 from datetime import datetime
 
@@ -19,6 +20,7 @@ class InvoiceService(BaseService):
 
     def __init__(self):
         super().__init__()
+        self.currency_service = CurrencyService()
 
     def create_invoice(self, invoice_data):
         try:
@@ -363,10 +365,19 @@ class InvoiceService(BaseService):
         if existing_payment:
             raise ValueError("Payment already exists for this invoice. Only one payment per invoice is allowed.")
         
+        # Get invoice to check currency
+        invoice = self.db.session.query(Invoice).filter_by(id=invoice_id).first()
+        if not invoice:
+            raise ValueError("Invoice not found")
+        
+        # Convert payment amount to INR if needed
+        payment_amount = float(payment_data['amountReceived'])
+        converted_amount = self._convert_to_inr(payment_amount, invoice.currency)
+        
         payment = InvoicePayment(
             invoice_id=invoice_id,
             payment_method=payment_data['paymentMethod'],
-            amount_received=float(payment_data['amountReceived']),
+            amount_received=converted_amount,
             payment_date=datetime.strptime(payment_data['paymentDate'], '%Y-%m-%d').date() if payment_data.get('paymentDate') else None,
             notes=payment_data.get('notes'),
             breakdown=payment_data.get('breakdown', {})
@@ -374,8 +385,8 @@ class InvoiceService(BaseService):
         self.db.session.add(payment)
         
         # Update invoice status to paid if payment covers the full amount
-        invoice = self.db.session.query(Invoice).filter_by(id=invoice_id).first()
-        if invoice and float(payment_data['amountReceived']) >= float(invoice.total):
+        # Compare in original currency for status determination
+        if invoice and payment_amount >= float(invoice.total):
             invoice.status = 'paid'
     
     def _replace_payment(self, invoice_id, payment_data):
@@ -388,11 +399,20 @@ class InvoiceService(BaseService):
         if existing_payment:
             self.db.session.delete(existing_payment)
         
+        # Get invoice to check currency
+        invoice = self.db.session.query(Invoice).filter_by(id=invoice_id).first()
+        if not invoice:
+            raise ValueError("Invoice not found")
+        
+        # Convert payment amount to INR if needed
+        payment_amount = float(payment_data['amountReceived'])
+        converted_amount = self._convert_to_inr(payment_amount, invoice.currency)
+        
         # Create new payment
         payment = InvoicePayment(
             invoice_id=invoice_id,
             payment_method=payment_data['paymentMethod'],
-            amount_received=float(payment_data['amountReceived']),
+            amount_received=converted_amount,
             payment_date=datetime.strptime(payment_data['paymentDate'], '%Y-%m-%d').date() if payment_data.get('paymentDate') else None,
             notes=payment_data.get('notes'),
             breakdown=payment_data.get('breakdown', {})
@@ -400,9 +420,25 @@ class InvoiceService(BaseService):
         self.db.session.add(payment)
         
         # Update invoice status to paid if payment covers the full amount
-        invoice = self.db.session.query(Invoice).filter_by(id=invoice_id).first()
-        if invoice and float(payment_data['amountReceived']) >= float(invoice.total):
+        # Compare in original currency for status determination
+        if invoice and payment_amount >= float(invoice.total):
             invoice.status = 'paid'
+
+    def _convert_to_inr(self, amount, currency):
+        """Convert amount to INR using live exchange rates"""
+        currency_str = currency.value if hasattr(currency, 'value') else str(currency)
+        
+        if currency_str == 'INR':
+            return float(amount)
+        
+        try:
+            converted_amount = self.currency_service.convert_to_inr(amount, currency_str)
+            self.logger.info(f"Converted {amount} {currency_str} to {converted_amount} INR using live rates")
+            return converted_amount
+        except Exception as e:
+            self.logger.error(f"Error converting currency using live rates: {str(e)}")
+            # This should not happen as currency service has its own fallbacks
+            raise
 
     def _create_custom_fields(self, invoice_id, custom_fields_data):
         """Helper method to create custom fields for an invoice"""

@@ -206,16 +206,56 @@ class InvestmentService(BaseService):
             elif securityType == MSNENUM.NPS.value:
                 security['info'] = self.NPSService.findSecurity(security['buyCode'])
             elif securityType == MSNENUM.Mutual_Funds.value:
-                infoDetails = self.MFService.findSecurity(security['buyCode'])
-                change = float(infoDetails['nav']) - float(infoDetails['lastNav'])
-                changeP = (change / float(infoDetails['lastNav'])) * 100
-                security['info'] = {'lastPrice': self.genericUtil.convertToDecimal(infoDetails['nav']),
-                                    'previousClose': self.genericUtil.convertToDecimal(infoDetails['lastNav']),
-                                    'pChange': self.genericUtil.convertToDecimal(changeP),
-                                    'change': self.genericUtil.convertToDecimal(change),
-                                    'fundHouse': infoDetails['fundHouse'],
-                                    'scheme_id': infoDetails['scheme_id'],
-                                    'schemeType': infoDetails['schemeType']}
+                try:
+                    infoDetails = self.MFService.findSecurity(security['buyCode'])
+                    
+                    # Check if we got valid data
+                    if not infoDetails or 'nav' not in infoDetails:
+                        self.logger.warning(f"No MF rate data found for scheme {security['buyCode']}")
+                        security['info'] = {
+                            'lastPrice': 0,
+                            'previousClose': 0,
+                            'pChange': 0,
+                            'change': 0,
+                            'fundHouse': 'Unknown',
+                            'scheme_id': security['buyCode'],
+                            'schemeType': 'Unknown',
+                            'error': 'RATE_DATA_UNAVAILABLE'
+                        }
+                        continue
+                    
+                    # Check for required fields
+                    nav = infoDetails.get('nav', 0)
+                    lastNav = infoDetails.get('lastNav', nav)  # Fallback to current nav if lastNav missing
+                    
+                    if lastNav == 0:
+                        change = 0
+                        changeP = 0
+                    else:
+                        change = float(nav) - float(lastNav)
+                        changeP = (change / float(lastNav)) * 100
+                    
+                    security['info'] = {
+                        'lastPrice': self.genericUtil.convertToDecimal(nav),
+                        'previousClose': self.genericUtil.convertToDecimal(lastNav),
+                        'pChange': self.genericUtil.convertToDecimal(changeP),
+                        'change': self.genericUtil.convertToDecimal(change),
+                        'fundHouse': infoDetails.get('fundHouse', 'Unknown'),
+                        'scheme_id': infoDetails.get('scheme_id', security['buyCode']),
+                        'schemeType': infoDetails.get('schemeType', 'Unknown')
+                    }
+                except Exception as e:
+                    self.logger.error(f"Error processing MF data for scheme {security['buyCode']}: {str(e)}")
+                    security['info'] = {
+                        'lastPrice': 0,
+                        'previousClose': 0,
+                        'pChange': 0,
+                        'change': 0,
+                        'fundHouse': 'Unknown',
+                        'scheme_id': security['buyCode'],
+                        'schemeType': 'Unknown',
+                        'error': 'PROCESSING_ERROR'
+                    }
         return activeSecurities
 
     def insertSecurityPurchase(self, serviceType, userId, data):
@@ -304,23 +344,84 @@ class InvestmentService(BaseService):
             self.logger.error(f"Deletion failed: {ex}")
             return False
 
-    def getJobsTable(self, page, page_size=10, limit=10):
-        column_attr = getattr(Jobs.Job, 'due_date')
-        paginationQuery = self.db.session.query(Jobs.Job).order_by(column_attr.desc()).\
-            offset((int(page) - 1) * page_size).limit(limit)
-        results = paginationQuery.all()
-        res = [{
+    def getJobsTable(self, page, filters=None, sort_by='due_date', sort_order='desc', page_size=10, limit=10):
+        try:
+            # Start with base query
+            query = self.db.session.query(Jobs.Job)
+            
+            # Apply filters if provided
+            if filters:
+                if filters.get('title'):
+                    query = query.filter(Jobs.Job.title.ilike(f"%{filters['title']}%"))
+                
+                if filters.get('status'):
+                    query = query.filter(Jobs.Job.status == filters['status'])
+                
+                if filters.get('priority'):
+                    query = query.filter(Jobs.Job.priority == filters['priority'])
+                
+                if filters.get('user_id'):
+                    query = query.filter(Jobs.Job.user_id == filters['user_id'])
+                
+                if filters.get('min_failures') is not None:
+                    query = query.filter(Jobs.Job.failures >= int(filters['min_failures']))
+                
+                if filters.get('max_failures') is not None:
+                    query = query.filter(Jobs.Job.failures <= int(filters['max_failures']))
+            
+            # Apply sorting
+            valid_sort_fields = ['id', 'title', 'status', 'priority', 'due_date', 'failures']
+            if sort_by not in valid_sort_fields:
+                sort_by = 'due_date'  # Default fallback
+            
+            column_attr = getattr(Jobs.Job, sort_by)
+            if sort_order.lower() == 'asc':
+                query = query.order_by(column_attr.asc())
+            else:
+                query = query.order_by(column_attr.desc())
+            
+            # Get total count before pagination
+            total_count = query.count()
+            
+            # Apply pagination
+            offset = (int(page) - 1) * page_size
+            paginationQuery = query.offset(offset).limit(limit)
+            results = paginationQuery.all()
+            
+            # Format results
+            res = [{
+                "ID": result.id,
                 "Title": result.title,
                 "Result": result.result,
                 "Status": result.status,
+                "Priority": result.priority,
                 "DueTime": result.due_date,
-                "Failures": result.failures
+                "Failures": result.failures,
+                "UserID": result.user_id
             } for result in results]
-        return {
-            "results": res,
-            "page": page,
-            "jobs": self.jobsObject
-        }
+            
+            return {
+                "results": res,
+                "page": int(page),
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": (total_count + page_size - 1) // page_size,
+                "jobs": self.jobsObject,
+                "applied_filters": {k: v for k, v in (filters or {}).items() if v is not None},
+                "sort_by": sort_by,
+                "sort_order": sort_order
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching jobs table: {str(e)}")
+            return {
+                "error": "Failed to fetch jobs",
+                "results": [],
+                "page": int(page),
+                "page_size": page_size,
+                "total_count": 0,
+                "total_pages": 0
+            }
 
     def setJobsTable(self, jobId: str, user_id: str):
         if jobId not in list(self.jobsObject.keys()):

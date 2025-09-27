@@ -460,21 +460,25 @@ class Base_MSN:
     def fetchTransactionsForUserAndService(self, security_type: str, user_id: str, ):
         try:
             transactions = (
-                self.db.session.query(SecurityTransactions)
+                self.db.session.query(SecurityTransactions, PurchasedSecurities)
+                .join(PurchasedSecurities, SecurityTransactions.buyId == PurchasedSecurities.buyID)
                 .filter(
                     SecurityTransactions.userID == user_id,
                     SecurityTransactions.securityType == security_type
                 )
+                .order_by(SecurityTransactions.date.desc())  # Most recent transactions first
                 .all()
             )
             transactionDict = []
-            for transaction in transactions:
+            for transaction, security in transactions:
                 transactionDict.append({
                     'id': transaction.transactionId,
                     'date': transaction.date,
                     'price': transaction.price,
                     'quant': transaction.quant,
                     'transactionType': transaction.transactionType,
+                    'securityCode': security.securityCode,
+                    'buyId': security.buyID,
                 })
             return transactionDict
         except Exception as ex:

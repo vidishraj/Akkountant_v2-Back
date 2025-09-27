@@ -283,11 +283,26 @@ class InvestmentController:
 
     @Logger.standardLogger
     def getJobsTable(self):
-        # Get user ID from context
+        # Get page and filter/sort parameters
         page = request.args.get('page')
         if page is None:
             return jsonify({"Error": "Page is missing"}), 406
-        return jsonify(self.InvestmentService.getJobsTable(page)), 200
+        
+        # Extract filter parameters
+        filters = {
+            'title': request.args.get('title'),
+            'status': request.args.get('status'),
+            'priority': request.args.get('priority'),
+            'user_id': request.args.get('user_id'),
+            'min_failures': request.args.get('min_failures'),
+            'max_failures': request.args.get('max_failures')
+        }
+        
+        # Extract sort parameters
+        sort_by = request.args.get('sort_by', 'due_date')  # Default sort by due_date
+        sort_order = request.args.get('sort_order', 'desc')  # Default descending
+        
+        return jsonify(self.InvestmentService.getJobsTable(page, filters, sort_by, sort_order)), 200
 
     @Logger.standardLogger
     def setJobs(self):
