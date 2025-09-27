@@ -34,10 +34,9 @@ class DashboardService(BaseService):
                 status=InvoiceStatusEnum.paid
             ).all()
 
-            # Calculate total earnings in INR (assume all payments are in INR)
-            total_earnings = sum(float(invoice.total) if invoice.currency == CurrencyEnum.INR 
-                               else sum(float(payment.amount_received) for payment in invoice.payments)
-                               for invoice in paid_invoices)
+            # Calculate total earnings in INR (use payment amounts which are already in INR)
+            total_earnings = sum(sum(float(payment.amount_received) for payment in invoice.payments)
+                               for invoice in paid_invoices if invoice.payments)
 
             # Monthly earnings (current month paid invoices in INR)
             current_month = datetime.now().month
@@ -46,9 +45,8 @@ class DashboardService(BaseService):
                                 if inv.issue_date and inv.issue_date.month == current_month 
                                 and inv.issue_date.year == current_year]
             
-            monthly_earnings = sum(float(invoice.total) if invoice.currency == CurrencyEnum.INR 
-                                 else sum(float(payment.amount_received) for payment in invoice.payments)
-                                 for invoice in current_month_paid)
+            monthly_earnings = sum(sum(float(payment.amount_received) for payment in invoice.payments)
+                                 for invoice in current_month_paid if invoice.payments)
 
             # Pending amount - estimate all unpaid invoices in INR equivalent
             unpaid_invoices = self.db.session.query(Invoice).filter(
@@ -73,22 +71,31 @@ class DashboardService(BaseService):
 
             # Earnings by month (last 12 months, paid only, in INR)
             earnings_by_month = []
+            current = datetime.now()
             for i in range(11, -1, -1):
-                target_date = datetime.now() - timedelta(days=30 * i)
-                month_invoices = [inv for inv in paid_invoices 
-                                if inv.issue_date and inv.issue_date.month == target_date.month 
-                                and inv.issue_date.year == target_date.year]
+                # Properly calculate months by adjusting month/year
+                target_month = current.month - i
+                target_year = current.year
                 
-                month_earnings = sum(float(invoice.total) if invoice.currency == CurrencyEnum.INR 
-                                   else sum(float(payment.amount_received) for payment in invoice.payments)
-                                   for invoice in month_invoices)
+                # Handle year rollover
+                while target_month <= 0:
+                    target_month += 12
+                    target_year -= 1
+                
+                month_invoices = [inv for inv in paid_invoices 
+                                if inv.issue_date and inv.issue_date.month == target_month 
+                                and inv.issue_date.year == target_year]
+                
+                # Use payment amounts directly (already in INR)
+                month_earnings = sum(sum(float(payment.amount_received) for payment in invoice.payments)
+                                   for invoice in month_invoices if invoice.payments)
                 
                 earnings_by_month.append({
-                    "month": target_date.strftime("%Y-%m"),
+                    "month": f"{target_year:04d}-{target_month:02d}",
                     "earnings": float(month_earnings)
                 })
 
-            # Earnings by client (all invoices, in INR)
+            # Earnings by client (paid invoices only, using payment amounts in INR)
             all_invoices = self.db.session.query(Invoice).options(
                 joinedload(Invoice.payments),
                 joinedload(Invoice.customer)
@@ -100,15 +107,10 @@ class DashboardService(BaseService):
                 if client_name not in client_earnings:
                     client_earnings[client_name] = 0
                 
-                if invoice.status == InvoiceStatusEnum.paid:
-                    earnings = (float(invoice.total) if invoice.currency == CurrencyEnum.INR 
-                              else sum(float(payment.amount_received) for payment in invoice.payments))
-                else:
-                    # For unpaid invoices, use the total amount (no conversion for non-INR currencies yet)
-                    # Note: This should be enhanced with proper currency conversion rates
-                    earnings = float(invoice.total)
-                
-                client_earnings[client_name] += earnings
+                if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
+                    # Use payment amounts (already in INR)
+                    earnings = sum(float(payment.amount_received) for payment in invoice.payments)
+                    client_earnings[client_name] += earnings
 
             earnings_by_client = [
                 {"client": client, "earnings": earnings}
@@ -116,7 +118,7 @@ class DashboardService(BaseService):
                                              key=lambda x: x[1], reverse=True)[:10]
             ]
 
-            # Earnings by client combined with currency conversion to INR
+            # Earnings by client combined (paid + unpaid with currency conversion to INR)
             # Simple exchange rates (should be made dynamic in production)
             exchange_rates = {
                 'USD': 83.0,  # 1 USD = 83 INR (approximate)
@@ -130,17 +132,13 @@ class DashboardService(BaseService):
                 if client_name not in client_earnings_combined:
                     client_earnings_combined[client_name] = 0
                 
-                currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
-                exchange_rate = exchange_rates.get(currency, 1.0)
-                
-                if invoice.status == InvoiceStatusEnum.paid:
-                    if invoice.currency == CurrencyEnum.INR:
-                        earnings_inr = float(invoice.total)
-                    else:
-                        # For paid non-INR invoices, use payment amounts (already converted)
-                        earnings_inr = sum(float(payment.amount_received) for payment in invoice.payments)
+                if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
+                    # For paid invoices, use payment amounts (already in INR)
+                    earnings_inr = sum(float(payment.amount_received) for payment in invoice.payments)
                 else:
                     # For unpaid invoices, convert using exchange rates
+                    currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
+                    exchange_rate = exchange_rates.get(currency, 1.0)
                     earnings_inr = float(invoice.total) * exchange_rate
                 
                 client_earnings_combined[client_name] += earnings_inr
@@ -161,11 +159,8 @@ class DashboardService(BaseService):
             for invoice in recent_invoices:
                 # Calculate paid amount in INR
                 paid_amount = None
-                if invoice.status == InvoiceStatusEnum.paid:
-                    if invoice.currency == CurrencyEnum.INR:
-                        paid_amount = float(invoice.total)
-                    else:
-                        paid_amount = sum(float(payment.amount_received) for payment in invoice.payments)
+                if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
+                    paid_amount = sum(float(payment.amount_received) for payment in invoice.payments)
 
                 recent_invoices_formatted.append({
                     "invoiceNumber": invoice.invoice_number,
