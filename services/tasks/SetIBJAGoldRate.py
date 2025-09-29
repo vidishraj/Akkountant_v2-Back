@@ -240,33 +240,49 @@ class SetIBJAGoldRate(BaseTask):
     def extract_rates_from_text(self, text):
         """
         Extract gold and silver rates from PDF text content
+        Updated to handle new PDF format where dates and rates are on separate lines
         """
         try:
             lines = text.split('\n')
             
             # Find the most recent date entry (first non-weekend/holiday entry)
-            for line in lines:
-                # Look for date pattern like "19-Aug-25" followed by rate data
-                date_match = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{2})\s+(.+)', line)
+            for i, line in enumerate(lines):
+                # Look for date pattern like "29-Sep-25"
+                date_match = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{2})', line.strip())
                 if date_match:
                     date_str = date_match.group(1)
-                    rates_str = date_match.group(2)
                     
-                    # Skip weekend/holiday entries
-                    if any(skip_word in rates_str.upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
+                    # Check if next few lines contain weekend/holiday markers
+                    next_lines = lines[i+1:i+5] if i+1 < len(lines) else []
+                    if any(skip_word in ' '.join(next_lines).upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
                         continue
                     
-                    # Extract rates (expecting 12 values: 10 gold + 2 silver)
-                    rates = re.findall(r'\d+', rates_str)
+                    # Look for rates in the next lines after the date
+                    # The new format has rates on separate lines after the date
+                    rates = []
                     
+                    # Collect all numeric values from the next several lines
+                    for j in range(i+1, min(i+15, len(lines))):  # Look in next 14 lines
+                        line_text = lines[j].strip()
+                        if line_text and line_text.isdigit():
+                            rates.append(line_text)
+                        elif line_text and any(skip in line_text.upper() for skip in ['SUN', 'SAT', 'HOLIDAY']):
+                            break  # Stop if we hit weekend/holiday
+                        elif re.match(r'\d{1,2}-[A-Za-z]{3}-\d{2}', line_text):
+                            break  # Stop if we hit another date
+                    
+                    # We need at least 12 values (10 gold + 2 silver)  
                     if len(rates) >= 12:
+                        # Convert to integers
+                        rates = [int(r) for r in rates[:12]]
+                        
                         # Calculate average prices for backward compatibility
-                        gold_999_avg = (int(rates[0]) + int(rates[1])) // 2
-                        gold_916_avg = (int(rates[4]) + int(rates[5])) // 2
-                        gold_750_avg = (int(rates[6]) + int(rates[7])) // 2
-                        gold_995_avg = (int(rates[2]) + int(rates[3])) // 2
-                        gold_585_avg = (int(rates[8]) + int(rates[9])) // 2
-                        silver_999_avg = (int(rates[10]) + int(rates[11])) // 2
+                        gold_999_avg = (rates[0] + rates[1]) // 2
+                        gold_916_avg = (rates[4] + rates[5]) // 2
+                        gold_750_avg = (rates[6] + rates[7]) // 2
+                        gold_995_avg = (rates[2] + rates[3]) // 2
+                        gold_585_avg = (rates[8] + rates[9]) // 2
+                        silver_999_avg = (rates[10] + rates[11]) // 2
                         
                         # Calculate GST inclusive rates (average + 3% GST)
                         gold_999_gst = int(gold_999_avg * 1.03)
@@ -288,40 +304,40 @@ class SetIBJAGoldRate(BaseTask):
                                 "date": date_str,
                                 "gold": {
                                     "999": {
-                                        "am_price_10g": int(rates[0]),
-                                        "pm_price_10g": int(rates[1]),
+                                        "am_price_10g": rates[0],
+                                        "pm_price_10g": rates[1],
                                         "avg_price_10g": gold_999_avg,
                                         "avg_with_gst": gold_999_gst
                                     },
                                     "995": {
-                                        "am_price_10g": int(rates[2]),
-                                        "pm_price_10g": int(rates[3]),
+                                        "am_price_10g": rates[2],
+                                        "pm_price_10g": rates[3],
                                         "avg_price_10g": gold_995_avg,
                                         "avg_with_gst": gold_995_gst
                                     },
                                     "916": {
-                                        "am_price_10g": int(rates[4]),
-                                        "pm_price_10g": int(rates[5]),
+                                        "am_price_10g": rates[4],
+                                        "pm_price_10g": rates[5],
                                         "avg_price_10g": gold_916_avg,
                                         "avg_with_gst": gold_916_gst
                                     },
                                     "750": {
-                                        "am_price_10g": int(rates[6]),
-                                        "pm_price_10g": int(rates[7]),
+                                        "am_price_10g": rates[6],
+                                        "pm_price_10g": rates[7],
                                         "avg_price_10g": gold_750_avg,
                                         "avg_with_gst": gold_750_gst
                                     },
                                     "585": {
-                                        "am_price_10g": int(rates[8]),
-                                        "pm_price_10g": int(rates[9]),
+                                        "am_price_10g": rates[8],
+                                        "pm_price_10g": rates[9],
                                         "avg_price_10g": gold_585_avg,
                                         "avg_with_gst": gold_585_gst
                                     }
                                 },
                                 "silver": {
                                     "999": {
-                                        "am_price_1kg": int(rates[10]),
-                                        "pm_price_1kg": int(rates[11]),
+                                        "am_price_1kg": rates[10],
+                                        "pm_price_1kg": rates[11],
                                         "avg_price_1kg": silver_999_avg,
                                         "avg_with_gst": silver_999_gst
                                     }
@@ -331,7 +347,7 @@ class SetIBJAGoldRate(BaseTask):
                             }
                         }
                         
-                        self.logger.info(f"Extracted rates for {date_str}")
+                        self.logger.info(f"Extracted rates for {date_str} with rates: {rates[:12]}")
                         return rate_data
             
             self.logger.warning("No valid rate data found in PDF text")
