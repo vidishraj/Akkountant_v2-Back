@@ -1,7 +1,13 @@
-from sqlalchemy import Column, String, Date, ForeignKey
+from sqlalchemy import Column, String, Date, ForeignKey, Enum
 from models.Base import Base
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import DECIMAL as Decimal
+import enum
+
+
+class ProcessingMethod(enum.Enum):
+    PATTERN_MATCH = "pattern_match"
+    CLAUDE_CODE = "claude_code"
 
 
 class Transactions(Base):
@@ -16,6 +22,7 @@ class Transactions(Base):
     source = Column(String(10), nullable=False)
     bank = Column(String(25), nullable=False)
     user = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
+    processed_via = Column(Enum(ProcessingMethod), default=ProcessingMethod.PATTERN_MATCH)
 
     file_details = relationship('FileDetails', back_populates='transactions')
     user_relationship = relationship('User', back_populates='transactions')

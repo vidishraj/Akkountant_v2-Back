@@ -10,6 +10,8 @@ from enums.StatementPatternEnum import StatementPatternEnum
 from enums.PatternEnum import PatternEnum
 from enums.TransactionTypeEnum import TransactionTypeEnum
 from models import User, UserToken, Transactions, TransactionForReview, StatementPasswords, FileDetails
+from models.transactions import ProcessingMethod
+from utils.EmailClassifier import EmailClassifier
 from services.parsers.HDFC_Credit import HDFCMilleniaParse
 from services.parsers.HDFC_Debit import HDFCDebitParser
 from services.parsers.ICICI_Amazon_Credit import ICICICreditCardStatementParser
@@ -156,25 +158,40 @@ class TransactionService(BaseService):
         totalMails = 0
         conflicts = 0
         if not jobsOnly:
-            # Fetch the banks the user has opted for
-            optedBanks = self.fetchBanksOptedByUser(userID)
-
-            # Fetch the gmail token of the user
-            for bank in optedBanks:
-                patternString = getattr(PatternEnum, bank)
-                # Fetch the emails in the date range
-                mails = self.gmailService.findEmailInIntervalForPattern(userID, token, patternString.value,
-                                                                        dateFrom, dateTo)
+            # PRIMARY: Use EmailClassifier for intelligent email detection
+            all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+            banking_emails = EmailClassifier().get_banking_emails_from_all(all_raw_emails)
+            
+            # Group emails by bank for processing
+            emails_by_bank = {}
+            for email in banking_emails:
+                bank = email.get('bank', 'UNKNOWN')
+                if bank not in emails_by_bank:
+                    emails_by_bank[bank] = []
+                emails_by_bank[bank].append(email)
+            
+            # Process emails for each bank
+            for bank, bank_emails in emails_by_bank.items():
+                if bank == 'UNKNOWN':
+                    continue
+                    
                 # Process the items to get them all in the required format
-                cleanedMails, conflicts = self.genericUtil.extractDetailsFromEmail(mails, bank)
+                cleanedMails, bank_conflicts = self.genericUtil.extractDetailsFromEmail(bank_emails, bank)
                 totalMails += len(cleanedMails)
+                conflicts += len(bank_conflicts)
+                
                 # Insert the processed transactions in the database
-                self.insertTransactions(cleanedMails, bank, userID, conflicts, TransactionTypeEnum.Email.value)
-                # Collect raw emails for job application extraction
-            self.logger.info(f"Finished reading mail. Inserted {totalMails} transactions.")
-        # Integrate job application extraction
+                self.insertTransactions(cleanedMails, bank, userID, bank_conflicts, TransactionTypeEnum.Email.value)
+                
+            self.logger.info(f"Finished reading mail with intelligent detection. Inserted {totalMails} transactions.")
+        else:
+            # For jobsOnly mode, still need to fetch all emails
+            all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
         
-        all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+        # Integrate job application extraction (reuse emails if already fetched)
+        if 'all_raw_emails' not in locals():
+            all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+            
         emailsCleaned = []
         for mail in all_raw_emails:
             emailsCleaned.append({
@@ -187,13 +204,17 @@ class TransactionService(BaseService):
         self.logger.info(f"Finished reading job applications.")
         if jobsOnly:
             return results
-        return totalMails, len(conflicts)
+        return totalMails, conflicts
 
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None):
         integrityErrors = 0
         for transaction in transactions:
             date = self.dateTimeUtil.convert_to_sql_datetime(transaction['date'], bank)
-            transaction = Transactions(
+            
+            # Determine processing method
+            processing_method = ProcessingMethod.CLAUDE_CODE if transaction.get('processed_via') == 'claude_code' else ProcessingMethod.PATTERN_MATCH
+            
+            transaction_obj = Transactions(
                 referenceID=transaction['reference'],
                 date=date,
                 details=transaction['description'],
@@ -202,15 +223,16 @@ class TransactionService(BaseService):
                 fileID=fileId,
                 bank=bank,
                 source=source,
-                user=userId
+                user=userId,
+                processed_via=processing_method
             )
             try:
                 if isinstance(self.db, dict):
                     with self.db.session() as session:
-                        session.add(transaction)
+                        session.add(transaction_obj)
                         session.commit()
                 else:
-                    self.db.session.add(transaction)
+                    self.db.session.add(transaction_obj)
                     self.db.session.commit()
             except IntegrityError as e:
                 self.logger.warning(f"Duplicate entry error occurred: {e.__cause__}")
@@ -287,45 +309,83 @@ class TransactionService(BaseService):
         if dateTo is None or dateFrom is None:
             # If we are not reading for a specific range, read for current month
             dateFrom, dateTo = self.dateTimeUtil.currentMonthDatesForEmail()
-        if bank is None:
-            # Fetch the banks the user has opted for
-            optedBanks = self.fetchBanksOptedByUser(userID)
-        else:
-            optedBanks = bank.split(',')
+            
         # Fetch the gmail token of the user
         gmailToken = self.fetchGmailTokenForUser(userID)
         # Fetch the drive token of the user
         driveToken = self.fetchDriveTokenForUser(userID)
+        
+        # PRIMARY: Use EmailClassifier for intelligent statement email detection
+        all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, gmailToken, dateFrom, dateTo)
+        classification_results = EmailClassifier().classify_banking_emails(all_raw_emails)
+        statement_emails = classification_results['statement_emails']
+        
+        # Filter by specific banks if requested
+        if bank is not None:
+            requested_banks = bank.split(',')
+            statement_emails = [email for email in statement_emails if email.get('bank') in requested_banks]
+        
         totalTransactions = 0
         totalIntegrityErrors = 0
-        for bank in optedBanks:
+        
+        # Group statement emails by bank for processing
+        emails_by_bank = {}
+        for email in statement_emails:
+            bank_name = email.get('bank', 'UNKNOWN')
+            if bank_name not in emails_by_bank:
+                emails_by_bank[bank_name] = []
+            emails_by_bank[bank_name].append(email)
+        
+        for bank_name, bank_statement_emails in emails_by_bank.items():
+            if bank_name == 'UNKNOWN':
+                continue
             # Fetch the password for the bank
-            self.logger.info(f"Processing bank {bank}")
-            password = self.db.session.query(StatementPasswords).filter_by(user=userID).filter_by(bank=bank).first()
-            # Download files to temp. A list of file paths will be available.
-            filepaths = self.gmailService.downloadFilesInRange(userID, gmailToken, password, bank, dateTo, dateFrom)
+            self.logger.info(f"Processing bank {bank_name}")
+            password = self.db.session.query(StatementPasswords).filter_by(user=userID).filter_by(bank=bank_name).first()
+            
+            # HYBRID APPROACH: Use EmailClassifier for detection, existing download for PDFs
+            # Future enhancement: Create Claude-aware PDF processing
+            if len(bank_statement_emails) > 0:
+                self.logger.info(f"EmailClassifier found {len(bank_statement_emails)} statement emails for {bank_name}")
+                # Download files using existing method (still works, just less precise)
+                filepaths = self.gmailService.downloadFilesInRange(userID, gmailToken, password, bank_name, dateTo, dateFrom)
+            else:
+                self.logger.info(f"No statement emails found for {bank_name}")
+                continue
 
-            # Get relevant parser
-            parserInstance = self.getParserInstanceByBank(bank)
             for path in filepaths:
                 self.logger.info(f"Processing file {path}")
-                # Parse the statement
-                parserInstance.setPath(os.getcwd() + '/tmp/' + path)
-                parserInstance.setPassword(password.password_hash)
-                transactions = parserInstance.parseFile()
+                
+                # PRIMARY: Try Claude Code PDF analysis first
+                pdf_path = os.getcwd() + '/tmp/' + path
+                transactions = self.genericUtil._try_claude_pdf_extraction(pdf_path, bank_name, password.password_hash if password else None)
+                
+                if transactions:
+                    self.logger.info(f"Claude Code successfully parsed {len(transactions)} transactions from PDF")
+                else:
+                    # FALLBACK: Use existing tabula-based parser
+                    self.logger.info("Claude PDF parsing failed, falling back to tabula parser")
+                    parserInstance = self.getParserInstanceByBank(bank_name)
+                    parserInstance.setPath(pdf_path)
+                    parserInstance.setPassword(password.password_hash)
+                    transactions = parserInstance.parseFile()
+                    # Mark transactions as processed via pattern match (legacy method)
+                    for txn in transactions:
+                        txn['processed_via'] = 'pattern_match'
+                
                 totalTransactions += len(transactions)
-                self.logger.info("Finished reading transactions")
+                self.logger.info(f"Finished reading {len(transactions)} transactions")
                 if len(transactions) > 0:
                     # Get fileName
-                    month = self.dateTimeUtil.getMonthYearRange(transactions[0]['date'], transactions[-1]['date'], bank)
-                    fileName = f"{bank}_{month}.pdf"
+                    month = self.dateTimeUtil.getMonthYearRange(transactions[0]['date'], transactions[-1]['date'], bank_name)
+                    fileName = f"{bank_name}_{month}.pdf"
                     # Upload to Drive
                     fileId = self.driveService.uploadFileToDrive(
-                        fileName, f"Akkountant/{bank}/", userID, driveToken, os.getcwd() + '/tmp/' + path)
-                    self.insertFileDetails(fileId, fileName, len(transactions), bank, userID, path)
+                        fileName, f"Akkountant/{bank_name}/", userID, driveToken, os.getcwd() + '/tmp/' + path)
+                    self.insertFileDetails(fileId, fileName, len(transactions), bank_name, userID, path)
                     # Insert transactions
                     try:
-                        integrityErrors = self.insertTransactions(transactions, bank, userID, [],
+                        integrityErrors = self.insertTransactions(transactions, bank_name, userID, [],
                                                                   TransactionTypeEnum.Statement.value,
                                                                   fileId)
                         totalIntegrityErrors += integrityErrors
@@ -345,7 +405,7 @@ class TransactionService(BaseService):
         # Delete the file from temp
         self.genericUtil.emptyTemp()
 
-        self.logger.info(f"Finished reading mail. Inserted {totalTransactions} transactions")
+        self.logger.info(f"Finished reading statements with intelligent detection. Inserted {totalTransactions} transactions")
         return totalTransactions, totalIntegrityErrors
 
     def insertFileDetails(self, fileId, fileName, statementCount,
@@ -621,3 +681,27 @@ class TransactionService(BaseService):
             raise e
         finally:
             session.close()
+
+    def getProcessingStats(self, userId):
+        try:
+            total_count = self.db.session.query(func.count(Transactions.referenceID)).filter_by(user=userId).scalar()
+            
+            pattern_count = self.db.session.query(func.count(Transactions.referenceID)).filter(
+                Transactions.user == userId,
+                Transactions.processed_via == ProcessingMethod.PATTERN_MATCH
+            ).scalar()
+            
+            claude_count = self.db.session.query(func.count(Transactions.referenceID)).filter(
+                Transactions.user == userId,
+                Transactions.processed_via == ProcessingMethod.CLAUDE_CODE
+            ).scalar()
+
+            return {
+                "total_transactions": total_count or 0,
+                "pattern_match_count": pattern_count or 0,
+                "claude_code_count": claude_count or 0,
+                "claude_success_rate": round((claude_count or 0) / max(total_count or 1, 1) * 100, 2)
+            }
+        except Exception as e:
+            self.logger.error(f"Error fetching processing stats: {str(e)}")
+            return {"error": str(e)}

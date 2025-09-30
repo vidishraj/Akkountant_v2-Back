@@ -25,6 +25,6 @@ class CheckStatementTask(BaseTask):
                 return "No userid", "Failed", self.interval
             # Just scanning the entire fcking month
             read, conflicts = self.transactionService.readStatementsFromMail(None, None, self.user_id, None)
-            return f"{read} transactions read in statements. {conflicts} conflicts", "Completed", self.interval
+            return f"{read} transactions read in statements (Claude PDF analysis + intelligent detection). {conflicts} conflicts", "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval

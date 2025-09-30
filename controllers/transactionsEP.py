@@ -250,3 +250,9 @@ class TransactionController:
             return jsonify({"message": "Opted banks updated successfully"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    @Logger.standardLogger
+    def getProcessingStats(self):
+        userId = g.get('firebase_id')
+        stats = self.TransactionService.getProcessingStats(userId)
+        return jsonify(stats), 200
