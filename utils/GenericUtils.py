@@ -47,20 +47,26 @@ class GenericUtil:
         Primary email processing method - Claude Code first, regex fallback
         """
         try:
+            self.logger.debug(f"🏁 Starting extractDetailsFromEmail for {len(emails)} emails from {bankType}")
             cleanedMails = []
             conflicts = []
             
-            for email in emails:
+            for i, email in enumerate(emails):
+                self.logger.debug(f"📧 Processing email {i+1}/{len(emails)} from {bankType}")
+                
                 # PRIMARY: Try Claude Code processing first
+                self.logger.debug(f"1️⃣ Attempting Claude Code extraction...")
                 claude_result = self._try_claude_extraction(email, bankType)
                 if claude_result:
                     cleanedMails.append(claude_result)
-                    self.logger.info(f"Claude Code successfully processed email from {bankType}")
+                    self.logger.info(f"✅ Claude Code successfully processed email {i+1} from {bankType}")
                     continue
                 
                 # FALLBACK: Try legacy regex pattern matching
+                self.logger.debug(f"2️⃣ Claude failed, trying regex fallback...")
                 try:
                     pattern = EmailRegexEnum[bankType].value
+                    self.logger.debug(f"🔍 Using regex pattern for {bankType}: {pattern[:100]}...")
                     matches = re.search(pattern, email['message'])
                     
                     if bankType == EmailRegexEnum.Millenia_Credit.name and matches is None:
@@ -224,6 +230,11 @@ Bank statement text:'''
     def _try_claude_extraction(self, email, bankType):
         """Try to extract transaction data using Claude Code as fallback"""
         try:
+            self.logger.debug(f"🔍 Starting Claude Code extraction for email from {bankType}")
+            self.logger.debug(f"📧 Email subject: {email.get('subject', 'No subject')}")
+            self.logger.debug(f"⏰ Email time: {email.get('time', 'No time')}")
+            self.logger.debug(f"📝 Email body preview: {email.get('message', '')[:200]}...")
+            
             prompt = '''You are a data extraction tool. Extract transaction information from this banking email and respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
 Required JSON format:
@@ -242,41 +253,80 @@ Email content:'''
             # Combine prompt and email content
             combined_content = prompt + "\n\n" + f"Subject: {email.get('subject', '')}\nTime: {email.get('time', '')}\nBody: {email.get('message', '')}"
             
+            self.logger.debug(f"📤 Sending {len(combined_content)} characters to Claude Code")
+            
             # For --print mode, pass content via stdin
             cmd = ['claude', 'code', '--print', '--output-format', 'json']
+            self.logger.debug(f"🚀 Executing command: {' '.join(cmd)}")
+            
             result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=60)
             
+            self.logger.debug(f"⚡ Claude Code execution completed with return code: {result.returncode}")
+            
             if result.returncode == 0:
+                self.logger.debug(f"✅ Claude Code succeeded")
+                self.logger.debug(f"📤 Claude Code stdout length: {len(result.stdout)} characters")
+                self.logger.debug(f"📤 Claude Code stderr length: {len(result.stderr)} characters")
+                self.logger.debug(f"📋 Claude Code raw stdout: {result.stdout}")
+                if result.stderr:
+                    self.logger.debug(f"⚠️ Claude Code stderr: {result.stderr}")
+                
                 # Try to extract JSON from Claude's response
+                self.logger.debug(f"🔍 Attempting to parse JSON from Claude response...")
                 json_data = self._extract_json_from_response(result.stdout)
-                if json_data and json_data.get('transaction_found'):
-                    # Convert Claude response to expected format
-                    amount = str(json_data['amount']).replace(',', '')
-                    referenceID = GenericUtil().generate_reference_id(
-                        json_data['transaction_date'], 
-                        json_data['description'], 
-                        float(amount)
-                    )
-                    return {
-                        'reference': referenceID,
-                        'date': json_data['transaction_date'],
-                        'description': json_data['description'],
-                        'amount': amount,
-                        'processed_via': 'CLAUDE_CODE'
-                    }
+                
+                if json_data:
+                    self.logger.debug(f"✅ Successfully parsed JSON: {json_data}")
+                    if json_data.get('transaction_found'):
+                        self.logger.debug(f"💰 Transaction found! Extracting details...")
+                        # Convert Claude response to expected format
+                        amount = str(json_data['amount']).replace(',', '')
+                        referenceID = GenericUtil().generate_reference_id(
+                            json_data['transaction_date'], 
+                            json_data['description'], 
+                            float(amount)
+                        )
+                        extracted_data = {
+                            'reference': referenceID,
+                            'date': json_data['transaction_date'],
+                            'description': json_data['description'],
+                            'amount': amount,
+                            'processed_via': 'CLAUDE_CODE'
+                        }
+                        self.logger.debug(f"🎉 Claude Code extraction successful: {extracted_data}")
+                        return extracted_data
+                    else:
+                        self.logger.debug(f"❌ Claude Code found no transaction in email")
+                else:
+                    self.logger.warning(f"❌ Failed to parse JSON from Claude response")
+            else:
+                self.logger.error(f"💥 Claude Code failed with return code {result.returncode}")
+                self.logger.error(f"💥 Claude Code stderr: {result.stderr}")
+                self.logger.error(f"💥 Claude Code stdout: {result.stdout}")
+            
+            self.logger.debug(f"🔄 Claude Code extraction failed, will try regex fallback")
             return None
         except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
-            self.logger.error(f"Claude Code extraction failed: {str(e)}")
+            self.logger.error(f"💥 Claude Code extraction failed with exception: {str(e)}")
+            self.logger.error(f"💥 Exception type: {type(e).__name__}")
+            import traceback
+            self.logger.error(f"💥 Full traceback: {traceback.format_exc()}")
             return None
 
     def _extract_json_from_response(self, response_text):
         """Extract JSON from Claude's response, handling structured CLI output"""
+        self.logger.debug(f"🔍 Starting JSON extraction from response of length {len(response_text)}")
         try:
             # First, try to parse as Claude CLI JSON response format
+            self.logger.debug(f"🔍 Attempting to parse as Claude CLI JSON format...")
             cli_response = json.loads(response_text.strip())
+            self.logger.debug(f"✅ Successfully parsed as JSON. Type: {type(cli_response)}")
+            
             if isinstance(cli_response, dict) and 'result' in cli_response:
+                self.logger.debug(f"📋 Found 'result' field in CLI response")
                 # Extract the result field which contains the actual content
                 result_content = cli_response['result']
+                self.logger.debug(f"📋 Result content: {result_content}")
                 
                 # Look for JSON within markdown code blocks
                 import re
