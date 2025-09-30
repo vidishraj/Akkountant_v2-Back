@@ -212,7 +212,7 @@ class TransactionService(BaseService):
             date = self.dateTimeUtil.convert_to_sql_datetime(transaction['date'], bank)
             
             # Determine processing method
-            processing_method = ProcessingMethod.CLAUDE_CODE if transaction.get('processed_via') == 'claude_code' else ProcessingMethod.PATTERN_MATCH
+            processing_method = ProcessingMethod.CLAUDE_CODE if transaction.get('processed_via') == 'CLAUDE_CODE' else ProcessingMethod.PATTERN_MATCH
             
             transaction_obj = Transactions(
                 referenceID=transaction['reference'],
@@ -371,7 +371,7 @@ class TransactionService(BaseService):
                     transactions = parserInstance.parseFile()
                     # Mark transactions as processed via pattern match (legacy method)
                     for txn in transactions:
-                        txn['processed_via'] = 'pattern_match'
+                        txn['processed_via'] = 'PATTERN_MATCH'
                 
                 totalTransactions += len(transactions)
                 self.logger.info(f"Finished reading {len(transactions)} transactions")

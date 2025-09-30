@@ -80,7 +80,7 @@ class GenericUtil:
                             'date': date,
                             'description': description,
                             'amount': amount,
-                            'processed_via': 'pattern_match'
+                            'processed_via': 'PATTERN_MATCH'
                         })
                         self.logger.info(f"Regex fallback successfully processed email from {bankType}")
                     else:
@@ -173,7 +173,7 @@ Bank statement text:'''
                             'date': txn['date'],
                             'description': txn['description'],
                             'amount': amount,
-                            'processed_via': 'claude_code'
+                            'processed_via': 'CLAUDE_CODE'
                         })
                     
                     return transactions

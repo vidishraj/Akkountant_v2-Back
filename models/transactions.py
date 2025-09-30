@@ -6,8 +6,8 @@ import enum
 
 
 class ProcessingMethod(enum.Enum):
-    PATTERN_MATCH = "pattern_match"
-    CLAUDE_CODE = "claude_code"
+    PATTERN_MATCH = "PATTERN_MATCH"
+    CLAUDE_CODE = "CLAUDE_CODE"
 
 
 class Transactions(Base):
