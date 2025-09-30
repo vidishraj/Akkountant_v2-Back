@@ -142,11 +142,10 @@ Bank statement text:'''
 
             # Combine prompt and PDF text
             combined_content = prompt + "\n\n" + pdf_text
-            with open(text_file, 'w', encoding='utf-8') as f:
-                f.write(combined_content)
-
-            cmd = ['claude', 'code', '--print', '--output-format', 'json', text_file]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            
+            # For --print mode, pass content via stdin
+            cmd = ['claude', 'code', '--print', '--output-format', 'json']
+            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=120)
             
             # Cleanup
             os.remove(text_file)
@@ -225,15 +224,6 @@ Bank statement text:'''
     def _try_claude_extraction(self, email, bankType):
         """Try to extract transaction data using Claude Code as fallback"""
         try:
-            temp_dir = "/tmp/akkountant_emails"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            email_file = f"{temp_dir}/email_{hash(email['message'])}.txt"
-            with open(email_file, 'w', encoding='utf-8') as f:
-                f.write(f"Subject: {email.get('subject', '')}\n")
-                f.write(f"Time: {email.get('time', '')}\n")
-                f.write(f"Body: {email.get('message', '')}\n")
-
             prompt = '''You are a data extraction tool. Extract transaction information from this banking email and respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
 Required JSON format:
@@ -249,16 +239,12 @@ If no transaction is found, return: {"transaction_found": false}
 
 Email content:'''
 
-            # Combine prompt and email content in a single file
+            # Combine prompt and email content
             combined_content = prompt + "\n\n" + f"Subject: {email.get('subject', '')}\nTime: {email.get('time', '')}\nBody: {email.get('message', '')}"
             
-            with open(email_file, 'w', encoding='utf-8') as f:
-                f.write(combined_content)
-
-            cmd = ['claude', 'code', '--print', '--output-format', 'json', email_file]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            os.remove(email_file)
+            # For --print mode, pass content via stdin
+            cmd = ['claude', 'code', '--print', '--output-format', 'json']
+            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=60)
             
             if result.returncode == 0:
                 # Try to extract JSON from Claude's response
@@ -284,15 +270,48 @@ Email content:'''
             return None
 
     def _extract_json_from_response(self, response_text):
-        """Extract JSON from Claude's response, handling conversational text"""
+        """Extract JSON from Claude's response, handling structured CLI output"""
         try:
-            # First, try to parse the entire response as JSON
-            return json.loads(response_text.strip())
+            # First, try to parse as Claude CLI JSON response format
+            cli_response = json.loads(response_text.strip())
+            if isinstance(cli_response, dict) and 'result' in cli_response:
+                # Extract the result field which contains the actual content
+                result_content = cli_response['result']
+                
+                # Look for JSON within markdown code blocks
+                import re
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', result_content, re.DOTALL)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Try to parse the result content directly
+                try:
+                    return json.loads(result_content)
+                except json.JSONDecodeError:
+                    pass
+                    
+            # If it's already the transaction JSON
+            elif isinstance(cli_response, dict) and 'transaction_found' in cli_response:
+                return cli_response
+                
         except json.JSONDecodeError:
             pass
         
-        # If that fails, look for JSON within the text
+        # Fallback: look for JSON within the text
         import re
+        
+        # Look for JSON within markdown code blocks first
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                if 'transaction_found' in data:
+                    return data
+            except json.JSONDecodeError:
+                pass
         
         # Look for JSON object patterns
         json_patterns = [
@@ -305,7 +324,7 @@ Email content:'''
             for match in matches:
                 try:
                     data = json.loads(match)
-                    if 'transaction_found' in data:
+                    if 'transaction_found' in data or 'transactions_found' in data:
                         return data
                 except json.JSONDecodeError:
                     continue
