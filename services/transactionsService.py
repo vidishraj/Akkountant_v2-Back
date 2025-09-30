@@ -19,7 +19,6 @@ from services.parsers.YES_Credit import YESBankCreditParser
 from services.parsers.YES_Debit import YESBankDebitParser
 from services.Base_Service import BaseService
 from utils.logger import Logger
-from services.jobApplicationEmailService import JobApplicationEmailService
 
 
 class TransactionService(BaseService):
@@ -149,7 +148,7 @@ class TransactionService(BaseService):
             "statement_dates": statement_dates,
         }
 
-    def readTransactionFromMail(self, dateTo, dateFrom, userID, jobsOnly=False):
+    def readTransactionFromMail(self, dateTo, dateFrom, userID):
         if dateTo is None or dateFrom is None:
             # If we are not reading for a specific range, read for current month
             dateFrom, dateTo = self.dateTimeUtil.currentMonthDatesForEmail()
@@ -157,53 +156,33 @@ class TransactionService(BaseService):
         token = self.fetchGmailTokenForUser(userID)
         totalMails = 0
         conflicts = 0
-        if not jobsOnly:
-            # PRIMARY: Use EmailClassifier for intelligent email detection
-            all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
-            banking_emails = EmailClassifier().get_banking_emails_from_all(all_raw_emails)
-            
-            # Group emails by bank for processing
-            emails_by_bank = {}
-            for email in banking_emails:
-                bank = email.get('bank', 'UNKNOWN')
-                if bank not in emails_by_bank:
-                    emails_by_bank[bank] = []
-                emails_by_bank[bank].append(email)
-            
-            # Process emails for each bank
-            for bank, bank_emails in emails_by_bank.items():
-                if bank == 'UNKNOWN':
-                    continue
-                    
-                # Process the items to get them all in the required format
-                cleanedMails, bank_conflicts = self.genericUtil.extractDetailsFromEmail(bank_emails, bank)
-                totalMails += len(cleanedMails)
-                conflicts += len(bank_conflicts)
-                
-                # Insert the processed transactions in the database
-                self.insertTransactions(cleanedMails, bank, userID, bank_conflicts, TransactionTypeEnum.Email.value)
-                
-            self.logger.info(f"Finished reading mail with intelligent detection. Inserted {totalMails} transactions.")
-        else:
-            # For jobsOnly mode, still need to fetch all emails
-            all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
         
-        # Integrate job application extraction (reuse emails if already fetched)
-        if 'all_raw_emails' not in locals():
-            all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
+        # PRIMARY: Use EmailClassifier for intelligent email detection
+        all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
+        banking_emails = EmailClassifier().get_banking_emails_from_all(all_raw_emails)
+        
+        # Group emails by bank for processing
+        emails_by_bank = {}
+        for email in banking_emails:
+            bank = email.get('bank', 'UNKNOWN')
+            if bank not in emails_by_bank:
+                emails_by_bank[bank] = []
+            emails_by_bank[bank].append(email)
+        
+        # Process emails for each bank
+        for bank, bank_emails in emails_by_bank.items():
+            if bank == 'UNKNOWN':
+                continue
+                
+            # Process the items to get them all in the required format
+            cleanedMails, bank_conflicts = self.genericUtil.extractDetailsFromEmail(bank_emails, bank)
+            totalMails += len(cleanedMails)
+            conflicts += len(bank_conflicts)
             
-        emailsCleaned = []
-        for mail in all_raw_emails:
-            emailsCleaned.append({
-                'date': mail.get('time'),
-                'subject': mail.get('subject'),
-                'body': mail.get('message'),
-                'message_id': mail.get('message_id')  # Include the Gmail message ID
-            })
-        results = JobApplicationEmailService().process_emails_safely(emailsCleaned)
-        self.logger.info(f"Finished reading job applications.")
-        if jobsOnly:
-            return results
+            # Insert the processed transactions in the database
+            self.insertTransactions(cleanedMails, bank, userID, bank_conflicts, TransactionTypeEnum.Email.value)
+            
+        self.logger.info(f"Finished reading mail with intelligent detection. Inserted {totalMails} transactions.")
         return totalMails, conflicts
 
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None):
