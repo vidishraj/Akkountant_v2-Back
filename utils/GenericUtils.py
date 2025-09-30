@@ -255,11 +255,17 @@ Email content:'''
             
             self.logger.debug(f"📤 Sending {len(combined_content)} characters to Claude Code")
             
-            # For --print mode, pass content via stdin
-            cmd = ['claude', 'code', '--print', '--output-format', 'json']
+            # POTENTIAL FIX: Use full path and proper environment
+            cmd = ['/home/opc/.nvm/versions/node/v20.18.1/bin/claude', 'code', '--print', '--output-format', 'json']
             self.logger.debug(f"🚀 Executing command: {' '.join(cmd)}")
             
-            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=60)
+            # Try with explicit environment and shell=True
+            env = os.environ.copy()
+            env['PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/bin:/usr/bin:/bin'
+            env['HOME'] = '/root'
+            env['NODE_PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/lib/node_modules'
+            
+            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=60, env=env, shell=False)
             
             self.logger.debug(f"⚡ Claude Code execution completed with return code: {result.returncode}")
             
