@@ -22,10 +22,17 @@ class TransactionController:
         self.logger.info(f"Fetch {page} with filter {filters}")
         transactions = self.TransactionService.fetchTransactions(page=page, filters=filters)
         # Format the transactions for JSON response
-        results = [
-            {key: value for key, value in t.__dict__.items() if key != '_sa_instance_state'}
-            for t in transactions["results"]
-        ]
+        results = []
+        for t in transactions["results"]:
+            transaction_dict = {}
+            for key, value in t.__dict__.items():
+                if key != '_sa_instance_state':
+                    # Convert enum objects to their string values for JSON serialization
+                    if hasattr(value, 'value'):  # Check if it's an enum
+                        transaction_dict[key] = value.value
+                    else:
+                        transaction_dict[key] = value
+            results.append(transaction_dict)
         response = {
             "total_count": transactions["count"],
             "page": page,
