@@ -119,31 +119,42 @@ class GenericUtil:
                 f.write(pdf_text)
             
             # Step 3: Send extracted text to Claude
-            prompt = f'''Analyze this bank statement text and extract ALL transactions. Return ONLY valid JSON:
+            prompt = f'''You are a data extraction tool. Analyze this bank statement text and extract ALL transactions. Respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
+
+Required JSON format:
 {{
-    "transactions_found": true/false,
+    "transactions_found": true,
     "bank_name": "{bank_type}",
     "transactions": [
         {{
-            "date": "YYYY-MM-DD",
-            "description": "transaction description",
-            "amount": "0.00",
-            "type": "debit/credit",
-            "balance": "0.00"
+            "date": "2025-09-25",
+            "description": "AMAZON PURCHASE",
+            "amount": "2500.00",
+            "type": "debit",
+            "balance": "15000.00"
         }}
     ]
-}}'''
+}}
 
-            cmd = ['claude', 'code', prompt]
-            with open(text_file, 'r') as f:
-                result = subprocess.run(cmd, stdin=f, capture_output=True, text=True, timeout=120)
+If no transactions found, return: {{"transactions_found": false}}
+
+Bank statement text:'''
+
+            # Combine prompt and PDF text
+            combined_content = prompt + "\n\n" + pdf_text
+            with open(text_file, 'w', encoding='utf-8') as f:
+                f.write(combined_content)
+
+            cmd = ['claude', 'code', '--print', '--output-format', 'json', text_file]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             
             # Cleanup
             os.remove(text_file)
             
             if result.returncode == 0:
-                data = json.loads(result.stdout.strip())
-                if data.get('transactions_found') and data.get('transactions'):
+                # Try to extract JSON from Claude's response
+                data = self._extract_json_from_response(result.stdout)
+                if data and data.get('transactions_found') and data.get('transactions'):
                     transactions = []
                     for txn in data['transactions']:
                         # Convert Claude response to expected format
@@ -223,35 +234,47 @@ class GenericUtil:
                 f.write(f"Time: {email.get('time', '')}\n")
                 f.write(f"Body: {email.get('message', '')}\n")
 
-            prompt = '''Extract transaction data from this banking email. Return ONLY valid JSON:
-{
-    "transaction_found": true/false,
-    "transaction_date": "YYYY-MM-DD",
-    "amount": "0.00",
-    "merchant": "merchant name",
-    "description": "transaction description"
-}'''
+            prompt = '''You are a data extraction tool. Extract transaction information from this banking email and respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
-            cmd = ['claude', 'code', prompt]
-            with open(email_file, 'r') as f:
-                result = subprocess.run(cmd, stdin=f, capture_output=True, text=True, timeout=60)
+Required JSON format:
+{
+    "transaction_found": true,
+    "transaction_date": "2025-09-25",
+    "amount": "2500.00",
+    "merchant": "AMAZON",
+    "description": "AMAZON transaction"
+}
+
+If no transaction is found, return: {"transaction_found": false}
+
+Email content:'''
+
+            # Combine prompt and email content in a single file
+            combined_content = prompt + "\n\n" + f"Subject: {email.get('subject', '')}\nTime: {email.get('time', '')}\nBody: {email.get('message', '')}"
+            
+            with open(email_file, 'w', encoding='utf-8') as f:
+                f.write(combined_content)
+
+            cmd = ['claude', 'code', '--print', '--output-format', 'json', email_file]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             
             os.remove(email_file)
             
             if result.returncode == 0:
-                data = json.loads(result.stdout.strip())
-                if data.get('transaction_found'):
+                # Try to extract JSON from Claude's response
+                json_data = self._extract_json_from_response(result.stdout)
+                if json_data and json_data.get('transaction_found'):
                     # Convert Claude response to expected format
-                    amount = str(data['amount']).replace(',', '')
+                    amount = str(json_data['amount']).replace(',', '')
                     referenceID = GenericUtil().generate_reference_id(
-                        data['transaction_date'], 
-                        data['description'], 
+                        json_data['transaction_date'], 
+                        json_data['description'], 
                         float(amount)
                     )
                     return {
                         'reference': referenceID,
-                        'date': data['transaction_date'],
-                        'description': data['description'],
+                        'date': json_data['transaction_date'],
+                        'description': json_data['description'],
                         'amount': amount,
                         'processed_via': 'claude_code'
                     }
@@ -259,6 +282,54 @@ class GenericUtil:
         except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
             self.logger.error(f"Claude Code extraction failed: {str(e)}")
             return None
+
+    def _extract_json_from_response(self, response_text):
+        """Extract JSON from Claude's response, handling conversational text"""
+        try:
+            # First, try to parse the entire response as JSON
+            return json.loads(response_text.strip())
+        except json.JSONDecodeError:
+            pass
+        
+        # If that fails, look for JSON within the text
+        import re
+        
+        # Look for JSON object patterns
+        json_patterns = [
+            r'\{[^{}]*"transaction_found"[^{}]*\}',  # Simple JSON object
+            r'\{(?:[^{}]|{[^{}]*})*\}',  # More complex nested JSON
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, response_text, re.DOTALL)
+            for match in matches:
+                try:
+                    data = json.loads(match)
+                    if 'transaction_found' in data:
+                        return data
+                except json.JSONDecodeError:
+                    continue
+        
+        # If no JSON found, try to extract data manually from conversational response
+        if 'Amount:' in response_text and 'Merchant:' in response_text:
+            try:
+                amount_match = re.search(r'Amount:\s*Rs\.?\s*([\d,]+(?:\.\d+)?)', response_text)
+                merchant_match = re.search(r'Merchant:\s*([^\n]+)', response_text)
+                date_match = re.search(r'Date:\s*(\d{2}-\d{2}-\d{4})', response_text)
+                
+                if amount_match and merchant_match and date_match:
+                    return {
+                        "transaction_found": True,
+                        "transaction_date": date_match.group(1),
+                        "amount": amount_match.group(1).replace(',', ''),
+                        "merchant": merchant_match.group(1).strip(),
+                        "description": f"{merchant_match.group(1).strip()} transaction"
+                    }
+            except Exception:
+                pass
+        
+        self.logger.warning(f"Could not extract JSON from Claude response: {response_text[:200]}...")
+        return None
 
     @staticmethod
     def emptyTemp():
