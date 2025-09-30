@@ -159,7 +159,7 @@ class TransactionService(BaseService):
         conflicts = 0
         if not jobsOnly:
             # PRIMARY: Use EmailClassifier for intelligent email detection
-            all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+            all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
             banking_emails = EmailClassifier().get_banking_emails_from_all(all_raw_emails)
             
             # Group emails by bank for processing
@@ -186,11 +186,11 @@ class TransactionService(BaseService):
             self.logger.info(f"Finished reading mail with intelligent detection. Inserted {totalMails} transactions.")
         else:
             # For jobsOnly mode, still need to fetch all emails
-            all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+            all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
         
         # Integrate job application extraction (reuse emails if already fetched)
         if 'all_raw_emails' not in locals():
-            all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo)
+            all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
             
         emailsCleaned = []
         for mail in all_raw_emails:
@@ -316,7 +316,7 @@ class TransactionService(BaseService):
         driveToken = self.fetchDriveTokenForUser(userID)
         
         # PRIMARY: Use EmailClassifier for intelligent statement email detection
-        all_raw_emails = self.gmailService.findAllEmailsInInterval(userID, gmailToken, dateFrom, dateTo)
+        all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, gmailToken, dateFrom, dateTo))
         classification_results = EmailClassifier().classify_banking_emails(all_raw_emails)
         statement_emails = classification_results['statement_emails']
         
