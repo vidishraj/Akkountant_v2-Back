@@ -49,10 +49,10 @@ class GmailServiceUtils:
             userId="me", 
             id=email_id,
             format='metadata',
-            metadataHeaders=['subject', 'from']
+            metadataHeaders=['subject', 'from', 'message-id']
         ).execute()
 
-        # Get subject and sender from headers
+        # Get subject, sender, and message-id from headers
         headers = email_data.get('payload', {}).get('headers', [])
         subject = next(
             (header['value'] for header in headers
@@ -63,6 +63,11 @@ class GmailServiceUtils:
             (header['value'] for header in headers
              if header['name'].lower() == 'from'),
             ''
+        )
+        message_id = next(
+            (header['value'] for header in headers
+             if header['name'].lower() == 'message-id'),
+            email_id  # Fallback to Gmail ID if Message-Id header not found
         )
 
         # Get snippet instead of full body
@@ -79,7 +84,7 @@ class GmailServiceUtils:
             'subject': subject,
             'sender': sender,  # Add sender information
             'message': snippet,  # Using snippet instead of full body
-            'message_id': email_id  # Include the Gmail message ID
+            'message_id': message_id  # Use actual Message-Id header for uniqueness
         }
 
     def iter_emails_in_interval(self, userId: str, token: str, dateFrom: str, dateTo: str) -> Iterator[Dict[str, Any]]:

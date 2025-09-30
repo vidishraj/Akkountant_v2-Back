@@ -23,7 +23,7 @@ class Transactions(Base):
     bank = Column(String(25), nullable=False)
     user = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     processed_via = Column(Enum(ProcessingMethod), default=ProcessingMethod.PATTERN_MATCH)
-    gmail_message_id = Column(String(255), nullable=True, unique=True)  # Gmail message ID for email-based transactions (unique)
+    gmail_message_id = Column(String(500), nullable=True, unique=True)  # Email Message-Id header for unique identification
 
     file_details = relationship('FileDetails', back_populates='transactions')
     user_relationship = relationship('User', back_populates='transactions')
