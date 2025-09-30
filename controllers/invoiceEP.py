@@ -47,11 +47,37 @@ class InvoiceController:
         try:
             page = int(request.args.get("page", 1))
             limit = int(request.args.get("limit", 20))
+            
+            # Filtering parameters
+            status = request.args.get("status")
+            
+            # Sorting parameters
+            sort_by = request.args.get("sort_by", "created_at")  # Default sort by created_at
+            sort_order = request.args.get("sort_order", "desc")  # Default descending
+            
+            # Search parameter
+            search = request.args.get("search")
 
             if page < 1 or limit < 1 or limit > 100:
                 return jsonify({"error": "Invalid pagination parameters"}), 400
+                
+            # Validate sort_by parameter
+            valid_sort_fields = ["issue_date", "total", "status", "to_name", "created_at"]
+            if sort_by not in valid_sort_fields:
+                return jsonify({"error": f"Invalid sort_by parameter. Valid options: {', '.join(valid_sort_fields)}"}), 400
+                
+            # Validate sort_order parameter
+            if sort_order not in ["asc", "desc"]:
+                return jsonify({"error": "Invalid sort_order parameter. Valid options: asc, desc"}), 400
 
-            result = self.invoice_service.get_invoices(page, limit)
+            result = self.invoice_service.get_invoices(
+                page=page, 
+                limit=limit, 
+                status=status, 
+                sort_by=sort_by, 
+                sort_order=sort_order, 
+                search=search
+            )
 
             response = {
                 "invoices": result["invoices"],  # Already formatted in service

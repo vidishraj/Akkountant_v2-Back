@@ -18,11 +18,16 @@ class EmailClassifier:
             self.initialized = True
 
     def _init_patterns(self):
+        # Map domains to specific bank enum values
         self.bank_domains = {
-            'HDFC': ['hdfcbank.net', 'hdfcbank.com'],
-            'ICICI': ['icicibank.com', 'icicibank.co.in'],
-            'YES': ['yesbank.in', 'yesbank.co.in'],
-            'BOI': ['bankofindia.co.in', 'bankofindia.com']
+            'hdfcbank.net': ['Millenia_Credit', 'HDFC_DEBIT'],  # HDFC domains map to multiple enum values
+            'hdfcbank.com': ['Millenia_Credit', 'HDFC_DEBIT'],
+            'icicibank.com': ['ICICI_AMAZON_PAY'],
+            'icicibank.co.in': ['ICICI_AMAZON_PAY'],
+            'yesbank.in': ['YES_BANK_DEBIT', 'YES_BANK_ACE'],
+            'yesbank.co.in': ['YES_BANK_DEBIT', 'YES_BANK_ACE'],
+            'bankofindia.co.in': ['BOI'],
+            'bankofindia.com': ['BOI']
         }
 
         self.transaction_alert_patterns = {
@@ -89,7 +94,7 @@ class EmailClassifier:
             
             if should_process:
                 email['classification'] = email_type
-                email['bank'] = self._get_bank_from_sender(email.get('sender', ''))
+                email['bank'] = self._get_bank_from_sender(email.get('sender', ''), email_type)
                 
                 if email_type == 'transaction':
                     results['transaction_emails'].append(email)
@@ -131,8 +136,8 @@ class EmailClassifier:
         return False, None, "No matching banking patterns"
 
     def _is_banking_email(self, sender: str) -> bool:
-        for bank, domains in self.bank_domains.items():
-            if any(domain in sender for domain in domains):
+        for domain in self.bank_domains.keys():
+            if domain in sender:
                 return True
         return False
 
@@ -189,12 +194,27 @@ class EmailClassifier:
         self.logger.debug(f"Transaction score: {score} for subject: {subject[:50]}")
         return score >= 4
 
-    def _get_bank_from_sender(self, sender: str) -> str:
+    def _get_bank_from_sender(self, sender: str, email_type: str = 'transaction') -> str:
         sender_lower = sender.lower()
         
-        for bank, domains in self.bank_domains.items():
-            if any(domain in sender_lower for domain in domains):
-                return bank
+        for domain, bank_enums in self.bank_domains.items():
+            if domain in sender_lower:
+                # Choose the appropriate enum based on sender and email type
+                if 'hdfcbank' in domain:
+                    # For HDFC, check the sender to determine if it's credit or debit
+                    if 'credit' in sender_lower or 'millennia' in sender_lower or 'cards' in sender_lower:
+                        return 'Millenia_Credit'
+                    else:
+                        return 'HDFC_DEBIT'
+                elif 'yesbank' in domain:
+                    # For YES Bank, check if it's ACE credit card or regular debit
+                    if 'ace' in sender_lower or 'credit' in sender_lower:
+                        return 'YES_BANK_ACE'
+                    else:
+                        return 'YES_BANK_DEBIT'
+                else:
+                    # For other banks, return the first (and usually only) enum value
+                    return bank_enums[0]
                 
         return 'UNKNOWN'
 
@@ -204,15 +224,32 @@ class EmailClassifier:
         Primary replacement for pattern-based Gmail queries
         """
         banking_emails = []
+        banking_senders = []
+        excluded_count = 0
         
         for email in all_emails:
             sender = email.get('sender', '').lower()
+            subject = email.get('subject', '')
+            
             if self._is_banking_email(sender):
+                banking_senders.append(sender)
                 should_process, email_type, reason = self._classify_single_email(email)
                 if should_process:
                     email['classification'] = email_type
-                    email['bank'] = self._get_bank_from_sender(sender)
+                    bank_enum = self._get_bank_from_sender(sender, email_type)
+                    email['bank'] = bank_enum
                     banking_emails.append(email)
+                    self.logger.debug(f"✅ Banking email accepted: {subject[:50]} from {sender} -> {bank_enum}")
+                else:
+                    excluded_count += 1
+                    self.logger.debug(f"❌ Banking email excluded: {subject[:50]} from {sender} - {reason}")
+            else:
+                # Log a few non-banking senders for debugging
+                if len(banking_senders) < 10:  # Only log first few to avoid spam
+                    self.logger.debug(f"🚫 Non-banking sender: {sender}")
 
         self.logger.info(f"Found {len(banking_emails)} banking emails out of {len(all_emails)} total emails")
+        self.logger.info(f"Banking senders found: {len(banking_senders)}, excluded after classification: {excluded_count}")
+        if banking_senders:
+            self.logger.debug(f"Banking senders: {list(set(banking_senders))}")
         return banking_emails

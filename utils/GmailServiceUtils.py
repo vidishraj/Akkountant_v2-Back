@@ -49,13 +49,19 @@ class GmailServiceUtils:
             userId="me", 
             id=email_id,
             format='metadata',
-            metadataHeaders=['subject']
+            metadataHeaders=['subject', 'from']
         ).execute()
 
-        # Get subject from headers
+        # Get subject and sender from headers
+        headers = email_data.get('payload', {}).get('headers', [])
         subject = next(
-            (header['value'] for header in email_data.get('payload', {}).get('headers', [])
+            (header['value'] for header in headers
              if header['name'].lower() == 'subject'),
+            ''
+        )
+        sender = next(
+            (header['value'] for header in headers
+             if header['name'].lower() == 'from'),
             ''
         )
 
@@ -71,6 +77,7 @@ class GmailServiceUtils:
         return {
             'time': email_time,
             'subject': subject,
+            'sender': sender,  # Add sender information
             'message': snippet,  # Using snippet instead of full body
             'message_id': email_id  # Include the Gmail message ID
         }

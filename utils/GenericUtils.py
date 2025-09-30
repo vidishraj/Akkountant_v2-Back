@@ -262,7 +262,7 @@ Email content:'''
                         'date': json_data['transaction_date'],
                         'description': json_data['description'],
                         'amount': amount,
-                        'processed_via': 'claude_code'
+                        'processed_via': 'CLAUDE_CODE'
                     }
             return None
         except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:

@@ -159,6 +159,14 @@ class TransactionService(BaseService):
         
         # PRIMARY: Use EmailClassifier for intelligent email detection
         all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
+        self.logger.info(f"Fetched {len(all_raw_emails)} emails from Gmail for period {dateFrom} to {dateTo}")
+        
+        # Debug: Log first few email senders and subjects
+        for i, email in enumerate(all_raw_emails[:5]):
+            sender = email.get('sender', 'No sender')
+            subject = email.get('subject', 'No subject')
+            self.logger.debug(f"Email {i+1}: From '{sender}' Subject '{subject[:50]}'")
+        
         banking_emails = EmailClassifier().get_banking_emails_from_all(all_raw_emails)
         
         # Group emails by bank for processing
@@ -180,18 +188,27 @@ class TransactionService(BaseService):
             conflicts += len(bank_conflicts)
             
             # Insert the processed transactions in the database
-            self.insertTransactions(cleanedMails, bank, userID, bank_conflicts, TransactionTypeEnum.Email.value)
+            self.insertTransactions(cleanedMails, bank, userID, bank_conflicts, TransactionTypeEnum.Email.value, fileId=None, source_emails=bank_emails)
             
         self.logger.info(f"Finished reading mail with intelligent detection. Inserted {totalMails} transactions.")
         return totalMails, conflicts
+    
 
-    def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None):
+
+    def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None, source_emails=None):
         integrityErrors = 0
-        for transaction in transactions:
+        
+        for i, transaction in enumerate(transactions):
             date = self.dateTimeUtil.convert_to_sql_datetime(transaction['date'], bank)
             
             # Determine processing method
             processing_method = ProcessingMethod.CLAUDE_CODE if transaction.get('processed_via') == 'CLAUDE_CODE' else ProcessingMethod.PATTERN_MATCH
+            
+            # For email-based transactions, get the Gmail message ID
+            # Since one email = one transaction, we map them 1:1
+            gmail_message_id = None
+            if source_emails and i < len(source_emails) and source == TransactionTypeEnum.Email.value:
+                gmail_message_id = source_emails[i].get('message_id')
             
             transaction_obj = Transactions(
                 referenceID=transaction['reference'],
@@ -203,7 +220,8 @@ class TransactionService(BaseService):
                 bank=bank,
                 source=source,
                 user=userId,
-                processed_via=processing_method
+                processed_via=processing_method,
+                gmail_message_id=gmail_message_id  # Only set for email transactions
             )
             try:
                 if isinstance(self.db, dict):
@@ -214,7 +232,11 @@ class TransactionService(BaseService):
                     self.db.session.add(transaction_obj)
                     self.db.session.commit()
             except IntegrityError as e:
-                self.logger.warning(f"Duplicate entry error occurred: {e.__cause__}")
+                error_msg = str(e)
+                if 'gmail_message_id' in error_msg and gmail_message_id:
+                    self.logger.info(f"Skipping duplicate email transaction (Gmail ID: {gmail_message_id})")
+                else:
+                    self.logger.warning(f"Duplicate entry error occurred: {e.__cause__}")
                 self.db.session.rollback()
                 integrityErrors += 1
 

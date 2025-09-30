@@ -1,6 +1,6 @@
 from flask import g
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, asc, or_
 from sqlalchemy.orm import joinedload
 from models.freelance_management import Invoice, InvoiceItem, Customer, InvoicePayment, CurrencyEnum, InvoiceCustomField
 from services.Base_Service import BaseService
@@ -92,7 +92,7 @@ class InvoiceService(BaseService):
             self.logger.error(f"Error creating invoice: {str(e)}")
             raise
 
-    def get_invoices(self, page=1, limit=20):
+    def get_invoices(self, page=1, limit=20, status=None, sort_by="created_at", sort_order="desc", search=None):
         try:
             user_id = g.get('firebase_id')
             if not user_id:
@@ -103,7 +103,32 @@ class InvoiceService(BaseService):
             query = self.db.session.query(Invoice).options(
                 joinedload(Invoice.payments),
                 joinedload(Invoice.custom_fields)
-            ).filter_by(user_id=user_id).order_by(desc(Invoice.created_at))
+            ).filter_by(user_id=user_id)
+            
+            # Apply status filter
+            if status:
+                query = query.filter(Invoice.status == status)
+            
+            # Apply search filter (searches across multiple fields)
+            if search:
+                search_term = f"%{search}%"
+                query = query.filter(
+                    or_(
+                        Invoice.invoice_number.ilike(search_term),
+                        Invoice.project_name.ilike(search_term),
+                        Invoice.to_name.ilike(search_term),
+                        Invoice.to_company.ilike(search_term),
+                        Invoice.notes.ilike(search_term)
+                    )
+                )
+            
+            # Apply sorting
+            sort_column = getattr(Invoice, sort_by, Invoice.created_at)
+            if sort_order == "asc":
+                query = query.order_by(asc(sort_column))
+            else:
+                query = query.order_by(desc(sort_column))
+            
             total_count = query.count()
             invoices = query.offset(offset).limit(limit).all()
 
