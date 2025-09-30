@@ -240,38 +240,62 @@ class SetIBJAGoldRate(BaseTask):
     def extract_rates_from_text(self, text):
         """
         Extract gold and silver rates from PDF text content
-        Updated to handle new PDF format where dates and rates are on separate lines
+        Updated to handle PDF format where dates and rates can be on the same line
         """
         try:
             lines = text.split('\n')
             
             # Find the most recent date entry (first non-weekend/holiday entry)
             for i, line in enumerate(lines):
+                line_strip = line.strip()
                 # Look for date pattern like "29-Sep-25"
-                date_match = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{2})', line.strip())
+                date_match = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{2})', line_strip)
                 if date_match:
                     date_str = date_match.group(1)
                     
-                    # Check if next few lines contain weekend/holiday markers
-                    next_lines = lines[i+1:i+5] if i+1 < len(lines) else []
-                    if any(skip_word in ' '.join(next_lines).upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
+                    # Check if this line contains weekend/holiday markers
+                    if any(skip_word in line_strip.upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
                         continue
                     
-                    # Look for rates in the next lines after the date
-                    # The new format has rates on separate lines after the date
+                    # Method 1: Try to extract rates from the same line as the date
+                    # Split the line and look for numeric values after the date
+                    line_parts = line_strip.split()
                     rates = []
                     
-                    # Collect all numeric values from the next several lines
-                    for j in range(i+1, min(i+15, len(lines))):  # Look in next 14 lines
-                        line_text = lines[j].strip()
-                        if line_text and line_text.isdigit():
-                            rates.append(line_text)
-                        elif line_text and any(skip in line_text.upper() for skip in ['SUN', 'SAT', 'HOLIDAY']):
-                            break  # Stop if we hit weekend/holiday
-                        elif re.match(r'\d{1,2}-[A-Za-z]{3}-\d{2}', line_text):
-                            break  # Stop if we hit another date
+                    # Find the date part index and get all numeric values after it
+                    date_index = -1
+                    for i, part in enumerate(line_parts):
+                        if date_match.group(1) in part:
+                            date_index = i
+                            break
                     
-                    # We need at least 12 values (10 gold + 2 silver)  
+                    # Extract all numeric values after the date
+                    if date_index >= 0:
+                        for part in line_parts[date_index + 1:]:
+                            if part.isdigit() and len(part) >= 4:  # Filter out small numbers that aren't rates
+                                rates.append(part)
+                    
+                    # Method 2: If not enough rates on same line, try next few lines
+                    if len(rates) < 12:
+                        self.logger.info(f"Only found {len(rates)} rates on same line, trying next lines")
+                        for j in range(i + 1, min(i + 15, len(lines))):
+                            next_line = lines[j].strip()
+                            
+                            # Stop if we hit weekend/holiday or another date
+                            if any(skip_word in next_line.upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
+                                break
+                            if re.match(r'\d{1,2}-[A-Za-z]{3}-\d{2}', next_line):
+                                break
+                            
+                            # Extract numeric values
+                            if next_line and next_line.isdigit():
+                                rates.append(next_line)
+                            
+                            # Stop when we have enough rates
+                            if len(rates) >= 12:
+                                break
+                    
+                    # If we found enough rates (either same line or next lines), use them
                     if len(rates) >= 12:
                         # Convert to integers
                         rates = [int(r) for r in rates[:12]]
