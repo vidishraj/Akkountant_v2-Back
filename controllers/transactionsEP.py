@@ -108,9 +108,10 @@ class TransactionController:
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         bank = request.args.get('bank')
-        self.logger.info(f"Reading statements for user {userId}")
+        algorithm = request.args.get('algorithm', 'claude')  # Default to claude, can be 'regex' or 'claude'
+        self.logger.info(f"Reading statements for user {userId} using {algorithm} algorithm")
         successCount, errorCount = \
-            self.TransactionService.readStatementsFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, bank=bank)
+            self.TransactionService.readStatementsFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, bank=bank, algorithm=algorithm)
         return jsonify({"Message": {
             "read": successCount,
             "conflicts": errorCount

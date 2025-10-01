@@ -1,4 +1,5 @@
 import os
+import shutil
 
 from flask_sqlalchemy.session import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -35,8 +36,25 @@ class TransactionService(BaseService):
 
     def fetchTransactions(self, page: int, filters: dict, page_size: int = 100):
         query = self.db.session.query(Transactions)
+        
+        # Determine if we should apply the default Claude filter
+        apply_claude_default = True
+        if filters and 'processed_via' in filters:
+            processed_via = filters.get('processed_via')
+            if processed_via == 'ALL':
+                apply_claude_default = False
+            elif processed_via == 'CLAUDE_CODE':
+                query = query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
+                apply_claude_default = False
+            elif processed_via == 'PATTERN_MATCH':
+                query = query.filter(Transactions.processed_via == ProcessingMethod.PATTERN_MATCH)
+                apply_claude_default = False
+        
+        # Apply default Claude filter if no explicit processing method filter
+        if apply_claude_default:
+            query = query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
 
-        # Apply filters if they are provided
+        # Apply other filters if they are provided
         if filters:
             if date_range := filters.get('dateRange'):
                 date_from = date_range.get('dateFrom')
@@ -54,6 +72,16 @@ class TransactionService(BaseService):
 
         # Get the total count before pagination by creating a new count query
         total_count_query = self.db.session.query(func.count(Transactions.referenceID))
+        
+        # Apply the same processing method filter to count query
+        if apply_claude_default:
+            total_count_query = total_count_query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
+        elif filters and 'processed_via' in filters:
+            processed_via = filters.get('processed_via')
+            if processed_via == 'CLAUDE_CODE':
+                total_count_query = total_count_query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
+            elif processed_via == 'PATTERN_MATCH':
+                total_count_query = total_count_query.filter(Transactions.processed_via == ProcessingMethod.PATTERN_MATCH)
 
         # Reapply the same filters for the count query
         if filters:
@@ -78,6 +106,16 @@ class TransactionService(BaseService):
             func.sum(case((Transactions.amount < 0, Transactions.amount), else_=0)).label("credit_sum"),
             func.sum(case((Transactions.amount > 0, Transactions.amount), else_=0)).label("debit_sum"),
         )
+        
+        # Apply the same processing method filter to sum query
+        if apply_claude_default:
+            sum_query = sum_query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
+        elif filters and 'processed_via' in filters:
+            processed_via = filters.get('processed_via')
+            if processed_via == 'CLAUDE_CODE':
+                sum_query = sum_query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
+            elif processed_via == 'PATTERN_MATCH':
+                sum_query = sum_query.filter(Transactions.processed_via == ProcessingMethod.PATTERN_MATCH)
 
         # Reapply the same filters for the sum query
         if filters:
@@ -296,7 +334,7 @@ class TransactionService(BaseService):
             'client_secret': userToken.client_secret,
         }
 
-    def readStatementsFromMail(self, dateTo, dateFrom, userID, bank):
+    def readStatementsFromMail(self, dateTo, dateFrom, userID, bank, algorithm='claude'):
         """
         We download all the files first. Then individually process and upload them. Current approach is to upload the
         file first. If there is a failure during processing and insertion, then we delete the file from googleDrive.
@@ -344,33 +382,71 @@ class TransactionService(BaseService):
             self.logger.info(f"Processing bank {bank_name}")
             password = self.db.session.query(StatementPasswords).filter_by(user=userID).filter_by(bank=bank_name).first()
             
-            # HYBRID APPROACH: Use EmailClassifier for detection, existing download for PDFs
-            # Future enhancement: Create Claude-aware PDF processing
             if len(bank_statement_emails) > 0:
                 self.logger.info(f"EmailClassifier found {len(bank_statement_emails)} statement emails for {bank_name}")
+                
+                # Filter out already processed statement emails by Message-ID
+                unprocessed_emails = []
+                for email in bank_statement_emails:
+                    email_message_id = email.get('message_id')
+                    if email_message_id:
+                        existing_file = self.db.session.query(FileDetails).filter_by(gmail_message_id=email_message_id).first()
+                        if existing_file:
+                            self.logger.info(f"Skipping already processed statement email (Message-ID: {email_message_id[:20]}...)")
+                            continue
+                    unprocessed_emails.append(email)
+                
+                if not unprocessed_emails:
+                    self.logger.info(f"All statement emails for {bank_name} already processed")
+                    continue
+                    
+                self.logger.info(f"Processing {len(unprocessed_emails)} new statement emails for {bank_name}")
                 # Download files using existing method (still works, just less precise)
                 filepaths = self.gmailService.downloadFilesInRange(userID, gmailToken, password, bank_name, dateTo, dateFrom)
             else:
                 self.logger.info(f"No statement emails found for {bank_name}")
                 continue
 
-            for path in filepaths:
+            # Map filepaths to emails by index or other logic
+            for i, path in enumerate(filepaths):
                 self.logger.info(f"Processing file {path}")
                 
-                # PRIMARY: Try Claude Code PDF analysis first
-                pdf_path = os.getcwd() + '/tmp/' + path
-                transactions = self.genericUtil._try_claude_pdf_extraction(pdf_path, bank_name, password.password_hash if password else None)
+                # Get the corresponding email Message-ID (if available)
+                # Note: This assumes filepaths[i] corresponds to unprocessed_emails[i]
+                # The download logic should maintain this correspondence
+                email_message_id = None
+                if i < len(unprocessed_emails):
+                    email_message_id = unprocessed_emails[i].get('message_id')
                 
-                if transactions:
-                    self.logger.info(f"Claude Code successfully parsed {len(transactions)} transactions from PDF")
+                pdf_path = os.getcwd() + '/tmp/' + path
+                transactions = []
+                
+                if algorithm == 'claude':
+                    # Try Claude Code PDF analysis first
+                    transactions = self.genericUtil._try_claude_pdf_extraction(pdf_path, bank_name, password.password_hash if password else None)
+                    
+                    if transactions:
+                        self.logger.info(f"Claude Code successfully parsed {len(transactions)} transactions from PDF")
+                        # Save Claude-analyzed statement to permanent directory
+                        self._save_claude_statement(pdf_path, bank_name, userID, email_message_id or path)
+                    else:
+                        # FALLBACK: Use existing tabula-based parser
+                        self.logger.info("Claude PDF parsing failed, falling back to tabula parser")
+                        parserInstance = self.getParserInstanceByBank(bank_name)
+                        parserInstance.setPath(pdf_path)
+                        parserInstance.setPassword(password.password_hash)
+                        transactions = parserInstance.parseFile()
+                        # Mark transactions as processed via pattern match (legacy method)
+                        for txn in transactions:
+                            txn['processed_via'] = 'PATTERN_MATCH'
                 else:
-                    # FALLBACK: Use existing tabula-based parser
-                    self.logger.info("Claude PDF parsing failed, falling back to tabula parser")
+                    # Use regex/tabula parser only
+                    self.logger.info("Using tabula parser for PDF processing")
                     parserInstance = self.getParserInstanceByBank(bank_name)
                     parserInstance.setPath(pdf_path)
                     parserInstance.setPassword(password.password_hash)
                     transactions = parserInstance.parseFile()
-                    # Mark transactions as processed via pattern match (legacy method)
+                    # Mark transactions as processed via pattern match
                     for txn in transactions:
                         txn['processed_via'] = 'PATTERN_MATCH'
                 
@@ -380,10 +456,13 @@ class TransactionService(BaseService):
                     # Get fileName
                     month = self.dateTimeUtil.getMonthYearRange(transactions[0]['date'], transactions[-1]['date'], bank_name)
                     fileName = f"{bank_name}_{month}.pdf"
-                    # Upload to Drive
-                    fileId = self.driveService.uploadFileToDrive(
-                        fileName, f"Akkountant/{bank_name}/", userID, driveToken, os.getcwd() + '/tmp/' + path)
-                    self.insertFileDetails(fileId, fileName, len(transactions), bank_name, userID, path)
+                    
+                    # Generate a local fileId
+                    fileId = f"local_{userID}_{bank_name}_{month}_{i}"
+                    
+                    # Insert file details with email Message-ID
+                    self.insertFileDetails(fileId, fileName, len(transactions), bank_name, userID, path, email_message_id)
+                    
                     # Insert transactions
                     try:
                         integrityErrors = self.insertTransactions(transactions, bank_name, userID, [],
@@ -391,26 +470,42 @@ class TransactionService(BaseService):
                                                                   fileId)
                         totalIntegrityErrors += integrityErrors
                         if integrityErrors == len(transactions):
-                            # No transaction were inserted, delete the file
+                            # No transaction were inserted, delete the file record
                             self.deleteFileDetails(fileId)
-                            self.driveService.deleteFile(fileId, userID, driveToken)
                         elif integrityErrors > 0:
                             self.updateStatementCount(fileId, len(transactions) - integrityErrors)
                     except Exception as ex:
                         self.logger.error(f"Error occurred while inserting transaction. Possibly EOF {ex}")
-                        # Delete file from drive if uploaded
-                        if fileId is not None:
-                            self.driveService.deleteFile(fileId, userID, driveToken)
-                            self.deleteFileDetails(fileId)
+                        # Delete file details if error occurred
+                        self.deleteFileDetails(fileId)
 
         # Delete the file from temp
         self.genericUtil.emptyTemp()
 
         self.logger.info(f"Finished reading statements with intelligent detection. Inserted {totalTransactions} transactions")
         return totalTransactions, totalIntegrityErrors
+    
+    def _save_claude_statement(self, pdf_path, bank_name, userID, identifier):
+        """Save Claude-analyzed statement to permanent directory"""
+        try:
+            # Create directory structure: claude_statements/userID/bank_name/
+            save_dir = os.path.join(os.getcwd(), "claude_statements", userID, bank_name)
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Use identifier (message ID or filename) as unique filename
+            safe_identifier = identifier.replace('/', '_').replace('<', '').replace('>', '') if identifier else 'unknown'
+            filename = f"{safe_identifier}.pdf"
+            save_path = os.path.join(save_dir, filename)
+            
+            # Copy file to permanent location
+            shutil.copy2(pdf_path, save_path)
+            self.logger.info(f"Saved Claude-analyzed statement to {save_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save Claude statement: {str(e)}")
 
     def insertFileDetails(self, fileId, fileName, statementCount,
-                          bank, user, path):
+                          bank, user, path, gmail_message_id=None):
         fileDetails = FileDetails(
             fileID=fileId,
             uploadDate=self.dateTimeUtil.getCurrentDatetimeSqlFormat(),
@@ -418,7 +513,8 @@ class TransactionService(BaseService):
             fileSize=self.genericUtil.getFileSize(path),
             statementCount=statementCount,
             bank=bank,
-            user=user
+            user=user,
+            gmail_message_id=gmail_message_id
         )
         try:
             if isinstance(self.db, dict):

@@ -14,6 +14,7 @@ class FileDetails(Base):
     statementCount = Column(Integer, nullable=False)
     bank = Column(String(100), nullable=False)
     user = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
+    gmail_message_id = Column(String(500), nullable=True, unique=True)  # Email Message-Id header for statement emails
 
     transactions = relationship('Transactions', back_populates='file_details')
     user_relationship = relationship('User', back_populates='file_details')

@@ -69,7 +69,7 @@ class DateTimeUtil:
             raise ValueError(f"Date format of '{date_str}' is not recognized.")
 
     def convert_to_sql_datetime_date(self, date_str, bank):
-        # Try each format and return the correctly parsed datetime in SQL format
+        # Try each format and return the correctly parsed datetime object
         try:
             parsed_date = datetime.datetime.strptime(date_str, getattr(DateStatementEnum, bank).value)
             return parsed_date
@@ -77,7 +77,7 @@ class DateTimeUtil:
             possible_format = self.find_matching_format(date_str)
             if possible_format is not None:
                 parsed_date = datetime.datetime.strptime(date_str, possible_format)
-                return parsed_date.strftime("%Y-%m-%d %H:%M:%S")  # SQL datetime format
+                return parsed_date  # Return datetime object for consistency
             raise ValueError(f"Date format of '{date_str}' is not recognized.")
 
     def getMonthYearRange(self, date1, date2, bank) -> str:

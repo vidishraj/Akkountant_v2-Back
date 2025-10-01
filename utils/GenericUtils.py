@@ -131,13 +131,17 @@ class GenericUtil:
             # Step 3: Send extracted text to Claude
             prompt = f'''You are a data extraction tool. Analyze this bank statement text and extract ALL transactions. Respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
+IMPORTANT: 
+- For dates, use DD/MM/YYYY format (e.g., "25/09/2025")
+- For amounts, use positive values for debit transactions (money spent/outgoing) and negative values for credit transactions (money received/incoming)
+
 Required JSON format:
 {{
     "transactions_found": true,
     "bank_name": "{bank_type}",
     "transactions": [
         {{
-            "date": "2025-09-25",
+            "date": "25/09/2025",
             "description": "AMAZON PURCHASE",
             "amount": "2500.00",
             "type": "debit",
@@ -168,14 +172,19 @@ Bank statement text:'''
                     for txn in data['transactions']:
                         # Convert Claude response to expected format
                         amount = str(txn['amount']).replace(',', '')
-                        # Convert to negative for debits (following existing convention)
+                        # Ensure amount is positive for debits (money spent)
+                        # and negative for credits (money received/refunds)
                         if txn.get('type', '').lower() == 'debit':
-                            amount = f"-{amount}" if not amount.startswith('-') else amount
+                            # Remove any negative sign for debits - they should be positive
+                            amount = amount.lstrip('-')
+                        elif txn.get('type', '').lower() == 'credit':
+                            # Ensure credits are negative
+                            amount = f"-{amount.lstrip('-')}"
                         
                         referenceID = GenericUtil().generate_reference_id(
                             txn['date'], 
                             txn['description'], 
-                            float(amount.replace('-', ''))
+                            abs(float(amount))
                         )
                         
                         transactions.append({
@@ -236,13 +245,13 @@ Bank statement text:'''
         try:
             prompt = '''You are a data extraction tool. Extract transaction information from this banking email and respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
-IMPORTANT: For amount field, use negative values for credit transactions (money received/refunded) and positive values for debit transactions (money spent). This follows accounting conventions where credits reduce account balance and debits increase expenses.
+IMPORTANT: For amount field, use positive values for debit transactions (money spent/outgoing) and negative values for credit transactions (money received/incoming).
 
 Required JSON format:
 {
     "transaction_found": true,
     "transaction_date": "2025-09-25",
-    "amount": "-2500.00",
+    "amount": "2500.00",
     "merchant": "AMAZON",
     "description": "AMAZON transaction"
 }
@@ -274,7 +283,7 @@ Email content:'''
                     referenceID = GenericUtil().generate_reference_id(
                         json_data['transaction_date'], 
                         json_data['description'], 
-                        float(amount)
+                        abs(float(amount))
                     )
                     return {
                         'reference': referenceID,
