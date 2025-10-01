@@ -93,9 +93,10 @@ class TransactionController:
         userId = request.headers.get("X-Firebase-ID")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
-        self.logger.info(f"Reading email for user {userId}")
+        algorithm = request.args.get('algorithm', 'claude')  # Default to claude, can be 'regex' or 'claude'
+        self.logger.info(f"Reading email for user {userId} using {algorithm} algorithm")
         successCount, errorCount = \
-            self.TransactionService.readTransactionFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId)
+            self.TransactionService.readTransactionFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, algorithm=algorithm)
         return jsonify({"Message": {
             "read": successCount,
             "conflicts": errorCount

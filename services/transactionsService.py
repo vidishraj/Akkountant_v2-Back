@@ -148,7 +148,7 @@ class TransactionService(BaseService):
             "statement_dates": statement_dates,
         }
 
-    def readTransactionFromMail(self, dateTo, dateFrom, userID):
+    def readTransactionFromMail(self, dateTo, dateFrom, userID, algorithm='claude'):
         if dateTo is None or dateFrom is None:
             # If we are not reading for a specific range, read for current month
             dateFrom, dateTo = self.dateTimeUtil.currentMonthDatesForEmail()
@@ -183,7 +183,7 @@ class TransactionService(BaseService):
                 continue
                 
             # Process the items to get them all in the required format
-            cleanedMails, bank_conflicts = self.genericUtil.extractDetailsFromEmail(bank_emails, bank)
+            cleanedMails, bank_conflicts = self.genericUtil.extractDetailsFromEmail(bank_emails, bank, algorithm)
             totalMails += len(cleanedMails)
             conflicts += len(bank_conflicts)
             

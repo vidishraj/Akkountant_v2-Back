@@ -42,7 +42,7 @@ class GenericUtil:
 
         return reference_id
 
-    def extractDetailsFromEmail(self, emails, bankType):
+    def extractDetailsFromEmail(self, emails, bankType, algorithm='claude'):
         """
         Primary email processing method - Claude Code first, regex fallback
         """
@@ -50,25 +50,18 @@ class GenericUtil:
             cleanedMails = []
             conflicts = []
             
-            # Limit batch size to prevent worker timeouts
-            MAX_CLAUDE_ATTEMPTS = 5  # Max emails to process with Claude before falling back to regex only
-            claude_attempts = 0
-            
             for email in emails:
-                # PRIMARY: Try Claude Code processing first (with limits)
+                # Choose processing method based on algorithm parameter
                 claude_result = None
-                if claude_attempts < MAX_CLAUDE_ATTEMPTS:
-                    claude_attempts += 1
+                if algorithm == 'claude':
+                    # Try Claude Code processing
                     claude_result = self._try_claude_extraction(email, bankType)
                     if claude_result:
                         cleanedMails.append(claude_result)
                         self.logger.info(f"Claude Code successfully processed email from {bankType}")
                         continue
-                elif claude_attempts == MAX_CLAUDE_ATTEMPTS:
-                    self.logger.warning(f"Reached max Claude attempts ({MAX_CLAUDE_ATTEMPTS}), switching to regex-only for remaining emails")
-                    claude_attempts += 1  # Increment to prevent repeated warnings
                 
-                # FALLBACK: Try legacy regex pattern matching
+                # FALLBACK: Try legacy regex pattern matching (or use regex-only mode)
                 try:
                     pattern = EmailRegexEnum[bankType].value
                     matches = re.search(pattern, email['message'])
@@ -92,16 +85,23 @@ class GenericUtil:
                             'amount': amount,
                             'processed_via': 'PATTERN_MATCH'
                         })
-                        self.logger.info(f"Regex fallback successfully processed email from {bankType}")
+                        method_name = "Regex-only" if algorithm == 'regex' else "Regex fallback"
+                        self.logger.info(f"{method_name} successfully processed email from {bankType}")
                     else:
-                        # Both methods failed
+                        # Failed to process
                         conflicts.append(email['message'])
-                        self.logger.warning(f"Both Claude and regex failed for email: {email['message'][:100]}...")
+                        if algorithm == 'regex':
+                            self.logger.warning(f"Regex failed for email: {email['message'][:100]}...")
+                        else:
+                            self.logger.warning(f"Both Claude and regex failed for email: {email['message'][:100]}...")
                         
                 except KeyError:
-                    # No regex pattern exists for this bank type - rely on Claude only
+                    # No regex pattern exists for this bank type
                     conflicts.append(email['message'])
-                    self.logger.warning(f"No regex pattern for {bankType}, Claude failed: {email['message'][:100]}...")
+                    if algorithm == 'regex':
+                        self.logger.warning(f"No regex pattern for {bankType}: {email['message'][:100]}...")
+                    else:
+                        self.logger.warning(f"No regex pattern for {bankType}, Claude failed: {email['message'][:100]}...")
                     
             return cleanedMails, conflicts
             
@@ -236,11 +236,13 @@ Bank statement text:'''
         try:
             prompt = '''You are a data extraction tool. Extract transaction information from this banking email and respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
+IMPORTANT: For amount field, use negative values for credit transactions (money received/refunded) and positive values for debit transactions (money spent). This follows accounting conventions where credits reduce account balance and debits increase expenses.
+
 Required JSON format:
 {
     "transaction_found": true,
     "transaction_date": "2025-09-25",
-    "amount": "2500.00",
+    "amount": "-2500.00",
     "merchant": "AMAZON",
     "description": "AMAZON transaction"
 }
