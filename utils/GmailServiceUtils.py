@@ -106,13 +106,17 @@ class GmailServiceUtils:
             response = request.execute()
             messages = response.get('messages', [])
             
-            # OPTIMIZATION: Batch fetch email details
+            # OPTIMIZATION: Batch fetch email details using proper Gmail batch API
             if messages:
                 try:
-                    # Fetch batch of email details
-                    email_batch = self._get_batch_email_details(gmailService, messages)
-                    for email_details in email_batch:
-                        yield email_details
+                    # Process in batches of up to 100 (Gmail API limit)
+                    batch_size = min(100, len(messages))
+                    for i in range(0, len(messages), batch_size):
+                        batch_messages = messages[i:i + batch_size]
+                        email_batch = self._get_batch_email_details(gmailService, batch_messages)
+                        for email_details in email_batch:
+                            if email_details:  # Only yield valid results
+                                yield email_details
                 except Exception as e:
                     # Fallback to individual fetching if batch fails
                     self.logger.warning(f"Batch fetch failed, falling back to individual: {str(e)}")
@@ -121,7 +125,7 @@ class GmailServiceUtils:
                             email_details = self._get_email_details(gmailService, message['id'])
                             yield email_details
                         except Exception as e:
-                            print(f"Error processing email {message['id']}: {str(e)}")
+                            self.logger.warning(f"Error processing email {message['id']}: {str(e)}")
                             continue
 
             # Get the next page of emails
@@ -132,45 +136,41 @@ class GmailServiceUtils:
         return self.iter_emails_in_interval(userId, token, dateFrom, dateTo)
 
     def _get_batch_email_details(self, gmailService, messages):
-        """OPTIMIZATION: Batch fetch email details using Gmail batch API"""
+        """FIXED: Proper Gmail batch API implementation following official guide"""
         try:
             from googleapiclient.http import BatchHttpRequest
             
             email_results = []
-            batch_request = BatchHttpRequest()
             
-            def add_email_callback(request_id, response, exception):
+            def callback(request_id, response, exception):
                 if exception is not None:
-                    print(f"Error in batch request {request_id}: {exception}")
+                    self.logger.warning(f"Batch request {request_id} failed: {exception}")
                     return
                     
                 try:
+                    # Parse the response using existing method
                     email_details = self._parse_email_response(response)
-                    email_results.append(email_details)
+                    if email_details:
+                        email_results.append(email_details)
                 except Exception as e:
-                    print(f"Error parsing email response: {str(e)}")
+                    self.logger.warning(f"Error parsing batch response {request_id}: {str(e)}")
             
-            # Add up to 100 requests per batch (Gmail API limit)
-            batch_size = min(100, len(messages))
-            for i in range(0, len(messages), batch_size):
-                batch_messages = messages[i:i + batch_size]
-                email_results = []
-                batch_request = BatchHttpRequest()
-                
-                for message in batch_messages:
-                    request = gmailService.users().messages().get(
-                        userId='me', 
-                        id=message['id'],
-                        format='full'
-                    )
-                    batch_request.add(request, callback=add_email_callback)
-                
-                # Execute batch
-                batch_request.execute()
-                
-                # Yield results from this batch
-                for email_details in email_results:
-                    yield email_details
+            # Create batch request
+            batch = BatchHttpRequest(callback=callback)
+            
+            # Add individual requests to batch
+            for message in messages:
+                request = gmailService.users().messages().get(
+                    userId='me', 
+                    id=message['id'],
+                    format='full'  # Get full email content
+                )
+                batch.add(request)
+            
+            # Execute the batch
+            batch.execute(http=gmailService._http)
+            
+            return email_results
                     
         except Exception as e:
             # If batch processing fails, raise exception to trigger fallback
@@ -185,16 +185,23 @@ class GmailServiceUtils:
             # Extract email content
             body = self._extract_email_body(email_response.get('payload', {}))
             
+            # Get internal date and convert to readable format
+            internal_date = email_response.get('internalDate')
+            if internal_date:
+                email_time = datetime.utcfromtimestamp(int(internal_date) / 1000).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                email_time = header_dict.get('date', '')
+            
             return {
                 'message_id': header_dict.get('message-id', ''),
                 'subject': header_dict.get('subject', ''),
                 'sender': header_dict.get('from', ''),
-                'time': header_dict.get('date', ''),
-                'message': body,
+                'time': email_time,
+                'message': body or email_response.get('snippet', ''),  # Fallback to snippet if body extraction fails
                 'headers': header_dict
             }
         except Exception as e:
-            print(f"Error parsing email response: {str(e)}")
+            self.logger.warning(f"Error parsing email response: {str(e)}")
             return None
 
     def _extract_email_body(self, payload):
@@ -212,10 +219,14 @@ class GmailServiceUtils:
                         data = part.get('body', {}).get('data', '')
                         if data:
                             import base64
-                            from bs4 import BeautifulSoup
-                            html_content = base64.urlsafe_b64decode(data.encode('utf-8')).decode('utf-8')
-                            soup = BeautifulSoup(html_content, 'html.parser')
-                            return soup.get_text()
+                            try:
+                                from bs4 import BeautifulSoup
+                                html_content = base64.urlsafe_b64decode(data.encode('utf-8')).decode('utf-8')
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                return soup.get_text()
+                            except ImportError:
+                                # If BeautifulSoup not available, return raw HTML
+                                return base64.urlsafe_b64decode(data.encode('utf-8')).decode('utf-8')
             
             # Handle single part messages
             elif payload.get('mimeType') == 'text/plain':
@@ -226,5 +237,6 @@ class GmailServiceUtils:
                     
             return ""
         except Exception as e:
-            print(f"Error extracting email body: {str(e)}")
+            self.logger.warning(f"Error extracting email body: {str(e)}")
             return ""
+
