@@ -251,15 +251,33 @@ Bank statement text:'''
             
             # For --print mode, pass content via stdin
             cmd = ['claude', 'code', '--print', '--output-format', 'json']
-            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=120)
+            
+            # Set up environment for Claude command
+            env = os.environ.copy()
+            env['PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/bin:/usr/bin:/bin'
+            env['HOME'] = '/root'
+            env['NODE_PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/lib/node_modules'
+            
+            self.logger.info(f"Starting Claude PDF analysis for {bank_type} with {len(combined_content)} characters")
+            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=120, env=env)
             
             # Cleanup
             os.remove(text_file)
+            
+            # Log Claude results for debugging
+            self.logger.info(f"Claude PDF process return code: {result.returncode}")
+            if result.stdout:
+                self.logger.debug(f"Claude stdout (first 500 chars): {result.stdout[:500]}")
+            if result.stderr:
+                self.logger.warning(f"Claude stderr: {result.stderr}")
             
             if result.returncode == 0:
                 self.logger.info(f"Claude PDF processing completed successfully for {bank_type}")
                 # Try to extract JSON from Claude's response
                 data = self._extract_json_from_response(result.stdout)
+                
+                self.logger.debug(f"Extracted data from Claude: {data}")
+                
                 if data and data.get('transactions_found') and data.get('transactions'):
                     self.logger.info(f"Claude found {len(data.get('transactions', []))} transactions in PDF")
                     transactions = []
@@ -290,6 +308,13 @@ Bank statement text:'''
                         })
                     
                     return transactions
+                else:
+                    self.logger.warning(f"Claude PDF analysis completed but no transactions found. Response format: {type(data)}")
+                    if data:
+                        self.logger.debug(f"Claude response structure: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+            else:
+                self.logger.error(f"Claude PDF processing failed with return code {result.returncode}")
+                
             return None
         except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
             self.logger.error(f"Claude Code PDF extraction failed: {str(e)}")
@@ -328,6 +353,9 @@ Bank statement text:'''
                 return None
                 
             self.logger.info(f"Successfully extracted {len(full_text)} characters from PDF")
+            # Log a sample of the extracted text for debugging
+            sample_text = full_text[:500].replace('\n', ' ').strip()
+            self.logger.debug(f"PDF text sample: {sample_text}...")
             return full_text
             
         except Exception as e:
