@@ -121,6 +121,102 @@ class GmailServiceUtils:
 
     def findAllEmailsInInterval(self, userId: str, token: str, dateFrom: str, dateTo: str) -> Iterator[Dict[str, Any]]:
         """Memory-efficient version that returns an iterator instead of a list"""
-        return self.iter_emails_in_interval(userId, token, dateFrom, dateTo)
+        # OPTIMIZATION: Break large date ranges into 3-day chunks for better performance
+        date_chunks = self._split_date_range_into_chunks(dateFrom, dateTo, chunk_days=3)
+        
+        if len(date_chunks) > 1:
+            self.logger.info(f"Breaking date range {dateFrom} to {dateTo} into {len(date_chunks)} chunks of 3 days each")
+            
+            # SUPER OPTIMIZATION: Process chunks in parallel if there are many
+            if len(date_chunks) > 4:
+                self.logger.info(f"Using parallel processing for {len(date_chunks)} date chunks")
+                yield from self._process_chunks_parallel(userId, token, date_chunks)
+            else:
+                # Process chunks sequentially for smaller ranges
+                for chunk_start, chunk_end in date_chunks:
+                    self.logger.debug(f"Processing chunk: {chunk_start} to {chunk_end}")
+                    chunk_emails = self.iter_emails_in_interval(userId, token, chunk_start, chunk_end)
+                    for email in chunk_emails:
+                        yield email
+        else:
+            # Single chunk, process normally
+            yield from self.iter_emails_in_interval(userId, token, dateFrom, dateTo)
+
+    def _process_chunks_parallel(self, userId: str, token: str, date_chunks):
+        """Process date chunks in parallel with up to 5 concurrent requests"""
+        import concurrent.futures
+        
+        max_workers = min(5, len(date_chunks))  # Limit to 5 concurrent Gmail API requests
+        
+        def process_chunk(chunk_info):
+            """Process a single date chunk"""
+            chunk_start, chunk_end = chunk_info
+            try:
+                emails = list(self.iter_emails_in_interval(userId, token, chunk_start, chunk_end))
+                self.logger.debug(f"Chunk {chunk_start} to {chunk_end}: {len(emails)} emails")
+                return emails
+            except Exception as e:
+                self.logger.error(f"Error processing chunk {chunk_start} to {chunk_end}: {str(e)}")
+                return []
+        
+        # Process chunks in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all chunks for processing
+            future_to_chunk = {
+                executor.submit(process_chunk, chunk): chunk 
+                for chunk in date_chunks
+            }
+            
+            # Collect results as they complete (maintains chronological order)
+            chunk_results = {}
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    emails = future.result(timeout=60)  # 60 second timeout per chunk
+                    chunk_results[chunk] = emails
+                except Exception as e:
+                    self.logger.error(f"Chunk processing error for {chunk}: {str(e)}")
+                    chunk_results[chunk] = []
+            
+            # Yield emails in chronological order (by chunk order)
+            for chunk in date_chunks:
+                if chunk in chunk_results:
+                    for email in chunk_results[chunk]:
+                        yield email
+
+    def _split_date_range_into_chunks(self, dateFrom: str, dateTo: str, chunk_days: int = 3):
+        """Split date range into smaller chunks for better Gmail API performance"""
+        from datetime import datetime, timedelta
+        
+        try:
+            # Parse dates (assuming YYYY/M/D format)
+            start_date = datetime.strptime(dateFrom, '%Y/%m/%d')
+            end_date = datetime.strptime(dateTo, '%Y/%m/%d')
+            
+            # Calculate total days
+            total_days = (end_date - start_date).days
+            
+            # If range is <= chunk_days, return single chunk
+            if total_days <= chunk_days:
+                return [(dateFrom, dateTo)]
+            
+            # Split into chunks
+            chunks = []
+            current_date = start_date
+            
+            while current_date < end_date:
+                chunk_end_date = min(current_date + timedelta(days=chunk_days), end_date)
+                
+                chunk_start_str = current_date.strftime('%Y/%m/%d')
+                chunk_end_str = chunk_end_date.strftime('%Y/%m/%d')
+                
+                chunks.append((chunk_start_str, chunk_end_str))
+                current_date = chunk_end_date + timedelta(days=1)  # Move to next day after chunk end
+            
+            return chunks
+            
+        except Exception as e:
+            self.logger.warning(f"Date chunking failed: {str(e)}, using original range")
+            return [(dateFrom, dateTo)]
 
 

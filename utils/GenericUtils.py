@@ -52,19 +52,21 @@ class GenericUtil:
             conflicts = []
             
             if algorithm == 'claude' and len(emails) > 1:
-                # OPTIMIZATION: Batch process multiple emails with Claude
-                claude_results = self._try_claude_batch_extraction(emails, bankType)
+                # OPTIMIZATION: Parallel Claude processing with multiple subprocess calls
+                self.logger.info(f"Starting parallel Claude processing for {len(emails)} emails from {bankType}")
+                
+                claude_results = self._try_claude_parallel_extraction(emails, bankType)
                 
                 for i, result in enumerate(claude_results):
                     if result:
                         cleanedMails.append(result)
-                        self.logger.debug(f"Claude batch processed email {i+1} from {bankType}")
+                        self.logger.debug(f"Claude processed email {i+1} from {bankType}")
                     else:
                         # No fallback - add to conflicts if Claude fails
                         email = emails[i]
                         conflicts.append(email['message'])
                 
-                self.logger.info(f"Claude batch processed {len(claude_results)} emails from {bankType}")
+                self.logger.info(f"Claude parallel processed {len(emails)} emails from {bankType}")
                 return cleanedMails, conflicts
             
             # Original single email processing for small batches
@@ -130,91 +132,64 @@ class GenericUtil:
             self.logger.error(f"Regex extraction failed: {str(e)}")
             return None
 
-    def _try_claude_batch_extraction(self, emails, bankType):
-        """Batch process multiple emails with Claude Code for better performance"""
+    def _try_claude_parallel_extraction(self, emails, bankType):
+        """Process multiple emails with parallel Claude subprocess calls (up to 10 concurrent)"""
         try:
             if not emails:
                 return []
             
-            self.logger.info(f"Starting Claude batch extraction for {len(emails)} emails from {bankType}")
+            import concurrent.futures
             
-            # Prepare batch prompt with all emails
-            batch_prompt = f'''You are a data extraction tool. Extract transaction information from these {len(emails)} banking emails and respond with ONLY a JSON array. Do not include any explanatory text, markdown, or conversation.
-
-IMPORTANT: For amount field, use positive values for debit transactions (money spent/outgoing) and negative values for credit transactions (money received/incoming).
-
-Required JSON format (return array with one object per email):
-[
-  {{
-    "email_index": 0,
-    "transaction_found": true,
-    "transaction_date": "2025-09-25",
-    "amount": "2500.00",
-    "merchant": "AMAZON",
-    "description": "AMAZON transaction"
-  }},
-  {{
-    "email_index": 1,
-    "transaction_found": false
-  }}
-]
-
-Banking emails:'''
-
-            # Add each email with index
-            for i, email in enumerate(emails):
-                batch_prompt += f"\n\n--- EMAIL {i} ---\n"
-                batch_prompt += f"Subject: {email.get('subject', '')}\n"
-                batch_prompt += f"Time: {email.get('time', '')}\n"
-                batch_prompt += f"Body: {email.get('message', '')}"
-
-            # Execute Claude batch command
-            cmd = ['claude', 'code', '--print', '--output-format', 'json']
+            self.logger.info(f"Starting Claude parallel extraction for {len(emails)} emails from {bankType}")
             
-            # Set up environment
-            env = os.environ.copy()
-            env['PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/bin:/usr/bin:/bin'
-            env['HOME'] = '/root'
-            env['NODE_PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/lib/node_modules'
+            # Process emails in parallel with max 10 workers
+            max_workers = min(10, len(emails))
+            results = [None] * len(emails)
             
-            result = subprocess.run(cmd, input=batch_prompt, capture_output=True, text=True, timeout=30, env=env, shell=False)
+            def process_single_email(email_index_pair):
+                """Process a single email with Claude"""
+                email, index = email_index_pair
+                try:
+                    result = self._try_claude_extraction(email, bankType)
+                    return (index, result)
+                except Exception as e:
+                    self.logger.error(f"Claude parallel processing failed for email {index}: {str(e)}")
+                    return (index, None)
             
-            if result.returncode == 0:
-                # Parse Claude's batch response
-                batch_data = self._extract_json_from_response(result.stdout)
+            # Use ThreadPoolExecutor for parallel processing
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all emails for processing
+                email_index_pairs = [(email, i) for i, email in enumerate(emails)]
+                future_to_index = {
+                    executor.submit(process_single_email, pair): pair[1] 
+                    for pair in email_index_pairs
+                }
                 
-                if batch_data and isinstance(batch_data, list):
-                    # Convert batch results to individual transaction format
-                    results = []
-                    for item in batch_data:
-                        if item.get('transaction_found'):
-                            amount = str(item['amount']).replace(',', '')
-                            referenceID = GenericUtil().generate_reference_id(
-                                item['transaction_date'], 
-                                item['description'], 
-                                abs(float(amount))
-                            )
-                            results.append({
-                                'reference': referenceID,
-                                'date': item['transaction_date'],
-                                'description': item['description'],
-                                'amount': amount,
-                                'processed_via': 'CLAUDE_CODE'
-                            })
+                # Collect results as they complete
+                for future in concurrent.futures.as_completed(future_to_index):
+                    try:
+                        index, result = future.result(timeout=30)  # 30 second timeout per email
+                        results[index] = result
+                        if result:
+                            self.logger.debug(f"Claude successfully processed email {index + 1}")
                         else:
-                            results.append(None)  # Failed to process this email
-                    
-                    return results
-                else:
-                    self.logger.warning("Claude batch response not in expected format")
-            else:
-                self.logger.error(f"Claude batch command failed with return code {result.returncode}")
-                
-            # Return None for all emails if batch processing failed
-            return [None] * len(emails)
+                            self.logger.debug(f"Claude failed to process email {index + 1}")
+                    except concurrent.futures.TimeoutError:
+                        index = future_to_index[future]
+                        self.logger.warning(f"Claude processing timeout for email {index + 1}")
+                        results[index] = None
+                    except Exception as e:
+                        index = future_to_index[future]
+                        self.logger.error(f"Claude processing error for email {index + 1}: {str(e)}")
+                        results[index] = None
+            
+            successful_count = sum(1 for r in results if r is not None)
+            self.logger.info(f"Claude parallel processing completed: {successful_count}/{len(emails)} successful")
+            
+            return results
             
         except Exception as e:
-            self.logger.error(f"Claude batch extraction failed: {str(e)}")
+            self.logger.error(f"Claude parallel extraction failed: {str(e)}")
             return [None] * len(emails)
 
     def _try_claude_pdf_extraction(self, pdf_path, bank_type, password=None):
@@ -418,8 +393,17 @@ Email content:'''
                 # Extract the result field which contains the actual content
                 result_content = cli_response['result']
                 
-                # Look for JSON within markdown code blocks
+                # Look for JSON within markdown code blocks (array or object)
                 import re
+                # Try JSON array first (for batch responses) - non-greedy match
+                json_match = re.search(r'```json\s*(\[.*\])\s*```', result_content, re.DOTALL)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Try single JSON object
                 json_match = re.search(r'```json\s*(\{.*?\})\s*```', result_content, re.DOTALL)
                 if json_match:
                     try:
@@ -433,8 +417,11 @@ Email content:'''
                 except json.JSONDecodeError:
                     pass
                     
-            # If it's already the transaction JSON
+            # If it's already the transaction JSON (single transaction)
             elif isinstance(cli_response, dict) and 'transaction_found' in cli_response:
+                return cli_response
+            # If it's already a list of transactions (batch response)
+            elif isinstance(cli_response, list):
                 return cli_response
                 
         except json.JSONDecodeError:
@@ -443,7 +430,15 @@ Email content:'''
         # Fallback: look for JSON within the text
         import re
         
-        # Look for JSON within markdown code blocks first
+        # Look for JSON within markdown code blocks first (try array then object)
+        json_match = re.search(r'```json\s*(\[.*\])\s*```', response_text, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                return data  # Return array directly
+            except json.JSONDecodeError:
+                pass
+        
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
         if json_match:
             try:
