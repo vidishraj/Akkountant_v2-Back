@@ -35,14 +35,18 @@ class StatementDownloadService:
         date_to = date_to or date_from
         os.makedirs(TEMP_DIR, exist_ok=True)
         files = []
-        if bank_type == StatementPatternEnum.HDFC_DEBIT.name:
+        # Use direct attachment extraction for all banks (including HDFC)
+        # Old HDFC method was trying to scrape download links which often fails
+        files = self.download_to_temp(statement_pattern, date_to, date_from)
+        
+        # Fallback to link extraction only if no attachments found for HDFC
+        if bank_type == StatementPatternEnum.HDFC_DEBIT.name and not files:
+            self.logger.info("No attachments found, trying link extraction as fallback for HDFC")
             hrefs = self.download_pdf_from_smart_statement(statement_pattern, date_to, date_from)
             if hrefs:
                 files = self.download_files_from_hrefs(hrefs)
             else:
-                self.logger.warning("No hrefs found for download.")
-        else:
-            files = self.download_to_temp(statement_pattern, date_to, date_from)
+                self.logger.warning("No hrefs found for download either.")
 
         self.logger.info("Finished downloading files to temp")
         return files
@@ -92,11 +96,25 @@ class StatementDownloadService:
             msg = self.gmail_service.users().messages().get(userId='me', id=message['id']).execute()
             parts = msg['payload'].get('parts', [])
             attachments = []
-            for part in parts:
-                if part['filename']:
+            
+            self.logger.debug(f"Email has {len(parts)} parts")
+            for i, part in enumerate(parts):
+                filename = part.get('filename', '')
+                mime_type = part.get('mimeType', '')
+                self.logger.debug(f"Part {i}: filename='{filename}', mimeType='{mime_type}'")
+                
+                if filename and filename.lower().endswith('.pdf'):
+                    self.logger.info(f"Found PDF attachment: {filename}")
                     attachment_data = self._get_attachment_data(part, message['id'])
                     if attachment_data:
-                        attachments.append((part['filename'], attachment_data))
+                        attachments.append((filename, attachment_data))
+                        self.logger.info(f"Successfully extracted PDF attachment: {filename} ({len(attachment_data)} bytes)")
+                    else:
+                        self.logger.warning(f"Failed to get attachment data for: {filename}")
+                elif filename:
+                    self.logger.debug(f"Skipping non-PDF attachment: {filename}")
+            
+            self.logger.info(f"Extracted {len(attachments)} PDF attachments from email")
             return attachments
         except Exception as e:
             self.logger.error(f"Error extracting attachments: {e}")

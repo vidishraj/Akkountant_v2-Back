@@ -257,9 +257,11 @@ Bank statement text:'''
             os.remove(text_file)
             
             if result.returncode == 0:
+                self.logger.info(f"Claude PDF processing completed successfully for {bank_type}")
                 # Try to extract JSON from Claude's response
                 data = self._extract_json_from_response(result.stdout)
                 if data and data.get('transactions_found') and data.get('transactions'):
+                    self.logger.info(f"Claude found {len(data.get('transactions', []))} transactions in PDF")
                     transactions = []
                     for txn in data['transactions']:
                         # Convert Claude response to expected format
