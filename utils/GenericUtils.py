@@ -42,6 +42,30 @@ class GenericUtil:
 
         return reference_id
 
+    def _save_emails_for_analysis(self, emails, bankType):
+        """Save raw emails to files for duplicate analysis"""
+        try:
+            # Create analysis directory
+            analysis_dir = os.path.join(os.getcwd(), "email_analysis", bankType)
+            os.makedirs(analysis_dir, exist_ok=True)
+            
+            for i, email in enumerate(emails):
+                # Create filename with message ID or timestamp
+                message_id = email.get('message_id', f'unknown_{i}')
+                # Clean message ID for filename
+                safe_id = message_id.replace('<', '').replace('>', '').replace('@', '_').replace('/', '_')
+                filename = f"{safe_id}.json"
+                filepath = os.path.join(analysis_dir, filename)
+                
+                # Save complete raw email data
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(email, f, indent=2, ensure_ascii=False)
+                
+            self.logger.info(f"Saved {len(emails)} raw emails for analysis in {analysis_dir}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save emails for analysis: {str(e)}")
+
     def extractDetailsFromEmail(self, emails, bankType, algorithm='claude'):
         """
         Primary email processing method - Claude Code first, regex fallback
@@ -49,6 +73,9 @@ class GenericUtil:
         try:
             cleanedMails = []
             conflicts = []
+            
+            # Save emails for analysis
+            self._save_emails_for_analysis(emails, bankType)
             
             for email in emails:
                 # Choose processing method based on algorithm parameter

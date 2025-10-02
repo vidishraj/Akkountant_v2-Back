@@ -91,11 +91,13 @@ class GmailServiceUtils:
         """Iterator that yields emails one at a time to prevent memory buildup"""
         gmailService = self.googleService.get_gmail_service(userId, token)
         
-        # Initial request
+        # Initial request with deduplication parameters
         request = gmailService.users().messages().list(
             userId='me',
-            q=f"after:{dateFrom} before:{dateTo}",
-            maxResults=self.PAGE_SIZE
+            q=f"after:{dateFrom} before:{dateTo} in:inbox -is:sent",
+            maxResults=self.PAGE_SIZE,
+            includeSpamTrash=False,
+            labelIds=["INBOX"]
         )
 
         while request is not None:
