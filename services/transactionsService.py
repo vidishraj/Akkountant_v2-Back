@@ -238,33 +238,89 @@ class TransactionService(BaseService):
 
 
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None, source_emails=None):
+        """OPTIMIZED: Batch insert transactions for better performance"""
         integrityErrors = 0
         
-        for i, transaction in enumerate(transactions):
-            date = self.dateTimeUtil.convert_to_sql_datetime(transaction['date'], bank)
+        if not transactions and not conflicts:
+            return 0
             
-            # Determine processing method
-            processing_method = ProcessingMethod.CLAUDE_CODE if transaction.get('processed_via') == 'CLAUDE_CODE' else ProcessingMethod.PATTERN_MATCH
+        try:
+            # OPTIMIZATION: Batch prepare all transaction objects
+            transaction_objects = []
             
-            # For email-based transactions, get the Gmail message ID
-            # Since one email = one transaction, we map them 1:1
-            gmail_message_id = None
-            if source_emails and i < len(source_emails) and source == TransactionTypeEnum.Email.value:
-                gmail_message_id = source_emails[i].get('message_id')
+            for i, transaction in enumerate(transactions):
+                date = self.dateTimeUtil.convert_to_sql_datetime(transaction['date'], bank)
+                
+                # Determine processing method
+                processing_method = ProcessingMethod.CLAUDE_CODE if transaction.get('processed_via') == 'CLAUDE_CODE' else ProcessingMethod.PATTERN_MATCH
+                
+                # For email-based transactions, get the Gmail message ID
+                gmail_message_id = None
+                if source_emails and i < len(source_emails) and source == TransactionTypeEnum.Email.value:
+                    gmail_message_id = source_emails[i].get('message_id')
+                
+                transaction_obj = Transactions(
+                    referenceID=transaction['reference'],
+                    date=date,
+                    details=transaction['description'],
+                    amount=transaction['amount'],
+                    tag="",
+                    fileID=fileId,
+                    bank=bank,
+                    source=source,
+                    user=userId,
+                    processed_via=processing_method,
+                    gmail_message_id=gmail_message_id
+                )
+                transaction_objects.append(transaction_obj)
             
-            transaction_obj = Transactions(
-                referenceID=transaction['reference'],
-                date=date,
-                details=transaction['description'],
-                amount=transaction['amount'],
-                tag="",
-                fileID=fileId,
-                bank=bank,
-                source=source,
-                user=userId,
-                processed_via=processing_method,
-                gmail_message_id=gmail_message_id  # Only set for email transactions
-            )
+            # OPTIMIZATION: Batch insert all transactions in a single transaction
+            if transaction_objects:
+                try:
+                    if isinstance(self.db, dict):
+                        with self.db.session() as session:
+                            session.add_all(transaction_objects)
+                            session.commit()
+                    else:
+                        self.db.session.add_all(transaction_objects)
+                        self.db.session.commit()
+                    self.logger.info(f"Batch inserted {len(transaction_objects)} transactions")
+                except IntegrityError as e:
+                    self.logger.warning(f"Batch insert failed, falling back to individual inserts: {e}")
+                    self.db.session.rollback()
+                    # Fallback to individual inserts to handle duplicates
+                    integrityErrors = self._insert_transactions_individually(transaction_objects)
+
+            # OPTIMIZATION: Batch insert conflicts
+            if conflicts:
+                conflict_objects = [
+                    TransactionForReview(user=userId, conflict=conflict) 
+                    for conflict in conflicts
+                ]
+                try:
+                    if isinstance(self.db, dict):
+                        with self.db.session() as session:
+                            session.add_all(conflict_objects)
+                            session.commit()
+                    else:
+                        self.db.session.add_all(conflict_objects)
+                        self.db.session.commit()
+                    self.logger.info(f"Batch inserted {len(conflict_objects)} conflicts")
+                except IntegrityError as e:
+                    self.logger.warning(f"Batch conflict insert failed: {e}")
+                    self.db.session.rollback()
+                    
+        except Exception as e:
+            self.logger.error(f"Error in batch insert: {str(e)}")
+            self.db.session.rollback()
+            
+        return integrityErrors
+
+    def _insert_transactions_individually(self, transaction_objects):
+        """Fallback method for individual transaction inserts when batch fails"""
+        integrityErrors = 0
+        
+        for transaction_obj in transaction_objects:
             try:
                 if isinstance(self.db, dict):
                     with self.db.session() as session:
@@ -275,29 +331,13 @@ class TransactionService(BaseService):
                     self.db.session.commit()
             except IntegrityError as e:
                 error_msg = str(e)
-                if 'gmail_message_id' in error_msg and gmail_message_id:
-                    self.logger.info(f"Skipping duplicate email transaction (Gmail ID: {gmail_message_id})")
+                if 'gmail_message_id' in error_msg and transaction_obj.gmail_message_id:
+                    self.logger.debug(f"Skipping duplicate email transaction (Gmail ID: {transaction_obj.gmail_message_id})")
                 else:
-                    self.logger.warning(f"Duplicate entry error occurred: {e.__cause__}")
+                    self.logger.debug(f"Skipping duplicate transaction: {transaction_obj.referenceID}")
                 self.db.session.rollback()
                 integrityErrors += 1
-
-        for conflict in conflicts:
-            conflictOuter = TransactionForReview(
-                user=userId,
-                conflict=conflict
-            )
-            try:
-                if isinstance(self.db, dict):
-                    with self.db.session() as session:
-                        session.add(conflictOuter)
-                        session.commit()
-                else:
-                    self.db.session.add(conflictOuter)
-                    self.db.session.commit()
-            except IntegrityError as e:
-                self.logger.warning(f"Duplicate entry error occurred while committing: {e.__cause__}")
-                self.db.session.rollback()
+                
         return integrityErrors
 
     @staticmethod

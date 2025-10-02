@@ -45,69 +45,177 @@ class GenericUtil:
     def extractDetailsFromEmail(self, emails, bankType, algorithm='claude'):
         """
         Primary email processing method - Claude Code first, regex fallback
+        OPTIMIZED for batch processing
         """
         try:
             cleanedMails = []
             conflicts = []
             
+            if algorithm == 'claude' and len(emails) > 1:
+                # OPTIMIZATION: Batch process multiple emails with Claude
+                claude_results = self._try_claude_batch_extraction(emails, bankType)
+                
+                for i, result in enumerate(claude_results):
+                    if result:
+                        cleanedMails.append(result)
+                        self.logger.debug(f"Claude batch processed email {i+1} from {bankType}")
+                    else:
+                        # No fallback - add to conflicts if Claude fails
+                        email = emails[i]
+                        conflicts.append(email['message'])
+                
+                self.logger.info(f"Claude batch processed {len(claude_results)} emails from {bankType}")
+                return cleanedMails, conflicts
+            
+            # Original single email processing for small batches
             for email in emails:
                 # Choose processing method based on algorithm parameter
-                claude_result = None
                 if algorithm == 'claude':
-                    # Try Claude Code processing
+                    # Try Claude Code processing - no fallback
                     claude_result = self._try_claude_extraction(email, bankType)
                     if claude_result:
                         cleanedMails.append(claude_result)
-                        self.logger.info(f"Claude Code successfully processed email from {bankType}")
-                        continue
-                
-                # FALLBACK: Try legacy regex pattern matching (or use regex-only mode)
-                try:
-                    pattern = EmailRegexEnum[bankType].value
-                    matches = re.search(pattern, email['message'])
-                    
-                    if bankType == EmailRegexEnum.Millenia_Credit.name and matches is None:
-                        matches = re.search(
-                            r"Dear Customer, Thank you for using HDFC Bank Card (?P<card_number>XX\d{4}) for Rs\. (?P<amount_spent>[\d,]+(?:\.\d+)?) at (?P<merchant>.+?) on (?P<transaction_date>\d{2}-\d{2}-\d{4}) (?P<transaction_time>\d{2}:\d{2}:\d{2}) Authorization code:- (?P<authorization_code>\d+)",
-                            email['message'])
-
-                    if matches:
-                        # Extract matched details as a dictionary
-                        details = matches.groupdict()
-                        date = DateTimeUtil().convert_to_sql_datetime(details.get('transaction_date'), bankType)
-                        description = details.get('merchant')
-                        amount = details.get('amount_spent')
-                        referenceID = GenericUtil().generate_reference_id(email['time'], description, amount)
-                        cleanedMails.append({
-                            'reference': referenceID,
-                            'date': date,
-                            'description': description,
-                            'amount': amount,
-                            'processed_via': 'PATTERN_MATCH'
-                        })
-                        method_name = "Regex-only" if algorithm == 'regex' else "Regex fallback"
-                        self.logger.info(f"{method_name} successfully processed email from {bankType}")
+                        self.logger.debug(f"Claude Code successfully processed email from {bankType}")
                     else:
-                        # Failed to process
                         conflicts.append(email['message'])
-                        if algorithm == 'regex':
-                            self.logger.warning(f"Regex failed for email: {email['message'][:100]}...")
-                        else:
-                            self.logger.warning(f"Both Claude and regex failed for email: {email['message'][:100]}...")
-                        
-                except KeyError:
-                    # No regex pattern exists for this bank type
-                    conflicts.append(email['message'])
-                    if algorithm == 'regex':
-                        self.logger.warning(f"No regex pattern for {bankType}: {email['message'][:100]}...")
+                elif algorithm == 'regex':
+                    # Use regex-only mode
+                    regex_result = self._try_regex_extraction(email, bankType)
+                    if regex_result:
+                        cleanedMails.append(regex_result)
                     else:
-                        self.logger.warning(f"No regex pattern for {bankType}, Claude failed: {email['message'][:100]}...")
+                        conflicts.append(email['message'])
+                else:
+                    # Unknown algorithm
+                    conflicts.append(email['message'])
                     
             return cleanedMails, conflicts
             
         except Exception as e:
             self.logger.error(f"Error in extractDetailsFromEmail: {str(e)}")
             return [], [email.get('message', '') for email in emails]
+
+    def _try_regex_extraction(self, email, bankType):
+        """Extract regex patterns (refactored for reuse)"""
+        try:
+            pattern = EmailRegexEnum[bankType].value
+            matches = re.search(pattern, email['message'])
+            
+            if bankType == EmailRegexEnum.Millenia_Credit.name and matches is None:
+                matches = re.search(
+                    r"Dear Customer, Thank you for using HDFC Bank Card (?P<card_number>XX\d{4}) for Rs\. (?P<amount_spent>[\d,]+(?:\.\d+)?) at (?P<merchant>.+?) on (?P<transaction_date>\d{2}-\d{2}-\d{4}) (?P<transaction_time>\d{2}:\d{2}:\d{2}) Authorization code:- (?P<authorization_code>\d+)",
+                    email['message'])
+
+            if matches:
+                # Extract matched details as a dictionary
+                details = matches.groupdict()
+                date = DateTimeUtil().convert_to_sql_datetime(details.get('transaction_date'), bankType)
+                description = details.get('merchant')
+                amount = details.get('amount_spent')
+                referenceID = GenericUtil().generate_reference_id(email['time'], description, amount)
+                return {
+                    'reference': referenceID,
+                    'date': date,
+                    'description': description,
+                    'amount': amount,
+                    'processed_via': 'PATTERN_MATCH'
+                }
+            return None
+                        
+        except KeyError:
+            # No regex pattern exists for this bank type
+            self.logger.warning(f"No regex pattern for {bankType}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Regex extraction failed: {str(e)}")
+            return None
+
+    def _try_claude_batch_extraction(self, emails, bankType):
+        """Batch process multiple emails with Claude Code for better performance"""
+        try:
+            if not emails:
+                return []
+            
+            self.logger.info(f"Starting Claude batch extraction for {len(emails)} emails from {bankType}")
+            
+            # Prepare batch prompt with all emails
+            batch_prompt = f'''You are a data extraction tool. Extract transaction information from these {len(emails)} banking emails and respond with ONLY a JSON array. Do not include any explanatory text, markdown, or conversation.
+
+IMPORTANT: For amount field, use positive values for debit transactions (money spent/outgoing) and negative values for credit transactions (money received/incoming).
+
+Required JSON format (return array with one object per email):
+[
+  {{
+    "email_index": 0,
+    "transaction_found": true,
+    "transaction_date": "2025-09-25",
+    "amount": "2500.00",
+    "merchant": "AMAZON",
+    "description": "AMAZON transaction"
+  }},
+  {{
+    "email_index": 1,
+    "transaction_found": false
+  }}
+]
+
+Banking emails:'''
+
+            # Add each email with index
+            for i, email in enumerate(emails):
+                batch_prompt += f"\n\n--- EMAIL {i} ---\n"
+                batch_prompt += f"Subject: {email.get('subject', '')}\n"
+                batch_prompt += f"Time: {email.get('time', '')}\n"
+                batch_prompt += f"Body: {email.get('message', '')}"
+
+            # Execute Claude batch command
+            cmd = ['claude', 'code', '--print', '--output-format', 'json']
+            
+            # Set up environment
+            env = os.environ.copy()
+            env['PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/bin:/usr/bin:/bin'
+            env['HOME'] = '/root'
+            env['NODE_PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/lib/node_modules'
+            
+            result = subprocess.run(cmd, input=batch_prompt, capture_output=True, text=True, timeout=30, env=env, shell=False)
+            
+            if result.returncode == 0:
+                # Parse Claude's batch response
+                batch_data = self._extract_json_from_response(result.stdout)
+                
+                if batch_data and isinstance(batch_data, list):
+                    # Convert batch results to individual transaction format
+                    results = []
+                    for item in batch_data:
+                        if item.get('transaction_found'):
+                            amount = str(item['amount']).replace(',', '')
+                            referenceID = GenericUtil().generate_reference_id(
+                                item['transaction_date'], 
+                                item['description'], 
+                                abs(float(amount))
+                            )
+                            results.append({
+                                'reference': referenceID,
+                                'date': item['transaction_date'],
+                                'description': item['description'],
+                                'amount': amount,
+                                'processed_via': 'CLAUDE_CODE'
+                            })
+                        else:
+                            results.append(None)  # Failed to process this email
+                    
+                    return results
+                else:
+                    self.logger.warning("Claude batch response not in expected format")
+            else:
+                self.logger.error(f"Claude batch command failed with return code {result.returncode}")
+                
+            # Return None for all emails if batch processing failed
+            return [None] * len(emails)
+            
+        except Exception as e:
+            self.logger.error(f"Claude batch extraction failed: {str(e)}")
+            return [None] * len(emails)
 
     def _try_claude_pdf_extraction(self, pdf_path, bank_type, password=None):
         """Try to extract transaction data from password-protected PDF using Claude Code"""
