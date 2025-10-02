@@ -205,11 +205,15 @@ class TransactionService(BaseService):
             subject = email.get('subject', 'No subject')
             self.logger.debug(f"Email {i+1}: From '{sender}' Subject '{subject[:50]}'")
         
-        banking_emails = EmailClassifier().get_banking_emails_from_all(all_raw_emails)
+        # Use EmailClassifier to separate transaction emails from statement emails
+        classification_results = EmailClassifier().classify_banking_emails(all_raw_emails)
+        transaction_emails = classification_results['transaction_emails']  # Only process transaction alerts, NOT statements
         
-        # Group emails by bank for processing
+        self.logger.info(f"Email processing: Found {len(transaction_emails)} transaction alerts (excluding {len(classification_results['statement_emails'])} statements)")
+        
+        # Group transaction emails by bank for processing
         emails_by_bank = {}
-        for email in banking_emails:
+        for email in transaction_emails:
             bank = email.get('bank', 'UNKNOWN')
             if bank not in emails_by_bank:
                 emails_by_bank[bank] = []
@@ -357,7 +361,9 @@ class TransactionService(BaseService):
         # PRIMARY: Use EmailClassifier for intelligent statement email detection
         all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, gmailToken, dateFrom, dateTo))
         classification_results = EmailClassifier().classify_banking_emails(all_raw_emails)
-        statement_emails = classification_results['statement_emails']
+        statement_emails = classification_results['statement_emails']  # Only process statement emails, NOT transaction alerts
+        
+        self.logger.info(f"Statement processing: Found {len(statement_emails)} statement emails (excluding {len(classification_results['transaction_emails'])} transaction alerts)")
         
         # Filter by specific banks if requested
         if bank is not None:
@@ -801,4 +807,117 @@ class TransactionService(BaseService):
             }
         except Exception as e:
             self.logger.error(f"Error fetching processing stats: {str(e)}")
+            return {"error": str(e)}
+
+    # NEW: Local Statement Management Methods
+    def fetchLocalStatements(self, userId, bank=None):
+        """Fetch list of locally stored Claude-analyzed statements"""
+        try:
+            statements_dir = os.path.join(os.getcwd(), "claude_statements", userId)
+            
+            if not os.path.exists(statements_dir):
+                return {"statements": [], "total_count": 0}
+            
+            statements = []
+            banks_to_check = [bank] if bank else os.listdir(statements_dir)
+            
+            for bank_name in banks_to_check:
+                bank_dir = os.path.join(statements_dir, bank_name)
+                if not os.path.isdir(bank_dir):
+                    continue
+                    
+                for filename in os.listdir(bank_dir):
+                    if filename.endswith('.pdf'):
+                        file_path = os.path.join(bank_dir, filename)
+                        file_stat = os.stat(file_path)
+                        
+                        statements.append({
+                            "filename": filename,
+                            "bank": bank_name,
+                            "file_size": file_stat.st_size,
+                            "created_date": file_stat.st_ctime,
+                            "modified_date": file_stat.st_mtime,
+                            "file_path": file_path,
+                            "storage_type": "local_claude"
+                        })
+            
+            # Sort by modified date (newest first)
+            statements.sort(key=lambda x: x['modified_date'], reverse=True)
+            
+            return {
+                "statements": statements,
+                "total_count": len(statements)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching local statements: {str(e)}")
+            return {"error": str(e)}
+
+    def downloadLocalStatement(self, userId, bank, filename):
+        """Download a locally stored statement"""
+        try:
+            file_path = os.path.join(os.getcwd(), "claude_statements", userId, bank, filename)
+            
+            if not os.path.exists(file_path):
+                return {"error": "Statement not found"}
+            
+            # Return file path for download (Flask will handle the actual file serving)
+            return {"file_path": file_path, "filename": filename}
+            
+        except Exception as e:
+            self.logger.error(f"Error downloading local statement: {str(e)}")
+            return {"error": str(e)}
+
+    def deleteLocalStatement(self, userId, bank, filename):
+        """Delete a locally stored statement"""
+        try:
+            file_path = os.path.join(os.getcwd(), "claude_statements", userId, bank, filename)
+            
+            if not os.path.exists(file_path):
+                return {"error": "Statement not found"}
+            
+            os.remove(file_path)
+            self.logger.info(f"Deleted local statement: {file_path}")
+            
+            # Check if bank directory is empty and remove if so
+            bank_dir = os.path.dirname(file_path)
+            if not os.listdir(bank_dir):
+                os.rmdir(bank_dir)
+                self.logger.info(f"Removed empty bank directory: {bank_dir}")
+            
+            return {"message": "Statement deleted successfully"}
+            
+        except Exception as e:
+            self.logger.error(f"Error deleting local statement: {str(e)}")
+            return {"error": str(e)}
+
+    def fetchAllStatements(self, userId, include_legacy=True, include_local=True):
+        """Fetch both legacy (Google Drive) and local statements"""
+        try:
+            result = {
+                "legacy_statements": [],
+                "local_statements": [],
+                "total_count": 0
+            }
+            
+            # Fetch legacy Google Drive statements
+            if include_legacy:
+                legacy_files = self.fetchFileDetails(page=1, filters={"user": userId})
+                result["legacy_statements"] = [
+                    {**{key: value for key, value in fd.__dict__.items() if key != '_sa_instance_state'}, 
+                     "storage_type": "google_drive"}
+                    for fd in legacy_files["results"]
+                ]
+            
+            # Fetch local Claude statements  
+            if include_local:
+                local_statements = self.fetchLocalStatements(userId)
+                result["local_statements"] = local_statements.get("statements", [])
+            
+            result["total_count"] = len(result["legacy_statements"]) + len(result["local_statements"])
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching all statements: {str(e)}")
             return {"error": str(e)}

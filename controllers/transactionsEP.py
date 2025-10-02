@@ -176,16 +176,38 @@ class TransactionController:
 
     @Logger.standardLogger
     def deleteFile(self):
+        """Enhanced to handle both legacy Google Drive and local statements"""
         userId = g.get('firebase_id')
         fileId = request.args.get('fileId')
+        
         # Ensure all required fields are present
         if userId is None or fileId is None:
-            return jsonify({"error": "Missing required fields"}), 400 # Call the service function to add or update the token
-        result = self.TransactionService.deleteFile(userId, fileId)
-        return jsonify(result), 200
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        # Check if this is a local statement (fileId format: local_BANK_filename)
+        if fileId.startswith('local_'):
+            try:
+                # Parse local file ID: local_BANK_filename.pdf
+                parts = fileId.split('_', 2)  # Split into max 3 parts
+                if len(parts) >= 3:
+                    bank = parts[1]
+                    filename = parts[2]
+                    result = self.TransactionService.deleteLocalStatement(userId, bank, filename)
+                    if "error" in result:
+                        return jsonify(result), 404
+                    return jsonify(result), 200
+                else:
+                    return jsonify({"error": "Invalid local file ID format"}), 400
+            except Exception as e:
+                return jsonify({"error": f"Failed to delete local statement: {str(e)}"}), 500
+        else:
+            # Legacy Google Drive deletion
+            result = self.TransactionService.deleteFile(userId, fileId)
+            return jsonify(result), 200
 
     @Logger.standardLogger
     def renameFile(self):
+        """Enhanced to handle both legacy Google Drive and local statements"""
         data = request.get_json()
 
         # Ensure all required fields are present
@@ -193,40 +215,65 @@ class TransactionController:
         missing_fields = [field for field in required_fields if field not in data]
         if missing_fields:
             return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
-        # Call the service function to add or update the token
-        result = self.TransactionService.renameFile(data['userId'], data['fileId'], data['newName'])
-        return jsonify(result), 200
+            
+        fileId = data['fileId']
+        userId = data['user_id']
+        newName = data['newName']
+        
+        # Check if this is a local statement (fileId format: local_BANK_filename)
+        if fileId.startswith('local_'):
+            # Note: Local statements cannot be renamed as they are stored based on email identifiers
+            # This could be implemented if needed by moving files, but for now return not supported
+            return jsonify({"error": "Renaming local Claude statements is not currently supported"}), 400
+        else:
+            # Legacy Google Drive rename
+            result = self.TransactionService.renameFile(userId, fileId, newName)
+            return jsonify(result), 200
 
     @Logger.standardLogger
     def downloadFile(self):
+        """Enhanced to handle both legacy Google Drive and local statements"""
         userId = g.get('firebase_id')
         fileId = request.args.get('fileId')
+        
         # Ensure all required fields are present
         if userId is None or fileId is None:
             return jsonify({"error": "Missing required fields"}), 400
-        result = self.TransactionService.downloadFile(userId, fileId)
-        return result
+            
+        # Check if this is a local statement (fileId format: local_BANK_filename)
+        if fileId.startswith('local_'):
+            try:
+                # Parse local file ID: local_BANK_filename.pdf
+                parts = fileId.split('_', 2)  # Split into max 3 parts
+                if len(parts) >= 3:
+                    bank = parts[1]
+                    filename = parts[2]
+                    return self.downloadLocalStatement_internal(userId, bank, filename)
+                else:
+                    return jsonify({"error": "Invalid local file ID format"}), 400
+            except Exception as e:
+                return jsonify({"error": f"Failed to download local statement: {str(e)}"}), 500
+        else:
+            # Legacy Google Drive download
+            result = self.TransactionService.downloadFile(userId, fileId)
+            return result
+
+    def downloadLocalStatement_internal(self, userId, bank, filename):
+        """Internal method for downloading local statements"""
+        from flask import send_file
+        result = self.TransactionService.downloadLocalStatement(userId, bank, filename)
+        if "error" in result:
+            return jsonify(result), 404
+            
+        try:
+            return send_file(result["file_path"], as_attachment=True, download_name=result["filename"])
+        except Exception as e:
+            return jsonify({"error": f"File download failed: {str(e)}"}), 500
 
     @Logger.standardLogger
     def fetchFileDetails(self):
-        data = request.get_json(force=True)
-        page = data.get("Page", 1)
-        filters = data.get("Filter", None)
-        self.logger.info(f"Fetch FileDetails Page {page} with filter {filters}")
-        file_details = self.TransactionService.fetchFileDetails(page=page, filters=filters)
-
-        # Format the file details for JSON response
-        results = [
-            {key: value for key, value in fd.__dict__.items() if key != '_sa_instance_state'}
-            for fd in file_details["results"]
-        ]
-        response = {
-            "total_count": file_details["count"],
-            "page": page,
-            "page_size": len(results),
-            "results": results,
-        }
-        return jsonify(response)
+        """Redirects to enhanced version that handles both legacy and local statements"""
+        return self.fetchFileDetailsEnhanced()
 
     @Logger.standardLogger
     def checkGoogleApiStatus(self):
@@ -265,3 +312,67 @@ class TransactionController:
         userId = g.get('firebase_id')
         stats = self.TransactionService.getProcessingStats(userId)
         return jsonify(stats), 200
+
+
+    # ENHANCED: Legacy endpoints with storage type awareness
+    @Logger.standardLogger
+    def fetchFileDetailsEnhanced(self):
+        """Enhanced file details - by default returns local statements only"""
+        data = request.get_json(force=True)
+        page = data.get("Page", 1)
+        filters = data.get("Filter", {})
+        userId = g.get('firebase_id')
+        
+        # Check if legacy statements should be included (opt-in)
+        include_legacy = filters.get("include_legacy", False) if filters else False
+        
+        self.logger.info(f"Fetch Enhanced FileDetails Page {page} with filter {filters}, include_legacy={include_legacy}")
+        
+        # Initialize results
+        legacy_results = []
+        local_results = []
+        
+        # Get legacy file details only if requested
+        if include_legacy:
+            # Add user filter if not present
+            if userId:
+                filters["user"] = userId
+            legacy_files = self.TransactionService.fetchFileDetails(page=page, filters=filters)
+            
+            # Format legacy file details
+            legacy_results = [
+                {**{key: value for key, value in fd.__dict__.items() if key != '_sa_instance_state'},
+                 "storage_type": "google_drive"}
+                for fd in legacy_files["results"]
+            ]
+        
+        # Get local statements (default behavior)
+        local_statements = self.TransactionService.fetchLocalStatements(userId)
+        
+        # Format local statements to match legacy structure
+        for stmt in local_statements.get("statements", []):
+            local_results.append({
+                "fileID": f"local_{stmt['bank']}_{stmt['filename']}",
+                "fileName": stmt["filename"],
+                "bank": stmt["bank"],
+                "fileSize": stmt["file_size"],
+                "uploadDate": stmt["created_date"],
+                "statementCount": "N/A",  # Local statements don't track this
+                "storage_type": "local_claude",
+                "user": userId
+            })
+        
+        # By default, only return local statements
+        results = local_results
+        if include_legacy:
+            results = legacy_results + local_results
+        
+        response = {
+            "total_count": len(results),
+            "legacy_count": len(legacy_results),
+            "local_count": len(local_results),
+            "page": page,
+            "page_size": len(results),
+            "results": results,
+        }
+        return jsonify(response), 200
