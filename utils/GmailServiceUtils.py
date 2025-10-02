@@ -127,62 +127,17 @@ class GmailServiceUtils:
         if len(date_chunks) > 1:
             self.logger.info(f"Breaking date range {dateFrom} to {dateTo} into {len(date_chunks)} chunks of 3 days each")
             
-            # SUPER OPTIMIZATION: Process chunks in parallel if there are many
-            if len(date_chunks) > 4:
-                self.logger.info(f"Using parallel processing for {len(date_chunks)} date chunks")
-                yield from self._process_chunks_parallel(userId, token, date_chunks)
-            else:
-                # Process chunks sequentially for smaller ranges
-                for chunk_start, chunk_end in date_chunks:
-                    self.logger.debug(f"Processing chunk: {chunk_start} to {chunk_end}")
-                    chunk_emails = self.iter_emails_in_interval(userId, token, chunk_start, chunk_end)
-                    for email in chunk_emails:
-                        yield email
+            # Process chunks sequentially to avoid SSL/connection issues
+            # Note: Parallel Gmail API calls were causing SSL conflicts and worker crashes
+            for i, (chunk_start, chunk_end) in enumerate(date_chunks):
+                self.logger.debug(f"Processing chunk {i+1}/{len(date_chunks)}: {chunk_start} to {chunk_end}")
+                chunk_emails = self.iter_emails_in_interval(userId, token, chunk_start, chunk_end)
+                for email in chunk_emails:
+                    yield email
         else:
             # Single chunk, process normally
             yield from self.iter_emails_in_interval(userId, token, dateFrom, dateTo)
 
-    def _process_chunks_parallel(self, userId: str, token: str, date_chunks):
-        """Process date chunks in parallel with up to 5 concurrent requests"""
-        import concurrent.futures
-        
-        max_workers = min(5, len(date_chunks))  # Limit to 5 concurrent Gmail API requests
-        
-        def process_chunk(chunk_info):
-            """Process a single date chunk"""
-            chunk_start, chunk_end = chunk_info
-            try:
-                emails = list(self.iter_emails_in_interval(userId, token, chunk_start, chunk_end))
-                self.logger.debug(f"Chunk {chunk_start} to {chunk_end}: {len(emails)} emails")
-                return emails
-            except Exception as e:
-                self.logger.error(f"Error processing chunk {chunk_start} to {chunk_end}: {str(e)}")
-                return []
-        
-        # Process chunks in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all chunks for processing
-            future_to_chunk = {
-                executor.submit(process_chunk, chunk): chunk 
-                for chunk in date_chunks
-            }
-            
-            # Collect results as they complete (maintains chronological order)
-            chunk_results = {}
-            for future in concurrent.futures.as_completed(future_to_chunk):
-                chunk = future_to_chunk[future]
-                try:
-                    emails = future.result(timeout=60)  # 60 second timeout per chunk
-                    chunk_results[chunk] = emails
-                except Exception as e:
-                    self.logger.error(f"Chunk processing error for {chunk}: {str(e)}")
-                    chunk_results[chunk] = []
-            
-            # Yield emails in chronological order (by chunk order)
-            for chunk in date_chunks:
-                if chunk in chunk_results:
-                    for email in chunk_results[chunk]:
-                        yield email
 
     def _split_date_range_into_chunks(self, dateFrom: str, dateTo: str, chunk_days: int = 3):
         """Split date range into smaller chunks for better Gmail API performance"""

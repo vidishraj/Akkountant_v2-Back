@@ -53,9 +53,18 @@ class GenericUtil:
             
             if algorithm == 'claude' and len(emails) > 1:
                 # OPTIMIZATION: Parallel Claude processing with multiple subprocess calls
-                self.logger.info(f"Starting parallel Claude processing for {len(emails)} emails from {bankType}")
+                # Can be disabled by setting environment variable DISABLE_CLAUDE_PARALLEL=1
+                use_parallel = os.getenv('DISABLE_CLAUDE_PARALLEL', '0') != '1'
                 
-                claude_results = self._try_claude_parallel_extraction(emails, bankType)
+                if use_parallel and len(emails) > 3:  # Only use parallel for more than 3 emails
+                    self.logger.info(f"Starting parallel Claude processing for {len(emails)} emails from {bankType}")
+                    claude_results = self._try_claude_parallel_extraction(emails, bankType)
+                else:
+                    self.logger.info(f"Starting sequential Claude processing for {len(emails)} emails from {bankType}")
+                    claude_results = []
+                    for email in emails:
+                        result = self._try_claude_extraction(email, bankType)
+                        claude_results.append(result)
                 
                 for i, result in enumerate(claude_results):
                     if result:
@@ -142,8 +151,8 @@ class GenericUtil:
             
             self.logger.info(f"Starting Claude parallel extraction for {len(emails)} emails from {bankType}")
             
-            # Process emails in parallel with max 10 workers
-            max_workers = min(10, len(emails))
+            # Process emails in parallel with max 5 workers (reduced to prevent worker crashes)
+            max_workers = min(5, len(emails))
             results = [None] * len(emails)
             
             def process_single_email(email_index_pair):
@@ -168,7 +177,7 @@ class GenericUtil:
                 # Collect results as they complete
                 for future in concurrent.futures.as_completed(future_to_index):
                     try:
-                        index, result = future.result(timeout=30)  # 30 second timeout per email
+                        index, result = future.result(timeout=20)  # 20 second timeout per email
                         results[index] = result
                         if result:
                             self.logger.debug(f"Claude successfully processed email {index + 1}")
