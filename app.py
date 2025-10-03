@@ -20,6 +20,7 @@ from controllers.templateEP import TemplateController
 from controllers.signatureEP import SignatureController
 from controllers.paymentEP import PaymentController
 from controllers.customFieldEP import CustomFieldController
+from controllers.jobsEP import JobsController
 # from controllers.jobApplicationEmailEP import JobApplicationEmailController
 from enums.TaskStatusEnum import JobStatus  
 from services.InvestmentService import InvestmentService
@@ -158,6 +159,7 @@ class Akkountant(Flask):
         self.paymentEP = PaymentController(self.paymentService)
         self.customFieldService = CustomFieldService()
         self.customFieldEP = CustomFieldController(self.customFieldService)
+        self.jobsEP = JobsController()
 
     def _setup_schedulers(self):
         """Set up background tasks."""
@@ -300,6 +302,14 @@ class Akkountant(Flask):
             ('/freelance/signatures/<signatureId>', 'DELETE', self.signatureEP.delete_signature),
         ]
 
+        # Jobs management endpoints
+        jobsRoutes = [
+            ('/jobs/summary', 'GET', self.jobsEP.get_jobs_summary),
+            ('/jobs/by-title-status', 'GET', self.jobsEP.get_jobs_by_title_status),
+            ('/jobs/<job_id>/cancel', 'DELETE', self.jobsEP.cancel_job),
+            ('/jobs/cancel-bulk', 'POST', self.jobsEP.cancel_jobs_bulk),
+        ]
+
         # Register all routes
         all_routes = [
             *dashboardRoutes,
@@ -308,6 +318,7 @@ class Akkountant(Flask):
             *customerRoutes,
             *templateRoutes,
             *signatureRoutes,
+            *jobsRoutes,
         ]
 
         for rule, method, view_func in all_routes:
