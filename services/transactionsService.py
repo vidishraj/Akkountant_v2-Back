@@ -18,6 +18,7 @@ from services.parsers.HDFC_Debit import HDFCDebitParser
 from services.parsers.ICICI_Amazon_Credit import ICICICreditCardStatementParser
 from services.parsers.YES_Credit import YESBankCreditParser
 from services.parsers.YES_Debit import YESBankDebitParser
+from services.parsers.BOI_Debit import BOIDebitParser
 from services.Base_Service import BaseService
 from utils.logger import Logger
 
@@ -350,7 +351,8 @@ class TransactionService(BaseService):
             StatementPatternEnum.YES_BANK_ACE: YESBankCreditParser,
             StatementPatternEnum.ICICI_AMAZON_PAY: ICICICreditCardStatementParser,
             StatementPatternEnum.HDFC_DEBIT: HDFCDebitParser,
-            StatementPatternEnum.Millenia_Credit: HDFCMilleniaParse
+            StatementPatternEnum.Millenia_Credit: HDFCMilleniaParse,
+            StatementPatternEnum.BOI: BOIDebitParser
         }
 
         # Get the appropriate parser class from the mapping
