@@ -23,8 +23,15 @@ class CheckStatementTask(BaseTask):
             if not self.user_id:
                 self.logger.error("User ID not found. Stopping task")
                 return "No userid", "Failed", self.interval
-            # Just scanning the entire fcking month
-            read, conflicts = self.transactionService.readStatementsFromMail(None, None, self.user_id, None)
-            return f"{read} transactions read in statements (Claude PDF analysis + intelligent detection). {conflicts} conflicts", "Completed", self.interval
+            # Match exactly what triggerStatementCheck endpoint does
+            self.logger.info(f"Reading statements for user {self.user_id} using claude algorithm")
+            successCount, errorCount = self.transactionService.readStatementsFromMail(
+                dateTo=None, 
+                dateFrom=None, 
+                userID=self.user_id, 
+                bank=None, 
+                algorithm='claude'
+            )
+            return f"{successCount} transactions read in statements (Claude PDF analysis + intelligent detection). {errorCount} conflicts", "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval

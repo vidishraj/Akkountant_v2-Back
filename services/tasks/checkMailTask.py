@@ -22,8 +22,14 @@ class CheckMailTask(BaseTask):
             if not self.user_id:
                 self.logger.error("User ID not found. Stopping task")
                 return "No userid", "Failed", self.interval
-            # Just scanning the entire current month
-            read, conflicts = self.transactionService.readTransactionFromMail(None, None, self.user_id)
-            return f"{read} emails processed. {conflicts} conflicts (intelligent detection + Claude Code primary)", "Completed", self.interval
+            # Match exactly what triggerEmailCheck endpoint does
+            self.logger.info(f"Reading email for user {self.user_id} using claude algorithm")
+            successCount, errorCount = self.transactionService.readTransactionFromMail(
+                dateTo=None, 
+                dateFrom=None, 
+                userID=self.user_id, 
+                algorithm='claude'
+            )
+            return f"{successCount} emails processed. {errorCount} conflicts (intelligent detection + Claude Code primary)", "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
