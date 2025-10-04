@@ -6,6 +6,7 @@ from enums.TaskStatusEnum import JobStatus
 from services.Base_Service import BaseService
 from utils.logger import Logger
 from datetime import datetime
+import pytz
 
 class JobService(BaseService):
     _instance = None
@@ -18,6 +19,8 @@ class JobService(BaseService):
     
     def __init__(self):
         super().__init__()
+        self.ist_timezone = pytz.timezone('Asia/Kolkata')
+        self.utc_timezone = pytz.UTC
     
     def get_job_summary(self):
         """Get summary of all unique job titles with their priorities"""
@@ -95,13 +98,21 @@ class JobService(BaseService):
             # Convert to dict format
             job_list = []
             for job in jobs:
+                # Convert IST due_date to UTC for frontend
+                utc_due_date = None
+                if job.due_date:
+                    # Assume stored datetime is IST, convert to UTC
+                    ist_date = self.ist_timezone.localize(job.due_date)
+                    utc_date = ist_date.astimezone(self.utc_timezone)
+                    utc_due_date = utc_date.isoformat()
+                
                 job_list.append({
                     'id': job.id,
                     'title': job.title,
                     'result': job.result,
                     'priority': job.priority,
                     'status': job.status,
-                    'due_date': job.due_date.isoformat() if job.due_date else None,
+                    'due_date': utc_due_date,
                     'failures': job.failures,
                     'user_id': job.user_id,
                     'job_type_disabled': job_type_disabled  # Indicate if this job TYPE is disabled
