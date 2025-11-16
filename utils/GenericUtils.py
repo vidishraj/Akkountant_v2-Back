@@ -150,6 +150,13 @@ class GenericUtil:
             import concurrent.futures
             
             self.logger.info(f"Starting Claude parallel extraction for {len(emails)} emails from {bankType}")
+            self.logger.debug(f"Will use {min(5, len(emails))} parallel workers for processing")
+            
+            # Log email details being sent to Claude
+            for i, email in enumerate(emails[:3]):  # Log first 3 emails
+                self.logger.debug(f"Email {i+1}: Subject='{email.get('subject', 'N/A')}', Sender='{email.get('sender', 'N/A')}', Message_ID='{email.get('message_id', 'N/A')}'")
+            if len(emails) > 3:
+                self.logger.debug(f"... and {len(emails) - 3} more emails")
             
             # Process emails in parallel with max 5 workers (reduced to prevent worker crashes)
             max_workers = min(5, len(emails))
@@ -365,6 +372,16 @@ Bank statement text:'''
     def _try_claude_extraction(self, email, bankType):
         """Try to extract transaction data using Claude Code as fallback"""
         try:
+            self.logger.debug(f"Starting Claude extraction for {bankType} email: Subject='{email.get('subject', 'N/A')}', Time='{email.get('time', 'N/A')}'")
+            self.logger.debug(f"Email message preview: {email.get('message', '')[:150]}...")
+            self.logger.debug(f"Email sender: {email.get('sender', 'N/A')}")
+            self.logger.debug(f"Email message_id: {email.get('message_id', 'N/A')}")
+            
+            # Check if email has sufficient content
+            email_content = email.get('message', '')
+            if not email_content or len(email_content.strip()) < 10:
+                self.logger.warning(f"Email content too short or empty for Claude processing: {len(email_content)} chars")
+                return None
             prompt = '''You are a data extraction tool. Extract transaction information from this banking email and respond with ONLY a JSON object. Do not include any explanatory text, markdown, or conversation.
 
 IMPORTANT: For amount field, use positive values for debit transactions (money spent/outgoing) and negative values for credit transactions (money received/incoming).
@@ -394,43 +411,102 @@ Email content:'''
             env['NODE_PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/lib/node_modules'
             
             # First check if Claude CLI is available to avoid timeouts
+            self.logger.debug(f"Checking Claude CLI availability with PATH: {env.get('PATH')}")
+            self.logger.debug(f"Environment - HOME: {env.get('HOME')}, NODE_PATH: {env.get('NODE_PATH')}")
+            
             try:
                 check_result = subprocess.run(['which', 'claude'], capture_output=True, text=True, timeout=3, env=env)
+                self.logger.debug(f"'which claude' return code: {check_result.returncode}")
+                self.logger.debug(f"'which claude' stdout: {check_result.stdout.strip()}")
+                self.logger.debug(f"'which claude' stderr: {check_result.stderr.strip()}")
+                
                 if check_result.returncode != 0:
                     self.logger.warning(f"Claude CLI not found in PATH, falling back to regex immediately")
+                    # Also check common locations
+                    common_paths = ['/usr/local/bin/claude', '/usr/bin/claude', '~/.local/bin/claude']
+                    for path in common_paths:
+                        try:
+                            test_result = subprocess.run(['ls', '-la', path], capture_output=True, text=True, timeout=2)
+                            if test_result.returncode == 0:
+                                self.logger.info(f"Found Claude CLI at {path}: {test_result.stdout.strip()}")
+                        except:
+                            pass
                     return None
+                else:
+                    self.logger.info(f"Claude CLI found at: {check_result.stdout.strip()}")
             except Exception as e:
                 self.logger.warning(f"Claude CLI check failed: {e}, falling back to regex immediately")
                 return None
             
-            result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=15, env=env, shell=False)
+            # Log the actual command being executed
+            self.logger.debug(f"Executing Claude command: {' '.join(cmd)}")
+            self.logger.debug(f"Input length: {len(combined_content)} characters")
+            self.logger.debug(f"Input preview: {combined_content[:200]}...")
+            
+            try:
+                result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=15, env=env, shell=False)
+                
+                # Log detailed results
+                self.logger.info(f"Claude command completed with return code: {result.returncode}")
+                if result.stdout:
+                    self.logger.debug(f"Claude stdout length: {len(result.stdout)} characters")
+                    self.logger.debug(f"Claude stdout preview: {result.stdout[:300]}...")
+                if result.stderr:
+                    self.logger.warning(f"Claude stderr: {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"Claude command timed out after 15 seconds")
+                return None
+            except Exception as e:
+                self.logger.error(f"Claude command failed with exception: {e}")
+                return None
             
             if result.returncode == 0:
+                self.logger.debug(f"Claude returned success status, attempting to parse response")
                 # Try to extract JSON from Claude's response
                 json_data = self._extract_json_from_response(result.stdout)
                 
-                if json_data and json_data.get('transaction_found'):
-                    # Convert Claude response to expected format
-                    amount = str(json_data['amount']).replace(',', '')
-                    referenceID = GenericUtil().generate_reference_id(
-                        json_data['transaction_date'], 
-                        json_data['description'], 
-                        abs(float(amount))
-                    )
-                    return {
-                        'reference': referenceID,
-                        'date': json_data['transaction_date'],
-                        'description': json_data['description'],
-                        'amount': amount,
-                        'processed_via': 'CLAUDE_CODE'
-                    }
-            return None
+                if json_data:
+                    self.logger.debug(f"Successfully parsed JSON from Claude response: {json_data}")
+                    if json_data.get('transaction_found'):
+                        self.logger.info(f"Claude found transaction: Amount={json_data.get('amount')}, Date={json_data.get('transaction_date')}, Description={json_data.get('description', '')[:50]}...")
+                        # Convert Claude response to expected format
+                        amount = str(json_data['amount']).replace(',', '')
+                        referenceID = GenericUtil().generate_reference_id(
+                            json_data['transaction_date'], 
+                            json_data['description'], 
+                            abs(float(amount))
+                        )
+                        result_data = {
+                            'reference': referenceID,
+                            'date': json_data['transaction_date'],
+                            'description': json_data['description'],
+                            'amount': amount,
+                            'processed_via': 'CLAUDE_CODE'
+                        }
+                        self.logger.debug(f"Claude extraction successful, returning: {result_data}")
+                        return result_data
+                    else:
+                        self.logger.debug(f"Claude response indicates no transaction found: {json_data}")
+                        return None
+                else:
+                    self.logger.warning(f"Failed to parse JSON from Claude response. Raw response: {result.stdout[:500]}...")
+                    return None
+            else:
+                self.logger.warning(f"Claude Code returned non-zero status: {result.returncode}")
+                if result.stderr:
+                    self.logger.warning(f"Claude stderr: {result.stderr}")
+                if result.stdout:
+                    self.logger.debug(f"Claude stdout despite error: {result.stdout[:300]}...")
+                return None
         except subprocess.TimeoutExpired:
             self.logger.warning(f"Claude Code timeout after 15 seconds, falling back to regex")
             return None
         except Exception as e:
             self.logger.error(f"Claude Code extraction failed: {str(e)}")
             return None
+        finally:
+            self.logger.debug(f"Finished Claude extraction attempt for {bankType}")
 
     def _extract_json_from_response(self, response_text):
         """Extract JSON from Claude's response, handling structured CLI output"""
