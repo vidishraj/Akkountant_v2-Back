@@ -292,24 +292,44 @@ class TransactionService(BaseService):
                     # Fallback to individual inserts to handle duplicates
                     integrityErrors = self._insert_transactions_individually(transaction_objects)
 
-            # OPTIMIZATION: Batch insert conflicts
+            # OPTIMIZATION: Batch insert conflicts with duplicate checking
             if conflicts:
-                conflict_objects = [
-                    TransactionForReview(user=userId, conflict=conflict) 
-                    for conflict in conflicts
-                ]
-                try:
-                    if isinstance(self.db, dict):
-                        with self.db.session() as session:
-                            session.add_all(conflict_objects)
-                            session.commit()
-                    else:
-                        self.db.session.add_all(conflict_objects)
-                        self.db.session.commit()
-                    self.logger.info(f"Batch inserted {len(conflict_objects)} conflicts")
-                except IntegrityError as e:
-                    self.logger.warning(f"Batch conflict insert failed: {e}")
-                    self.db.session.rollback()
+                # Check for existing conflicts to avoid duplicates
+                existing_conflicts = set()
+                if isinstance(self.db, dict):
+                    with self.db.session() as session:
+                        existing = session.query(TransactionForReview.conflict).filter(
+                            TransactionForReview.user == userId
+                        ).all()
+                        existing_conflicts = {row.conflict for row in existing}
+                else:
+                    existing = self.db.session.query(TransactionForReview.conflict).filter(
+                        TransactionForReview.user == userId
+                    ).all()
+                    existing_conflicts = {row.conflict for row in existing}
+                
+                # Filter out duplicate conflicts
+                new_conflicts = [conflict for conflict in conflicts if conflict not in existing_conflicts]
+                
+                if new_conflicts:
+                    conflict_objects = [
+                        TransactionForReview(user=userId, conflict=conflict) 
+                        for conflict in new_conflicts
+                    ]
+                    try:
+                        if isinstance(self.db, dict):
+                            with self.db.session() as session:
+                                session.add_all(conflict_objects)
+                                session.commit()
+                        else:
+                            self.db.session.add_all(conflict_objects)
+                            self.db.session.commit()
+                        self.logger.info(f"Batch inserted {len(conflict_objects)} new conflicts (skipped {len(conflicts) - len(new_conflicts)} duplicates)")
+                    except IntegrityError as e:
+                        self.logger.warning(f"Batch conflict insert failed: {e}")
+                        self.db.session.rollback()
+                else:
+                    self.logger.info(f"Skipped {len(conflicts)} duplicate conflicts")
                     
         except Exception as e:
             self.logger.error(f"Error in batch insert: {str(e)}")

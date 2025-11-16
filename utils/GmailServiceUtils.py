@@ -98,10 +98,9 @@ class GmailServiceUtils:
         # OPTIMIZATION: Initial request with deduplication and larger page size
         request = gmailService.users().messages().list(
             userId='me',
-            q=f"after:{dateFrom} before:{dateTo} in:inbox -is:sent",
+            q=f"after:{dateFrom} before:{dateTo}",  # Search ALL emails, not just inbox
             maxResults=min(500, self.PAGE_SIZE * 5),  # Larger batches for faster fetching
-            includeSpamTrash=False,
-            labelIds=["INBOX"]
+            includeSpamTrash=True  # Include spam and trash
         )
 
         while request is not None:

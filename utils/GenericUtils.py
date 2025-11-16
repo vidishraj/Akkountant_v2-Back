@@ -393,6 +393,16 @@ Email content:'''
             env['HOME'] = '/root'
             env['NODE_PATH'] = '/home/opc/.nvm/versions/node/v20.18.1/lib/node_modules'
             
+            # First check if Claude CLI is available to avoid timeouts
+            try:
+                check_result = subprocess.run(['which', 'claude'], capture_output=True, text=True, timeout=3, env=env)
+                if check_result.returncode != 0:
+                    self.logger.warning(f"Claude CLI not found in PATH, falling back to regex immediately")
+                    return None
+            except Exception as e:
+                self.logger.warning(f"Claude CLI check failed: {e}, falling back to regex immediately")
+                return None
+            
             result = subprocess.run(cmd, input=combined_content, capture_output=True, text=True, timeout=15, env=env, shell=False)
             
             if result.returncode == 0:
