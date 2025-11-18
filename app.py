@@ -21,8 +21,7 @@ from controllers.signatureEP import SignatureController
 from controllers.paymentEP import PaymentController
 from controllers.customFieldEP import CustomFieldController
 from controllers.jobsEP import JobsController
-# from controllers.jobApplicationEmailEP import JobApplicationEmailController
-from enums.TaskStatusEnum import JobStatus  
+from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
 from services.transactionsService import TransactionService
@@ -139,7 +138,6 @@ class Akkountant(Flask):
     def _setup_instances(self):
         """Initialize application instances."""
         self.transactionService = TransactionService()
-        # self.jobApplicationEmailEP = JobApplicationEmailController(self.transactionService)
         self.transactionEP = TransactionController(self.transactionService)
         self.investmentService = InvestmentService()
         self.investmentEP = InvestmentController(self.investmentService)
@@ -215,15 +213,6 @@ class Akkountant(Flask):
             ('/downloadFile', 'GET', self.transactionEP.downloadFile),
             ('/deleteFile', 'GET', self.transactionEP.deleteFile),
         ]
-
-        # emailJobRoutes = [
-        #     ('/processJobEmails', 'POST', self.jobApplicationEmailEP.processEmails),
-        #     ('/jobApplications', 'GET', self.jobApplicationEmailEP.fetchJobApplications),
-        #     ('/jobUpdate', 'POST', self.jobApplicationEmailEP.updateJobApplication),
-        # ]   
-
-        # for rule, method, view_func in emailJobRoutes:
-        #     self.add_url_rule(rule, methods=[method], view_func=view_func)
 
         for rule, method, view_func in transactionRoutes:
             self.add_url_rule(rule, methods=[method], view_func=view_func)
