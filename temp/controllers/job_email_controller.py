@@ -15,19 +15,17 @@ class JobEmailController:
         try:
             data = request.get_json(force=True) if request.is_json else {}
             user_id = request.headers.get('X-Firebase-ID')
-            days_back = 7  # Default to 7 days
             
-            # Handle date range from frontend
-            if data.get('date_from') and data.get('date_to'):
-                from datetime import datetime
-                date_from = datetime.strptime(data['date_from'], '%Y-%m-%d')
-                date_to = datetime.strptime(data['date_to'], '%Y-%m-%d')
-                days_back = (date_to - date_from).days
+            # Handle date range from frontend - your format: {date_from: "2025-11-22", date_to: "2025-11-23"}
+            date_from = data.get('date_from')
+            date_to = data.get('date_to')
+            
+            self.logger.debug(f"Received date range: {date_from} to {date_to}")
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
             
-            result = self.job_email_service.scan_emails_for_jobs(user_id, days_back)
+            result = self.job_email_service.scan_emails_for_jobs(user_id, date_from, date_to)
             
             from datetime import datetime
             return jsonify({

@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 import anyio
 from datetime import datetime, timedelta
 from services.Base_Service import BaseService
@@ -39,20 +40,27 @@ class JobEmailService(BaseService):
             self.logger.error(f"Error fetching Gmail token for user {user_id}: {str(e)}")
             raise
 
-    def scan_emails_for_jobs(self, user_id: str, days_back: int = 7):
+    def scan_emails_for_jobs(self, user_id: str, date_from: str = None, date_to: str = None):
         """Scan emails for job applications and updates using Claude batch processing"""
         try:
-
             # Get Gmail token for user from database
             token_data = self._get_gmail_token_for_user(user_id)
-            date_to = datetime.now().strftime('%Y/%m/%d')
-            date_from = (datetime.now() - timedelta(days=days_back)).strftime('%Y/%m/%d')
             
-            self.logger.info(f"Scanning emails from {date_from} to {date_to} for user {user_id}")
+            # Handle date range - if not provided, default to last 7 days
+            if date_from and date_to:
+                # Convert from YYYY-MM-DD to YYYY/MM/DD format for Gmail API
+                date_from_formatted = datetime.strptime(date_from, '%Y-%m-%d').strftime('%Y/%m/%d')
+                date_to_formatted = datetime.strptime(date_to, '%Y-%m-%d').strftime('%Y/%m/%d')
+            else:
+                # Default to last 7 days
+                date_to_formatted = datetime.now().strftime('%Y/%m/%d')
+                date_from_formatted = (datetime.now() - timedelta(days=7)).strftime('%Y/%m/%d')
+            
+            self.logger.info(f"Scanning emails from {date_from_formatted} to {date_to_formatted} for user {user_id}")
             
             # Collect all emails first and filter out already processed ones
             all_emails = []
-            for email in self.gmailService.findAllEmailsInInterval(user_id, token_data, date_from, date_to):
+            for email in self.gmailService.findAllEmailsInInterval(user_id, token_data, date_from_formatted, date_to_formatted):
                 all_emails.append(email)
             
             # Filter out already processed emails in batch
