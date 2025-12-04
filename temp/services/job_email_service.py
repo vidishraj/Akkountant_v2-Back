@@ -119,8 +119,8 @@ class JobEmailService(BaseService):
             
         except Exception as e:
             self.logger.error(f"Error in Claude batch analysis: {str(e)}")
-            # Fallback: mark all as non-job-related if Claude fails
-            return [{'email': email, 'is_job_related': False, 'job_data': {}} for email in emails]
+            # Fallback: raise exception.
+            raise Exception
     
     def _filter_unprocessed_emails(self, emails, user_id):
         """Filter out emails that have already been processed"""
