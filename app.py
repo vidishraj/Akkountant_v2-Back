@@ -21,6 +21,7 @@ from controllers.signatureEP import SignatureController
 from controllers.paymentEP import PaymentController
 from controllers.customFieldEP import CustomFieldController
 from controllers.jobsEP import JobsController
+from temp.controllers.job_email_controller import JobEmailController
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -33,6 +34,7 @@ from services.templateService import TemplateService
 from services.signatureService import SignatureService
 from services.paymentService import PaymentService
 from services.customFieldService import CustomFieldService
+from temp.services.job_email_service import JobEmailService
 from utils.logger import Logger
 import models
 
@@ -158,6 +160,8 @@ class Akkountant(Flask):
         self.customFieldService = CustomFieldService()
         self.customFieldEP = CustomFieldController(self.customFieldService)
         self.jobsEP = JobsController()
+        self.jobEmailService = JobEmailService()
+        self.jobEmailEP = JobEmailController(self.jobEmailService)
 
     def _setup_schedulers(self):
         """Set up background tasks."""
@@ -299,6 +303,19 @@ class Akkountant(Flask):
             ('/jobs/cancel-bulk', 'POST', self.jobsEP.cancel_jobs_bulk),
         ]
 
+        # Temp Job Email management endpoints
+        jobEmailRoutes = [
+            ('/job-scanner/scan', 'POST', self.jobEmailEP.scan_emails),
+            ('/job-scanner/emails', 'GET', self.jobEmailEP.get_job_emails),
+            ('/job-scanner/emails/<email_id>', 'GET', self.jobEmailEP.get_job_email_details),
+            ('/job-scanner/emails/<email_id>', 'PATCH', self.jobEmailEP.update_email_details),
+            ('/job-scanner/emails/<email_id>', 'DELETE', self.jobEmailEP.delete_email),
+            ('/job-scanner/emails/<email_id>/read', 'PATCH', self.jobEmailEP.mark_email_as_read),
+            ('/job-scanner/stats', 'GET', self.jobEmailEP.get_email_stats),
+            ('/job-scanner/gmail-status', 'GET', self.jobEmailEP.get_gmail_status),
+            ('/job-scanner/gmail-refresh', 'POST', self.jobEmailEP.refresh_gmail_token),
+        ]
+
         # Register all routes
         all_routes = [
             *dashboardRoutes,
@@ -308,6 +325,7 @@ class Akkountant(Flask):
             *templateRoutes,
             *signatureRoutes,
             *jobsRoutes,
+            *jobEmailRoutes,
         ]
 
         for rule, method, view_func in all_routes:

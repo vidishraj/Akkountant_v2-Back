@@ -24,3 +24,6 @@ pytest
 reportlab
 kiteconnect
 PyPDF2
+flask-restx
+claude_agent_sdk
+anyio
