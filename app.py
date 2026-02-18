@@ -21,6 +21,7 @@ from controllers.signatureEP import SignatureController
 from controllers.paymentEP import PaymentController
 from controllers.customFieldEP import CustomFieldController
 from controllers.jobsEP import JobsController
+from controllers.agentEP import AgentController
 from temp.controllers.job_email_controller import JobEmailController
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
@@ -35,6 +36,8 @@ from services.signatureService import SignatureService
 from services.paymentService import PaymentService
 from services.customFieldService import CustomFieldService
 from temp.services.job_email_service import JobEmailService
+from services.agentService import AgentService
+from services.cronAgent import CronAgent
 from utils.logger import Logger
 import models
 
@@ -162,14 +165,34 @@ class Akkountant(Flask):
         self.jobsEP = JobsController()
         self.jobEmailService = JobEmailService()
         self.jobEmailEP = JobEmailController(self.jobEmailService)
+        self.agentService = AgentService()
+        self.agentService.set_services(
+            investment_service=self.investmentService,
+            transaction_service=self.transactionService,
+            invoice_service=self.invoiceService,
+            customer_service=self.customerService,
+            dashboard_service=self.dashboardService,
+        )
+        self.agentEP = AgentController(self.agentService)
 
     def _setup_schedulers(self):
-        """Set up background tasks."""
-        pass
-        # with self.app_context():
-        #     self.scheduler = TaskScheduler(self.db, self)
-        #     self.scheduler.start_scheduler()
-        #     self.logger.info("Background schedulers initialized.")
+        """Set up background tasks: TaskScheduler (worker) + CronAgent (brain)."""
+        with self.app_context():
+            db_url = os.getenv('DATABASE_URL')
+
+            # 1. Start TaskScheduler (processes queued jobs)
+            self.scheduler = TaskScheduler(db_url, flask_app=self)
+            self.scheduler.start_scheduler()
+            self.logger.info("TaskScheduler started.")
+
+            # 2. Start CronAgent (AI decides what to refresh)
+            self.cron_agent = CronAgent(
+                flask_app=self,
+                investment_service=self.investmentService,
+                interval_seconds=1800,
+            )
+            self.cron_agent.start()
+            self.logger.info("CronAgent started (30-min interval).")
 
     def _insert_initial_jobs(self, title, status, priority, due_date, user_id=None):
         try:
@@ -316,16 +339,22 @@ class Akkountant(Flask):
             ('/job-scanner/gmail-refresh', 'POST', self.jobEmailEP.refresh_gmail_token),
         ]
 
+        # Agent chat endpoint
+        agentRoutes = [
+            ('/agent/chat', 'POST', self.agentEP.chat),
+        ]
+
         # Register all routes
         all_routes = [
             *dashboardRoutes,
-            *invoiceRoutes, 
+            *invoiceRoutes,
             *pdfRoutes,
             *customerRoutes,
             *templateRoutes,
             *signatureRoutes,
             *jobsRoutes,
             *jobEmailRoutes,
+            *agentRoutes,
         ]
 
         for rule, method, view_func in all_routes:

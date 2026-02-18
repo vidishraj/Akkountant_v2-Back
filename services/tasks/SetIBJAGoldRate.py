@@ -1,16 +1,10 @@
 import os
-import re
-import requests
-from datetime import datetime, timedelta
-import PyPDF2
-from io import BytesIO
-from bs4 import BeautifulSoup
 
-from services.tasks.baseTask import BaseTask
+from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
 
-class SetIBJAGoldRate(BaseTask):
+class SetIBJAGoldRate(AIRateTask):
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -19,364 +13,108 @@ class SetIBJAGoldRate(BaseTask):
         return cls._instance
 
     def __init__(self, title, priority):
-        if not hasattr(self, 'initialized'):  # Prevent multiple initializations
+        if not hasattr(self, 'initialized'):
             super().__init__(title, priority)
             self.logger = Logger(__name__).get_logger()
-            # 4 hours
+            # 5 hours
             self.interval = 300
             self.initialized = True
 
     def run(self):
         try:
-            # Ensure tmp directory exists with proper permissions
-            os.makedirs(self.tmp_dir, mode=0o755, exist_ok=True)
-            
-            # Get IBJA gold and silver rates from PDF
-            jsonData = self.getIBJAData()
+            prompt = """Search the web for today's IBJA (India Bullion and Jewellers Association) gold and silver rates.
+Look for the latest daily opening and closing rates from ibjarates.com or other reliable Indian bullion rate sources.
+
+I need rates for these gold purities (per 10 grams) and silver (per 1 kg):
+- Gold 999 (24 Carat) - AM and PM prices
+- Gold 995 - AM and PM prices
+- Gold 916 (22 Carat) - AM and PM prices
+- Gold 750 (18 Carat) - AM and PM prices
+- Gold 585 - AM and PM prices
+- Silver 999 - AM and PM prices per kg
+
+Return a JSON object with this EXACT structure (all prices in INR as integers):
+
+{
+  "24 Carat": <gold_999_avg_with_3pct_gst>,
+  "22 Carat": <gold_916_avg_with_3pct_gst>,
+  "18 Carat": <gold_750_avg_with_3pct_gst>,
+  "ibja_data": {
+    "date": "<DD-Mon-YY>",
+    "gold": {
+      "999": {
+        "am_price_10g": <int>,
+        "pm_price_10g": <int>,
+        "avg_price_10g": <int>,
+        "avg_with_gst": <int>
+      },
+      "995": {
+        "am_price_10g": <int>,
+        "pm_price_10g": <int>,
+        "avg_price_10g": <int>,
+        "avg_with_gst": <int>
+      },
+      "916": {
+        "am_price_10g": <int>,
+        "pm_price_10g": <int>,
+        "avg_price_10g": <int>,
+        "avg_with_gst": <int>
+      },
+      "750": {
+        "am_price_10g": <int>,
+        "pm_price_10g": <int>,
+        "avg_price_10g": <int>,
+        "avg_with_gst": <int>
+      },
+      "585": {
+        "am_price_10g": <int>,
+        "pm_price_10g": <int>,
+        "avg_price_10g": <int>,
+        "avg_with_gst": <int>
+      }
+    },
+    "silver": {
+      "999": {
+        "am_price_1kg": <int>,
+        "pm_price_1kg": <int>,
+        "avg_price_1kg": <int>,
+        "avg_with_gst": <int>
+      }
+    },
+    "currency": "INR",
+    "source": "IBJA"
+  }
+}
+
+Calculation rules:
+- avg_price = (am_price + pm_price) / 2 (integer division)
+- avg_with_gst = avg_price * 1.03 (truncated to integer)
+- "24 Carat" = gold 999 avg_with_gst
+- "22 Carat" = gold 916 avg_with_gst
+- "18 Carat" = gold 750 avg_with_gst
+- Date format: "DD-Mon-YY" (e.g. "16-Feb-26")
+- If today's rates aren't available yet (e.g. before market open), use the most recent available day's rates"""
+
+            jsonData = self.fetch_rates_via_ai(prompt)
+            if not jsonData or '24 Carat' not in jsonData:
+                return "Failed to get Gold Rates via AI", "Failed", self.interval
+
+            filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
             try:
-                filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
-                # delete file if it exists
-                try:
-                    os.remove(filePath)
-                except OSError:
-                    pass
-                self.save_json(jsonData, filePath)
+                os.remove(filePath)
+            except OSError:
+                pass
+            self.save_json(jsonData, filePath)
 
-                # get the latest rate file in assets
-                latestFile = self.jsonService.getLatestFile(self.jsonService.ratesType, self.jsonService.GoldRatePrefix)
+            latestFile = self.jsonService.getLatestFile(self.jsonService.ratesType, self.jsonService.GoldRatePrefix)
+            latestFilePath = self.jsonService.getFilePath(self.jsonService.GoldRatePrefix,
+                                                          self.jsonService.ratesType)
+            fileMoved = self.move_file(filePath, latestFilePath)
 
-                latestFilePath = self.jsonService.getFilePath(self.jsonService.GoldRatePrefix,
-                                                              self.jsonService.ratesType)
-
-                fileMoved = self.move_file(filePath, latestFilePath)
-
-                if fileMoved:
-                    # delete old file
-                    self.jsonService.deleteFile(latestFile)
-                else:
-                    return 'Failed to move file', "Failed", self.interval
-                return 'Completed successfully', "Completed", self.interval
-            except Exception as ex:
-                return ex.__str__(), "Failed", self.interval
+            if fileMoved:
+                self.jsonService.deleteFile(latestFile)
+            else:
+                return 'Failed to move file', "Failed", self.interval
+            return 'Completed successfully', "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
-
-    def getIBJAData(self):
-        """
-        Fetches and parses IBJA gold and silver rates from PDF by scraping the homepage
-        """
-        try:
-            # First, scrape the IBJA homepage to find the PDF link
-            pdf_url = self.find_pdf_from_homepage()
-            
-            if not pdf_url:
-                raise Exception("Could not find PDF link on IBJA homepage")
-            
-            self.logger.info(f"Found PDF URL: {pdf_url}")
-            
-            # Fetch the PDF
-            response = requests.get(pdf_url, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-            }, timeout=30)
-            
-            if response.status_code == 200:
-                # Parse the PDF content
-                rates_data = self.parse_ibja_pdf(response.content)
-                if rates_data:
-                    self.logger.info("Successfully parsed IBJA rates from homepage PDF")
-                    return rates_data
-                else:
-                    raise Exception("Failed to parse PDF content")
-            else:
-                raise Exception(f"Failed to fetch PDF, status: {response.status_code}")
-            
-        except Exception as e:
-            self.logger.error(f"Error fetching IBJA data: {str(e)}")
-            raise
-
-    def find_pdf_from_homepage(self):
-        """
-        Scrape the IBJA homepage to find the "Previous 30 days" PDF link
-        """
-        try:
-            homepage_url = "https://ibjarates.com/"
-            self.logger.info(f"Scraping IBJA homepage: {homepage_url}")
-            
-            response = requests.get(homepage_url, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-            }, timeout=30)
-            
-            if response.status_code != 200:
-                self.logger.error(f"Failed to fetch homepage, status: {response.status_code}")
-                return None
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Look for "Previous 30 days" button or link
-            # This could be in various forms: button, link, etc.
-            pdf_link = None
-            
-            # Try different selectors to find the PDF link
-            selectors = [
-                'a[href*="30DaysPdf"]',  # Links containing 30DaysPdf
-                'a[href*="pdf"]',  # Any PDF links
-                'button[onclick*="30DaysPdf"]',  # Buttons with PDF onclick
-                'a:contains("Previous 30 days")',  # Text-based search
-                'a:contains("30 days")',  # Partial text search
-                'a:contains("PDF")',  # PDF text search
-            ]
-            
-            for selector in selectors:
-                try:
-                    if ':contains(' in selector:
-                        # For text-based selectors, use find with string search
-                        if 'Previous 30 days' in selector:
-                            links = soup.find_all('a', string=re.compile(r'Previous.*30.*days', re.I))
-                        elif '30 days' in selector:
-                            links = soup.find_all('a', string=re.compile(r'30.*days', re.I))
-                        elif 'PDF' in selector:
-                            links = soup.find_all('a', string=re.compile(r'PDF', re.I))
-                        else:
-                            links = []
-                    else:
-                        # For CSS selectors
-                        links = soup.select(selector)
-                    
-                    for link in links:
-                        href = link.get('href') or link.get('onclick', '')
-                        if href:
-                            # Extract PDF URL from href or onclick
-                            if href.startswith('http'):
-                                pdf_link = href
-                            elif href.startswith('/'):
-                                pdf_link = f"https://ibjarates.com{href}"
-                            elif 'UploadedFiles' in href:
-                                # Extract from onclick or relative path
-                                if not href.startswith('http'):
-                                    # Clean up relative paths like "../UploadedFiles"
-                                    clean_href = href.lstrip('./')
-                                    pdf_link = f"https://ibjarates.com/{clean_href}"
-                                else:
-                                    pdf_link = href
-                            
-                            if pdf_link and '30DaysPdf' in pdf_link:
-                                self.logger.info(f"Found PDF link: {pdf_link}")
-                                return pdf_link
-                                
-                except Exception as e:
-                    self.logger.debug(f"Error with selector {selector}: {str(e)}")
-                    continue
-            
-            # If no specific link found, try to find any recent PDF in the page source
-            # Look for PDF URLs in the HTML content
-            pdf_urls = re.findall(r'https?://[^"\s]+30DaysPdf[^"\s]+\.pdf', response.text)
-            if pdf_urls:
-                pdf_link = pdf_urls[0]  # Take the first one
-                self.logger.info(f"Found PDF URL in page source: {pdf_link}")
-                return pdf_link
-            
-            self.logger.warning("Could not find PDF link on homepage")
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error scraping homepage: {str(e)}")
-            return None
-
-    def construct_ibja_url(self, date):
-        """
-        Construct IBJA PDF URL for a given date
-        Format: https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_4038_YYYYMMDDHHMMSS_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf
-        """
-        date_str = date.strftime('%Y%m%d')
-        
-        # Try both new and old PDF IDs
-        pdf_ids = ["4038", "9447"]  # New format first, then fallback to old
-        
-        # Try multiple common time patterns for each PDF ID
-        time_patterns = [
-            "121048339",  # New observed pattern
-            "170724682",  # Old pattern
-            "170000000",  # 5 PM
-            "120000000",  # 12 PM  
-            "180000000",  # 6 PM
-            "160000000",  # 4 PM
-        ]
-        
-        # Try each PDF ID with each time pattern
-        for pdf_id in pdf_ids:
-            for time_str in time_patterns:
-                url = f"https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_{pdf_id}_{date_str}{time_str}_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf"
-                try:
-                    # Quick HEAD request to check if URL exists
-                    response = requests.head(url, timeout=10)
-                    if response.status_code == 200:
-                        return url
-                except:
-                    continue
-        
-        # Fallback to the new pattern
-        return f"https://ibjarates.com/UploadedFiles/30DaysPdf/Pdf_4038_{date_str}121048339_Daily%20Opening%20and%20Closing%20Market%20Rate.pdf"
-
-    def parse_ibja_pdf(self, pdf_content):
-        """
-        Parse the IBJA PDF content and extract gold/silver rates
-        """
-        try:
-            pdf_file = BytesIO(pdf_content)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            
-            text_content = ""
-            for page in pdf_reader.pages:
-                text_content += page.extract_text()
-            
-            # Parse the text content to extract rates
-            rates_data = self.extract_rates_from_text(text_content)
-            return rates_data
-            
-        except Exception as e:
-            self.logger.error(f"Error parsing IBJA PDF: {str(e)}")
-            return None
-
-    def extract_rates_from_text(self, text):
-        """
-        Extract gold and silver rates from PDF text content
-        Updated to handle PDF format where dates and rates can be on the same line
-        """
-        try:
-            lines = text.split('\n')
-            
-            # Find the most recent date entry (first non-weekend/holiday entry)
-            for i, line in enumerate(lines):
-                line_strip = line.strip()
-                # Look for date pattern like "29-Sep-25"
-                date_match = re.search(r'(\d{1,2}-[A-Za-z]{3}-\d{2})', line_strip)
-                if date_match:
-                    date_str = date_match.group(1)
-                    
-                    # Check if this line contains weekend/holiday markers
-                    if any(skip_word in line_strip.upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
-                        continue
-                    
-                    # Method 1: Try to extract rates from the same line as the date
-                    # Split the line and look for numeric values after the date
-                    line_parts = line_strip.split()
-                    rates = []
-                    
-                    # Find the date part index and get all numeric values after it
-                    date_index = -1
-                    for i, part in enumerate(line_parts):
-                        if date_match.group(1) in part:
-                            date_index = i
-                            break
-                    
-                    # Extract all numeric values after the date
-                    if date_index >= 0:
-                        for part in line_parts[date_index + 1:]:
-                            if part.isdigit() and len(part) >= 4:  # Filter out small numbers that aren't rates
-                                rates.append(part)
-                    
-                    # Method 2: If not enough rates on same line, try next few lines
-                    if len(rates) < 12:
-                        self.logger.info(f"Only found {len(rates)} rates on same line, trying next lines")
-                        for j in range(i + 1, min(i + 15, len(lines))):
-                            next_line = lines[j].strip()
-                            
-                            # Stop if we hit weekend/holiday or another date
-                            if any(skip_word in next_line.upper() for skip_word in ['SUN', 'SAT', 'HOLIDAY']):
-                                break
-                            if re.match(r'\d{1,2}-[A-Za-z]{3}-\d{2}', next_line):
-                                break
-                            
-                            # Extract numeric values
-                            if next_line and next_line.isdigit():
-                                rates.append(next_line)
-                            
-                            # Stop when we have enough rates
-                            if len(rates) >= 12:
-                                break
-                    
-                    # If we found enough rates (either same line or next lines), use them
-                    if len(rates) >= 12:
-                        # Convert to integers
-                        rates = [int(r) for r in rates[:12]]
-                        
-                        # Calculate average prices for backward compatibility
-                        gold_999_avg = (rates[0] + rates[1]) // 2
-                        gold_916_avg = (rates[4] + rates[5]) // 2
-                        gold_750_avg = (rates[6] + rates[7]) // 2
-                        gold_995_avg = (rates[2] + rates[3]) // 2
-                        gold_585_avg = (rates[8] + rates[9]) // 2
-                        silver_999_avg = (rates[10] + rates[11]) // 2
-                        
-                        # Calculate GST inclusive rates (average + 3% GST)
-                        gold_999_gst = int(gold_999_avg * 1.03)
-                        gold_916_gst = int(gold_916_avg * 1.03)
-                        gold_750_gst = int(gold_750_avg * 1.03)
-                        gold_995_gst = int(gold_995_avg * 1.03)
-                        gold_585_gst = int(gold_585_avg * 1.03)
-                        silver_999_gst = int(silver_999_avg * 1.03)
-                        
-                        # Create backward compatible format with enhanced data
-                        rate_data = {
-                            # Backward compatibility - existing code expects these keys
-                            "24 Carat": gold_999_gst,  # 999 purity = 24 carat (with GST)
-                            "22 Carat": gold_916_gst,  # 916 purity = 22 carat (with GST)
-                            "18 Carat": gold_750_gst,  # 750 purity = 18 carat (with GST)
-                            
-                            # Enhanced IBJA data structure
-                            "ibja_data": {
-                                "date": date_str,
-                                "gold": {
-                                    "999": {
-                                        "am_price_10g": rates[0],
-                                        "pm_price_10g": rates[1],
-                                        "avg_price_10g": gold_999_avg,
-                                        "avg_with_gst": gold_999_gst
-                                    },
-                                    "995": {
-                                        "am_price_10g": rates[2],
-                                        "pm_price_10g": rates[3],
-                                        "avg_price_10g": gold_995_avg,
-                                        "avg_with_gst": gold_995_gst
-                                    },
-                                    "916": {
-                                        "am_price_10g": rates[4],
-                                        "pm_price_10g": rates[5],
-                                        "avg_price_10g": gold_916_avg,
-                                        "avg_with_gst": gold_916_gst
-                                    },
-                                    "750": {
-                                        "am_price_10g": rates[6],
-                                        "pm_price_10g": rates[7],
-                                        "avg_price_10g": gold_750_avg,
-                                        "avg_with_gst": gold_750_gst
-                                    },
-                                    "585": {
-                                        "am_price_10g": rates[8],
-                                        "pm_price_10g": rates[9],
-                                        "avg_price_10g": gold_585_avg,
-                                        "avg_with_gst": gold_585_gst
-                                    }
-                                },
-                                "silver": {
-                                    "999": {
-                                        "am_price_1kg": rates[10],
-                                        "pm_price_1kg": rates[11],
-                                        "avg_price_1kg": silver_999_avg,
-                                        "avg_with_gst": silver_999_gst
-                                    }
-                                },
-                                "currency": "INR",
-                                "source": "IBJA"
-                            }
-                        }
-                        
-                        self.logger.info(f"Extracted rates for {date_str} with rates: {rates[:12]}")
-                        return rate_data
-            
-            self.logger.warning("No valid rate data found in PDF text")
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error extracting rates from text: {str(e)}")
-            return None

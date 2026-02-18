@@ -43,6 +43,7 @@ class InvestmentService(BaseService):
         "SetMFDetails": "Set Mutual Funds Details",
         "SetGoldRate": "Set Gold Rates",
         "SetPPFRate": "Set PPF Rates",
+        "SetEPFRate": "Set EPF Rates",
         "CheckMail": "Check Mail",
         "CheckStatement": "Check Statements"
     }
@@ -78,16 +79,27 @@ class InvestmentService(BaseService):
         elif securityType == MSNENUM.NPS.value:
             item = self.NPSService.findSecurity(schemeCode)
             itemDetails = self.NPSService.JsonDownloadService.getNPSListDetailsForScheme(schemeCode)
-            change = item['sixMonthsAgo'] - item['nav']
-            pChange = (change / float(item['sixMonthsAgo'])) * 100
+
+            # Safely access optional historical fields with fallbacks
+            nav = item.get('nav', 0)
+            six_months_ago = item.get('sixMonthsAgo', item.get('nav', 0))
+
+            # Calculate change only if we have valid historical data
+            if six_months_ago > 0:
+                change = six_months_ago - nav
+                pChange = (change / float(six_months_ago)) * 100
+            else:
+                change = 0
+                pChange = 0
+
             return {
-                'lastPrice': item['nav'],
-                'date': item['date'],
-                'id': item['scheme_id'],
-                "yesterday": item['yesterday'],
-                "lastWeek": item['lastWeek'],
-                "sixMonthsAgo": item['sixMonthsAgo'],
-                'pfmName': itemDetails['pfm_name'],
+                'lastPrice': nav,
+                'date': item.get('date'),
+                'id': item.get('scheme_id'),
+                "yesterday": item.get('yesterday', nav),
+                "lastWeek": item.get('lastWeek', nav),
+                "sixMonthsAgo": six_months_ago,
+                'pfmName': itemDetails.get('pfm_name', ''),
                 'change': Decimal(change).quantize(Decimal('0.01'), rounding=ROUND_DOWN),
                 'pChange': Decimal(pChange).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
             }
@@ -204,7 +216,47 @@ class InvestmentService(BaseService):
                 rates = self.StockService.calculateStockRates(activeSecurities)
                 security['info'] = rates[security['buyCode'] if security['buyCode'] != "SUZLON-BE" else "SUZLON"]
             elif securityType == MSNENUM.NPS.value:
-                security['info'] = self.NPSService.findSecurity(security['buyCode'])
+                try:
+                    npsInfo = self.NPSService.findSecurity(security['buyCode'])
+
+                    # Check if we got valid data
+                    if not npsInfo or 'nav' not in npsInfo:
+                        self.logger.warning(f"No NPS rate data found for scheme {security['buyCode']}")
+                        security['info'] = {
+                            'nav': 0,
+                            'scheme_id': security['buyCode'],
+                            'date': None,
+                            'yesterday': 0,
+                            'lastWeek': 0,
+                            'sixMonthsAgo': 0,
+                            'pfm_name': 'Unknown',
+                            'error': 'RATE_DATA_UNAVAILABLE'
+                        }
+                        continue
+
+                    # Ensure optional fields have fallback values
+                    nav = npsInfo.get('nav', 0)
+                    security['info'] = {
+                        'nav': nav,
+                        'scheme_id': npsInfo.get('scheme_id', security['buyCode']),
+                        'date': npsInfo.get('date'),
+                        'yesterday': npsInfo.get('yesterday', nav),
+                        'lastWeek': npsInfo.get('lastWeek', nav),
+                        'sixMonthsAgo': npsInfo.get('sixMonthsAgo', nav),
+                        'pfm_name': npsInfo.get('pfm_name', 'Unknown')
+                    }
+                except Exception as e:
+                    self.logger.error(f"Error processing NPS data for scheme {security['buyCode']}: {str(e)}")
+                    security['info'] = {
+                        'nav': 0,
+                        'scheme_id': security['buyCode'],
+                        'date': None,
+                        'yesterday': 0,
+                        'lastWeek': 0,
+                        'sixMonthsAgo': 0,
+                        'pfm_name': 'Unknown',
+                        'error': 'PROCESSING_ERROR'
+                    }
             elif securityType == MSNENUM.Mutual_Funds.value:
                 try:
                     infoDetails = self.MFService.findSecurity(security['buyCode'])

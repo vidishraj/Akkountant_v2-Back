@@ -3,7 +3,6 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from flask import Flask
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from models.Jobs import Job
@@ -16,16 +15,18 @@ from services.tasks.SetMfRate import SetMFRate
 from services.tasks.SetMfDetails import SetMFDetails
 from services.tasks.SetIBJAGoldRate import SetIBJAGoldRate
 from services.tasks.SetPpfRate import SetPPFRate
+from services.tasks.SetEPFRate import SetEPFRate
 from services.tasks.checkMailTask import CheckMailTask
 from services.tasks.checkStatementsTask import CheckStatementTask
 from utils.logger import Logger
 
 
 class TaskScheduler:
-    def __init__(self, db_url):
+    def __init__(self, db_url, flask_app=None):
         self.logger = Logger(__name__).get_logger()
         self.engine = create_engine(db_url)
         self.Session = sessionmaker(bind=self.engine)
+        self.flask_app = flask_app
         self.threads_initialized = False
         self.thread_locks = threading.Lock()
 
@@ -103,6 +104,7 @@ class TaskScheduler:
             "SetMFDetails": SetMFDetails,
             "SetGoldRate": SetIBJAGoldRate,
             "SetPPFRate": SetPPFRate,
+            "SetEPFRate": SetEPFRate,
             "CheckMail": CheckMailTask,
             "CheckStatement": CheckStatementTask,
             "InvestmentHistoryTask": InvestmentHistoryTask
@@ -121,7 +123,7 @@ class TaskScheduler:
             self.threads_initialized = True
 
     def _run_overdue_scheduler(self):
-        with app.app_context():  # Push the app context for this thread
+        with self.flask_app.app_context():
             while True:
                 try:
                     self._update_overdue_jobs()
@@ -130,7 +132,7 @@ class TaskScheduler:
                     self.logger.error(f"Error in overdue scheduler: {e}")
 
     def _run_job_processor(self):
-        with app.app_context():  # Push the app context for this thread
+        with self.flask_app.app_context():
             while True:
                 try:
                     self._process_pending_and_overdue_jobs()
@@ -139,12 +141,14 @@ class TaskScheduler:
                     self.logger.error(f"Error in job processor: {e}")
 
 
-app = Flask(__name__)
 if __name__ == "__main__":
+    from flask import Flask
+
+    app = Flask(__name__)
     # Replace with your database URL
     DATABASE_URL = os.getenv('DATABASE_URL')
 
-    scheduler = TaskScheduler(DATABASE_URL)
+    scheduler = TaskScheduler(DATABASE_URL, flask_app=app)
     scheduler.start_scheduler()
 
     app.run(port=5000, debug=False)

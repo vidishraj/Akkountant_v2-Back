@@ -99,7 +99,7 @@ class SetNPSRate(BaseTask):
         url = f"https://npstrust.org.in/scheme-wise-nav-report-excel?navcatdataxls={pfm_id}&navyearselxls=12&navsubdataxls={scheme_id}"
         
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=30, verify=False)
             response.raise_for_status()
             
             # Check if response contains Excel data
