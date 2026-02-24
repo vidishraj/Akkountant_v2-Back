@@ -298,8 +298,10 @@ class JSONDownloadService:
                     td = timedelta(days=1)
                 if filename_prefix == self.NpsListPrefix or filename_prefix == self.NpsRatePrefix:
                     td = timedelta(days=1)
-                if filename_prefix == self.MfListPrefix or filename_prefix == self.MfRatePrefix:
-                    td = timedelta(days=30)
+                if filename_prefix == self.MfRatePrefix:
+                    td = timedelta(days=1)
+                if filename_prefix == self.MfListPrefix:
+                    td = timedelta(days=7)
                 if filename_prefix == self.StockListPrefix or filename_prefix == self.StockOldDetails:
                     td = timedelta(days=20)
                 # Compare time difference
