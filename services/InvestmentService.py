@@ -291,6 +291,7 @@ class InvestmentService(BaseService):
                             'fundHouse': 'Unknown',
                             'scheme_id': security['buyCode'],
                             'schemeType': 'Unknown',
+                            'companyName': 'Unknown',
                             'error': 'RATE_DATA_UNAVAILABLE'
                         }
                         continue
@@ -313,7 +314,8 @@ class InvestmentService(BaseService):
                         'change': self.genericUtil.convertToDecimal(change),
                         'fundHouse': infoDetails.get('fundHouse', 'Unknown'),
                         'scheme_id': infoDetails.get('scheme_id', security['buyCode']),
-                        'schemeType': infoDetails.get('schemeType', 'Unknown')
+                        'schemeType': infoDetails.get('schemeType', 'Unknown'),
+                        'companyName': infoDetails.get('companyName', 'Unknown')
                     }
                 except Exception as e:
                     self.logger.error(f"Error processing MF data for scheme {security['buyCode']}: {str(e)}")
@@ -325,6 +327,7 @@ class InvestmentService(BaseService):
                         'fundHouse': 'Unknown',
                         'scheme_id': security['buyCode'],
                         'schemeType': 'Unknown',
+                        'companyName': 'Unknown',
                         'error': 'PROCESSING_ERROR'
                     }
         return activeSecurities
