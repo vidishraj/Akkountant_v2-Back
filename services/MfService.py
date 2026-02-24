@@ -2,7 +2,6 @@ from abc import ABC
 from decimal import Decimal
 
 from sqlalchemy.exc import NoResultFound
-from werkzeug.routing import ValidationError
 
 from enums.MsnEnum import MSNENUM
 
@@ -31,7 +30,7 @@ class MfService(Base_MSN, ABC):
     def buySecurity(self, security_data, userId):
         try:
             # Validate the securityCode using the separate function
-            if not self.checkIfSecurityExists(int(security_data['securityCode'])):
+            if not self.checkIfSecurityExists(str(security_data['securityCode'])):
                 return {"error": "Invalid code"}
             # Check if the user has the same security bought already. If yes add
             existingRow: PurchasedSecurities = self.findIdIfSecurityBought(userId, security_data['securityCode'])
@@ -69,19 +68,23 @@ class MfService(Base_MSN, ABC):
             self.db.session.commit()
             return {"message": "Security purchased successfully"}
 
-        except ValidationError as e:
+        except Exception as e:
+            self.logger.error(f"Error buying MF security: {e}")
             return {"error": str(e)}
 
     def sellSecurity(self, sell_data, userId):
         try:
             # Fetch the corresponding purchase record
             purchase = self.findIdIfSecurityBought(userId, sell_data['securityCode'])
+            if purchase is None:
+                return {"error": "Purchase record not found"}
 
             if sell_data['sellQuant'] > purchase.buyQuant:
                 return {"error": "Sell quantity exceeds available quantity"}
 
-            # Calculate profit
-            profit = (sell_data['sellQuant'] * sell_data['sellPrice']) - (sell_data['sellQuant'] * purchase.buyPrice)
+            # Calculate profit using the averaged buyPrice from the record
+            profit = (Decimal(sell_data['sellQuant']) * Decimal(sell_data['sellPrice'])) - (
+                    Decimal(sell_data['sellQuant']) * purchase.buyPrice)
 
             # Reduce quantity purchased
             purchase.buyQuant -= sell_data['sellQuant']
@@ -103,7 +106,8 @@ class MfService(Base_MSN, ABC):
                 date=date,
                 sellQuant=sell_data['sellQuant'],
                 sellPrice=sell_data['sellPrice'],
-                profit=profit
+                profit=profit,
+                source_type='purchased'
             )
 
             self.db.session.add(new_sale)
@@ -115,7 +119,8 @@ class MfService(Base_MSN, ABC):
     def checkIfSecurityExists(self, symbol):
         mfList = self.JsonDownloadService.getMfList()
         mfList = mfList['data']
+        symbol_str = str(symbol)
         for scheme in mfList:
-            if symbol == scheme['schemeCode']:
+            if symbol_str == str(scheme['schemeCode']):
                 return True
         return False
