@@ -142,8 +142,9 @@ class JSONDownloadService:
     def getMfNameForSchemeId(self, scheme_id):
         mfList = self.getMfList()
         mfList = mfList['data']
+        scheme_str = str(scheme_id)
         for item in mfList:
-            if str(item['schemeCode']) == scheme_id:
+            if str(item['schemeCode']) == scheme_str:
                 return item['schemeName']
         return ""
 
