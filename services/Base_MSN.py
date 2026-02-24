@@ -342,10 +342,12 @@ class Base_MSN:
                 rate_data = None
                 if investment_type == MSNENUM.NPS.value:
                     rates = self.JsonDownloadService.getNPSRate(sec['buyCode'])
-                    rate_data = {'lastPrice': float(rates['nav'])}
+                    if rates and 'nav' in rates:
+                        rate_data = {'lastPrice': float(rates['nav'])}
                 elif investment_type == MSNENUM.Mutual_Funds.value:
                     rates = self.JsonDownloadService.getMFRate(sec['buyCode'])
-                    rate_data = {'lastPrice': rates['nav']}
+                    if rates and 'nav' in rates:
+                        rate_data = {'lastPrice': rates['nav']}
                 if rate_data is None or "error" in rate_data:
                     self.logger.error(f"Error fetching rate data for {sec['buyCode']}: {rate_data}")
                     continue
