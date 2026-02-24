@@ -160,15 +160,14 @@ class Base_MSN:
         :return: List of dictionaries (JSON-like structure).
         """
         try:
-            investment_history = self.db.session.query(PurchasedSecurities).options(
+            query = self.db.session.query(PurchasedSecurities).options(
                 joinedload(PurchasedSecurities.sold_securities)
-            ).filter(
-                PurchasedSecurities.userID == user_id if user_id else True  # Filter by userID if provided
-            ).all()
-
+            )
+            if user_id:
+                query = query.filter(PurchasedSecurities.userID == user_id)
             if service_type:
-                investment_history = [purchase for purchase in investment_history if
-                                      purchase.securityType == service_type]
+                query = query.filter(PurchasedSecurities.securityType == service_type)
+            investment_history = query.all()
 
             result_json = [
                 {
@@ -182,7 +181,7 @@ class Base_MSN:
                             "sellID": sold.sellID,
                             "sellQuant": sold.sellQuant,
                             "sellPrice": float(sold.sellPrice),
-                            "profit": float(sold.profit) if sold.profit else None,
+                            "profit": float(sold.profit) if sold.profit is not None else None,
                             "date": sold.date.strftime("%Y-%m-%d"),
                         }
                         for sold in purchase.sold_securities
