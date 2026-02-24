@@ -125,52 +125,6 @@ class Base_MSN:
             self.logger.error(f"Database error occurred: {e}")
             return []
 
-    def getTotalMoneyInvested(self, service_type, user_id):
-        """
-        Get the total money invested in all securities based on service type.
-
-        :param service_type: The service type to filter by.
-        :param user_id: The userID to filter by.
-        :return: Total money invested as a float.
-        """
-        try:
-            total_invested = self.db.session.query(
-                func.sum(PurchasedSecurities.buyPrice * PurchasedSecurities.buyQuant)
-            ).filter(
-                PurchasedSecurities.securityType == service_type,
-                PurchasedSecurities.userID == user_id  # Filter by userID
-            ).scalar()
-
-            return float(total_invested) if total_invested else 0.0
-
-        except SQLAlchemyError as e:
-            self.logger.error(f"Database error occurred: {e}")
-            return 0.0
-
-    def getTotalProfit(self, service_type, user_id):
-        """
-        Calculate the total profit from all securities based on service type.
-
-        :param service_type: The service type to filter by.
-        :param user_id: The userID to filter by.
-        :return: Total profit from all securities as a float.
-        """
-        try:
-            total_profit = self.db.session.query(
-                func.sum(SoldSecurities.profit)
-            ).join(
-                PurchasedSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID
-            ).filter(
-                PurchasedSecurities.securityType == service_type,
-                PurchasedSecurities.userID == user_id  # Filter by userID
-            ).scalar()
-
-            return float(total_profit) if total_profit else 0.0
-
-        except SQLAlchemyError as e:
-            self.logger.error(f"Database error occurred: {e}")
-            return 0.0
-
     def getActiveMoneyInvested(self, service_type, user_id):
         """
         Get the total money invested in active securities based on service type.
