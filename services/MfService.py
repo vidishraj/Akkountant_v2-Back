@@ -79,6 +79,7 @@ class MfService(Base_MSN, ABC):
             return {"message": "Security purchased successfully"}
 
         except Exception as e:
+            self.db.session.rollback()
             self.logger.error(f"Error buying MF security: {e}")
             return {"error": str(e)}
 
@@ -129,8 +130,10 @@ class MfService(Base_MSN, ABC):
             self.db.session.commit()
             return {"message": "Security sold successfully", "sellID": new_sale.sellID, "profit": profit}
         except NoResultFound:
+            self.db.session.rollback()
             return {"error": "Purchase record not found for the given buyID"}
         except Exception as e:
+            self.db.session.rollback()
             self.logger.error(f"Error selling MF security: {e}")
             return {"error": str(e)}
 
