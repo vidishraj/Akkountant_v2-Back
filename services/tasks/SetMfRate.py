@@ -8,16 +8,9 @@ from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientRes
 
 from utils.logger import Logger
 
-start_time = None
-# Check this while deploying
-CONCURRENT_REQUESTS = 200  # Reduce to 50 for stability; adjust based on testing
-# To count successful requests
-requestsProcessed = 0
-# Retry settings
-MAX_RETRIES = 2  # Number of retries for failed requests
-RETRY_DELAY = 0  # Seconds to wait between retries
-CONCURRENT_REQUESTS2 = 20  # Reduced for stability
-BATCH_SIZE = 50  # Batch size for processing
+CONCURRENT_REQUESTS = 50
+MAX_RETRIES = 2
+RETRY_DELAY = 0
 
 
 class SetMFRate(BaseTask):
@@ -78,9 +71,9 @@ class SetMFRate(BaseTask):
         urls = [f"{baseUrl}/{item.get('schemeCode')}" for item in data]
         self.logger.info(f"API URL list built for MF. {len(urls)}")
 
-        global start_time
         start_time = time.time()
         result_data = []
+        requests_processed = 0
         responses = asyncio.run(self.make_requests(urls))
         for response in responses:
             if isinstance(response, tuple):  # Ensure it's a valid JSON response
@@ -92,6 +85,10 @@ class SetMFRate(BaseTask):
                             "scheme_id": response[0]
                         },
                     )
+                    requests_processed += 1
+                    if requests_processed % 500 == 0:
+                        self.logger.info(
+                            f"Processed {requests_processed} responses in {time.time() - start_time:.2f}s")
                     try:
                         # will try to add additional information about mf here
                         result_data[-1]["fundHouse"] = response[1]['meta']['fund_house']
@@ -106,11 +103,12 @@ class SetMFRate(BaseTask):
             else:
                 self.logger.error(f"Skipping invalid response: {response}")
 
+        self.logger.info(f"MF rate fetch complete: {requests_processed} schemes in {time.time() - start_time:.2f}s")
         return {"data": result_data}
 
     async def make_requests(self, urls: list, **kwargs):
-        semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)  # Limit concurrent connections
-        connector = TCPConnector(limit_per_host=CONCURRENT_REQUESTS)  # Control simultaneous connections per host
+        semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
+        connector = TCPConnector(limit_per_host=CONCURRENT_REQUESTS)
         async with ClientSession(connector=connector) as session:
             tasks = [self.fetch_html(url, session, semaphore, **kwargs) for url in urls]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -118,18 +116,12 @@ class SetMFRate(BaseTask):
         return results
 
     async def fetch_html(self, url: str, session: ClientSession, semaphore: asyncio.Semaphore, **kwargs):
-        global requestsProcessed
         retries = 0
         while retries < MAX_RETRIES:
             async with semaphore:  # Control concurrency with semaphore
                 try:
                     async with session.get(url, timeout=15, **kwargs) as resp:
-                        if resp.status == 200:
-                            requestsProcessed += 1
-                            if requestsProcessed % 100 == 0:
-                                self.logger.info(
-                                    f"Request {requestsProcessed} finished in {time.time() - start_time:.2f}s")
-                        else:
+                        if resp.status != 200:
                             self.logger.info(f" Status {resp.status}, Response {resp.text()}")
                         data = await resp.json()  # Use .json() for JSON responses
                         return url.split("/")[-1], data
