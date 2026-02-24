@@ -135,7 +135,7 @@ class FOService:
 
             try:
                 expiry_date = pd.to_datetime(expiry_raw).date()
-            except Exception:
+            except (ValueError, TypeError):
                 self.logger.warning(f"Could not parse expiry date: {expiry_raw}")
                 skipped += 1
                 continue
@@ -143,7 +143,7 @@ class FOService:
             trade_date_raw = row.get('Trade Date')
             try:
                 trade_date = pd.to_datetime(trade_date_raw).date()
-            except Exception:
+            except (ValueError, TypeError):
                 self.logger.warning(f"Could not parse trade date: {trade_date_raw}")
                 skipped += 1
                 continue
@@ -159,8 +159,8 @@ class FOService:
             if not pd.isna(order_exec_raw):
                 try:
                     order_exec_time = pd.to_datetime(order_exec_raw)
-                except Exception:
-                    pass
+                except (ValueError, TypeError):
+                    self.logger.debug(f"Could not parse order execution time: {order_exec_raw}")
 
             order_id = None
             order_id_raw = row.get('Order ID')
@@ -187,18 +187,19 @@ class FOService:
             )
 
             try:
-                session.add(fo_trade)
-                session.flush()
+                with session.begin_nested():
+                    session.add(fo_trade)
+                    session.flush()
                 inserted += 1
             except IntegrityError:
-                session.rollback()
                 duplicates += 1
 
         try:
             session.commit()
-        except Exception as e:
+        except SQLAlchemyError as e:
             session.rollback()
             self.logger.error(f"Error committing FO trades: {e}")
+            return {'total_rows': total_rows, 'inserted': 0, 'duplicates': duplicates, 'skipped': skipped, 'error': str(e)}
 
         result = {
             'total_rows': total_rows,
