@@ -159,7 +159,7 @@ class InvestmentService(BaseService):
         totalProfit = 0
         try:
             marketStatus = nsepython.nse_marketStatus()
-        except:
+        except Exception:
             marketStatus = None
         if marketStatus is not None:
             marketStatus = marketStatus['marketState'][0]['marketStatus']
