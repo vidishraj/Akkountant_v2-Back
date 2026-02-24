@@ -28,7 +28,7 @@ class InvestmentController:
             return jsonify({"error": "Invalid or missing serviceType parameter"}), 400
         try:
             service_type = MSNENUM[service_type_param]
-        except:
+        except KeyError:
             service_type = EPGEnum[service_type_param]
         return user_id, service_type
 
