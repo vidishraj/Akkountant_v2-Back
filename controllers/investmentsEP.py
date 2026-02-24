@@ -81,7 +81,7 @@ class InvestmentController:
         # Save the file to the /tmp directory
         file_path = None
         try:
-            tmp_folder = os.path.join(os.getcwd(), '/tmp')
+            tmp_folder = os.path.join(os.getcwd(), 'tmp')
             os.makedirs(tmp_folder, exist_ok=True)
             file_path = os.path.join(tmp_folder, secure_filename(file.filename))
             file.save(file_path)
@@ -235,7 +235,7 @@ class InvestmentController:
             return data, None
 
         except Exception as e:
-            return None, jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+            return None, (jsonify({"error": f"Unexpected error: {str(e)}"}), 500)
 
     @Logger.standardLogger
     def fetchRateForEPG(self):
@@ -250,6 +250,33 @@ class InvestmentController:
         # Validate the request JSON body
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
         return self.InvestmentService.fetchRateForEPG(service_type)
+
+    @Logger.standardLogger
+    def fetchRealizedPnL(self):
+        """Fetch realized profit/loss and historical closed trades"""
+        service_type_param = request.args.get('serviceType')
+        params = self.getUserIdServiceType(service_type_param)
+        if not isinstance(params, tuple):
+            return params
+        user_id, service_type = params
+        self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
+        return jsonify(self.InvestmentService.fetchRealizedPnL(service_type.value, user_id)), 200
+
+    @Logger.standardLogger
+    def fetchFOSummary(self):
+        """Fetch F&O P&L summary"""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        return jsonify(self.InvestmentService.fetchFOSummary(user_id)), 200
+
+    @Logger.standardLogger
+    def fetchFOTrades(self):
+        """Fetch all individual F&O trades"""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        return jsonify(self.InvestmentService.fetchFOTrades(user_id)), 200
 
     @Logger.standardLogger
     def deleteAllInvestments(self):

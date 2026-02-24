@@ -11,5 +11,6 @@ from models.purchasedSecurities import PurchasedSecurities
 from models.GoldDetails import GoldDetails
 from models.securityTransactions import SecurityTransactions
 from models.Jobs import Job
+from models.foTrades import FOTrade
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PaymentStatusEnum

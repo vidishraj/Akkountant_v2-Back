@@ -18,6 +18,7 @@ from services.tasks.SetPpfRate import SetPPFRate
 from services.tasks.SetEPFRate import SetEPFRate
 from services.tasks.checkMailTask import CheckMailTask
 from services.tasks.checkStatementsTask import CheckStatementTask
+from services.tasks.SetStockOldCodes import SetStockOldCodes
 from utils.logger import Logger
 
 
@@ -99,7 +100,7 @@ class TaskScheduler:
             "SetNPSRate": SetNPSRate,
             "SetNPSDetails": SetNPSDetails,
             "SetStocksDetails": SetKiteStockDetails,
-            "SetStocksOldDetails": SetKiteStockDetails,  # Add missing mapping
+            "SetStocksOldDetails": SetStockOldCodes,
             "SetMFRate": SetMFRate,
             "SetMFDetails": SetMFDetails,
             "SetGoldRate": SetIBJAGoldRate,

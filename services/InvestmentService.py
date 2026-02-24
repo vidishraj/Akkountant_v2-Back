@@ -12,12 +12,17 @@ from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities, Jobs
 from models.investmentHistory import InvestmentHistory
+from models.securities import SoldSecurities
+from models.depositSecurities import DepositSecurities
+from models.securityTransactions import SecurityTransactions
+from models.stockTrade import TradeAssociation
 from services.Base_Service import BaseService
 from services.EPFService import EPFService
 from services.GoldService import GoldService
 from services.MfService import MfService
 from services.NpsService import NPSService
 from services.PPFService import PPFService
+from services.FOService import FOService
 from services.StocksService import StocksService
 from utils.DateTimeUtil import DateTimeUtil
 from utils.GenericUtils import GenericUtil
@@ -57,6 +62,7 @@ class InvestmentService(BaseService):
         self.EPFService = EPFService()
         self.PPFService = PPFService()
         self.GoldService = GoldService()
+        self.FOService = FOService()
         self.genericUtil = GenericUtil()
 
     def fetchAllSecurities(self, securityType: MSNENUM):
@@ -110,6 +116,8 @@ class InvestmentService(BaseService):
             return self.StockService.readFromStatement(file_path, userId)
         elif serviceType == MSNENUM.NPS:
             return self.NPSService.readFromStatement(file_path, userId)
+        elif serviceType == MSNENUM.FO:
+            return self.FOService.readFromStatement(file_path, userId)
         elif serviceType == EPGEnum.EPF:
             return self.EPFService.readFromStatement(file_path, userId)
 
@@ -208,13 +216,21 @@ class InvestmentService(BaseService):
                :return: Summary dto
         """
         activeSecurities: [PurchasedSecurities] = self.StockService.fetchActive(securityType, userId)
-        if activeSecurities is None:
+        if activeSecurities is None or len(activeSecurities) == 0:
             return {"error": "No active securities"}
+
+        # Fetch all stock rates once outside the loop to avoid N*N API calls
+        stockRates = None
+        if securityType == MSNENUM.Stocks.value:
+            stockRates = self.StockService.calculateStockRates(activeSecurities)
 
         for security in activeSecurities:
             if securityType == MSNENUM.Stocks.value:
-                rates = self.StockService.calculateStockRates(activeSecurities)
-                security['info'] = rates[security['buyCode'] if security['buyCode'] != "SUZLON-BE" else "SUZLON"]
+                symbol = security['buyCode'] if security['buyCode'] != "SUZLON-BE" else "SUZLON"
+                security['info'] = stockRates.get(symbol, {
+                    'symbol': symbol, 'lastPrice': 0, 'change': 0,
+                    'pChange': 0, 'previousClose': 0, 'error': 'NOT_FOUND'
+                })
             elif securityType == MSNENUM.NPS.value:
                 try:
                     npsInfo = self.NPSService.findSecurity(security['buyCode'])
@@ -351,50 +367,38 @@ class InvestmentService(BaseService):
             return self.NPSService.delete_purchased_securities_by_user(userId)
         elif serviceType == MSNENUM.Mutual_Funds:
             return self.MFService.delete_purchased_securities_by_user(userId)
+        elif serviceType == MSNENUM.FO:
+            return self.FOService.delete_all_fo_trades(userId)
 
     def deleteSingleRecord(self, serviceType, buyId):
-        purchaseRecordDeletion = {'model': 'PurchasedSecurities', "filters": f'PurchasedSecurities.buyId=={buyId}'}
-        sellRecordDeletion = {'model': 'SoldSecurities', "filters": f'SoldSecurities.buyID=={buyId}'}
-        depositRecordDeletion = {'model': 'DepositSecurities', "filters": f'DepositSecurities.buyID=={buyId}'}
-        # transactionTableDeletion = {'model': 'SecurityTransactions', "filters": f'PurchasedSecurities.userId=={
-        # userId}'}
-        # trade_associationDeletion = {'model': 'TradeAssociation', "filters": f'TradeAssociation.buyId=={buyId}'}
-        # goldDetailsDeletion = {'model': 'PurchasedSecurities', "filters": f'PurchasedSecurities.userId=={userId}'}
-        if serviceType == EPGEnum.EPF or serviceType == EPGEnum.PF or serviceType == EPGEnum.Gold:
-            if self.delete_records([depositRecordDeletion]):
-                return jsonify({"Message": "Successfully deleted"}), 200
-        elif serviceType == MSNENUM.Mutual_Funds or serviceType == MSNENUM.Stocks or serviceType == MSNENUM.NPS:
-            if self.delete_records([sellRecordDeletion, purchaseRecordDeletion]):
-                return jsonify({"Message": "Successfully deleted"}), 200
-            return jsonify({"Error": "Failed to delete record"}), 501
-
-    def delete_records(self, delete_operations: list):
-        """
-        Deletes records from multiple models in a transactional manner.
-        Args: delete_operations (list): A list of operations to execute. Each operation
-                                       should be a dictionary with 'model' and 'filters'.
-                                       Example: [
-                                           {"model": Model1, "filters": Model1.id == 1},
-                                           {"model": Model2, "filters": Model2.name == "example"}]
-        Returns:
-            bool: True if all deletions succeed, False if any deletion fails.
-        """
         try:
-            for operation in delete_operations:
-                model = operation["model"]
-                filters = operation["filters"]
+            if serviceType == EPGEnum.EPF or serviceType == EPGEnum.PF or serviceType == EPGEnum.Gold:
+                self.db.session.query(DepositSecurities).filter(
+                    DepositSecurities.buyID == buyId
+                ).delete()
+            elif serviceType == MSNENUM.Mutual_Funds or serviceType == MSNENUM.Stocks or serviceType == MSNENUM.NPS:
+                # Delete in correct order: trades, transactions, sold records, then purchase
+                self.db.session.query(TradeAssociation).filter(
+                    TradeAssociation.buyID == buyId
+                ).delete()
+                self.db.session.query(SecurityTransactions).filter(
+                    SecurityTransactions.buyId == buyId
+                ).delete()
+                self.db.session.query(SoldSecurities).filter(
+                    SoldSecurities.buyID == buyId
+                ).delete()
+                self.db.session.query(PurchasedSecurities).filter(
+                    PurchasedSecurities.buyID == buyId
+                ).delete()
+            else:
+                return jsonify({"Error": "Invalid service type"}), 400
 
-                # Perform the deletion
-                self.db.session.query(model).filter(filters).delete()
-
-            # Commit all deletions
             self.db.session.commit()
-            return True
+            return jsonify({"Message": "Successfully deleted"}), 200
         except SQLAlchemyError as ex:
-            # Rollback transaction on any failure
             self.db.session.rollback()
-            self.logger.error(f"Deletion failed: {ex}")
-            return False
+            self.logger.error(f"Deletion failed for buyId {buyId}: {ex}")
+            return jsonify({"Error": "Failed to delete record"}), 500
 
     def getJobsTable(self, page, filters=None, sort_by='due_date', sort_order='desc', page_size=10, limit=10):
         try:
@@ -520,6 +524,10 @@ class InvestmentService(BaseService):
         """Sync Kite holdings to local database"""
         return self.StockService.sync_kite_holdings_to_db(userId)
 
+    def fetchRealizedPnL(self, securityType, userId):
+        """Fetch realized P&L from sold securities and historical closed trades"""
+        return self.StockService.getRealizedPnL(securityType, userId)
+
     def getKiteLoginUrl(self):
         """Get Kite Connect login URL"""
         return self.StockService.kite_service.get_login_url()
@@ -527,4 +535,12 @@ class InvestmentService(BaseService):
     def generateKiteSession(self, userId, request_token):
         """Generate Kite session and store access token for user"""
         return self.StockService.generate_kite_session(userId, request_token)
-    
+
+    def fetchFOSummary(self, userId):
+        """Fetch F&O P&L summary"""
+        return self.FOService.get_fo_summary(userId)
+
+    def fetchFOTrades(self, userId):
+        """Fetch all individual F&O trades"""
+        return self.FOService.get_fo_trades(userId)
+

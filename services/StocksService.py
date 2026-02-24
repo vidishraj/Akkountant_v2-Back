@@ -22,6 +22,7 @@ else:
 from decimal import Decimal, ROUND_DOWN
 from utils.logger import Logger
 from services.KiteService import KiteService
+from utils.AIHelper import fetch_via_ai
 
 
 class StocksService(Base_MSN, ABC):
@@ -104,19 +105,23 @@ class StocksService(Base_MSN, ABC):
             if self.tradeExists(sell_data['tradeID']):
                 return {"error": "Trade exists"}
 
-            # Fetch the corresponding purchase record
-            purchase = self.findIdIfSecurityBought(userId, sell_data['securityCode'])
+            # Fetch the corresponding purchase record — prefer ISIN (buyID) for exact match
+            purchase = None
+            if sell_data.get('buyID'):
+                purchase = self.findByBuyID(userId, sell_data['buyID'])
+            if purchase is None:
+                purchase = self.findIdIfSecurityBought(userId, sell_data['securityCode'])
             if purchase is None:
                 return {'error': "Chronology error"}
-            # Insert Trade
+            if sell_data['sellQuant'] > purchase.buyQuant:
+                return {"error": "Sell quantity exceeds available quantity"}
+
+            # Insert Trade (after validation to avoid orphaned records in session)
             newTrade = TradeAssociation(
                 buyID=purchase.buyID,
                 tradeID=sell_data['tradeID'],
-
             )
             self.db.session.add(newTrade)
-            if sell_data['sellQuant'] > purchase.buyQuant:
-                return {"error": "Sell quantity exceeds available quantity"}
 
             # Calculate profit
             profit = (Decimal(sell_data['sellQuant'] * sell_data['sellPrice']) - (
@@ -175,13 +180,45 @@ class StocksService(Base_MSN, ABC):
 
         # Extract the specified columns and convert to a list of dictionaries
         trade_data = df[columns_to_extract].to_dict(orient='records')
+
+        # Build ISIN lookup from valid rows to fill NaN ISINs
+        isin_lookup = {}
+        for trade in trade_data:
+            sym = trade.get('Symbol')
+            isin = trade.get('ISIN')
+            if sym and not pd.isna(isin) and not pd.isna(sym):
+                isin_lookup[sym] = isin
+
         buyList = []
         sellList = []
+        skipped = 0
         for trade in trade_data:
+            # Skip rows with missing symbol or trade ID
+            if pd.isna(trade.get('Symbol')) or pd.isna(trade.get('Trade ID')):
+                skipped += 1
+                continue
+            # Fill missing ISIN from other rows of the same symbol
+            if pd.isna(trade.get('ISIN')):
+                resolved_isin = isin_lookup.get(trade['Symbol'])
+                if resolved_isin:
+                    trade['ISIN'] = resolved_isin
+                    self.logger.info(f"Filled missing ISIN for {trade['Symbol']} -> {resolved_isin}")
+                else:
+                    skipped += 1
+                    self.logger.warning(f"Skipping {trade['Symbol']} - no ISIN available")
+                    continue
+            # Resolve old symbol names to current names for both buys and sells
+            symbol = trade['Symbol']
+            if not self.checkIfSecurityExists(symbol):
+                resolved = self.JsonDownloadService.checkSymbolChange(symbol)
+                if resolved:
+                    self.logger.info(f"Resolved old symbol {symbol} -> {resolved}")
+                    symbol = resolved
+                # If still unresolved, buySecurity will handle with "Invalid code"
             if trade['Trade Type'] == 'buy':
                 buyList.append({
                     'buyID': trade['ISIN'],
-                    'securityCode': trade['Symbol'],
+                    'securityCode': symbol,
                     'date': trade['Trade Date'],
                     'buyQuant': trade['Quantity'],
                     'buyPrice': trade['Price'],
@@ -189,12 +226,15 @@ class StocksService(Base_MSN, ABC):
                 })
             else:
                 sellList.append({
-                    'securityCode': trade['Symbol'],
+                    'securityCode': symbol,
+                    'buyID': trade['ISIN'],
                     'date': trade['Trade Date'],
                     'sellQuant': trade['Quantity'],
                     'sellPrice': trade['Price'],
                     'tradeID': trade['Trade ID']
                 })
+        if skipped:
+            self.logger.warning(f"Skipped {skipped} rows with missing ISIN/Symbol/TradeID")
         self.logger.info(f"Read {len(buyList)} purchases and {len(sellList)} sells in the tradebook")
         boughtInserted = 0
         soldInserted = 0
@@ -208,13 +248,37 @@ class StocksService(Base_MSN, ABC):
                         boughtInserted += 1
                     self.logger.info(f"Buying: {item.get('securityCode')} - {insertedResult}")
                 session.flush()  # Ensure buying changes are sent to the database
+
+                # Identify orphan sells (IPO allotments / pre-tradebook buys)
+                orphan_sells = []
+                for item in sellList:
+                    purchase = None
+                    if item.get('buyID'):
+                        purchase = self.findByBuyID(userId, item['buyID'])
+                    if purchase is None:
+                        purchase = self.findIdIfSecurityBought(userId, item['securityCode'])
+                    if purchase is None:
+                        orphan_sells.append(item)
+
+                if orphan_sells:
+                    self.logger.info(f"Found {len(orphan_sells)} orphan sells — resolving IPO allotment prices via AI")
+                    synthetic_buys = self._resolve_ipo_allotment_prices(orphan_sells)
+                    for buy in synthetic_buys:
+                        insertedResult = self.buySecurity(buy, userId)
+                        if insertedResult.get('error') is None:
+                            boughtInserted += 1
+                            self.logger.info(f"Created IPO allotment buy: {buy['securityCode']} @ {buy['buyPrice']}")
+                        else:
+                            self.logger.warning(f"Failed to create IPO buy for {buy['securityCode']}: {insertedResult}")
+                    session.flush()
+
                 # Process selling items
                 for item in sellList:
                     insertedResult = self.sellSecurity(item, userId)
                     if insertedResult.get('error') is None:
                         soldInserted += 1
                     elif insertedResult['error'] == 'Chronology error':
-                        raise Exception("Add statements in order!")
+                        self.logger.warning(f"Skipping sell for {item.get('securityCode')} - no matching buy found")
                     self.logger.info(f"Selling: {item.get('securityCode')} - {insertedResult}")
 
             # The commit happens automatically at the end of 'with session.begin()' if no errors occur
@@ -225,10 +289,81 @@ class StocksService(Base_MSN, ABC):
             self.logger.error(f"Transactions failed. Rolled back. Error: {e}")
             raise Exception(e.__str__())  # Reraise the exception after logging
 
-        self.db.session.commit()
         self.logger.info("Finished processing file and inserting statements")
         return {"readFromStatement": {'buy': len(buyList), 'sold': len(sellList)},
                 "inserted": {'buy': boughtInserted, 'sold': soldInserted}}
+
+    def _resolve_ipo_allotment_prices(self, orphan_sells):
+        """
+        Given sell records that have no matching buy (IPO allotments, corporate actions, etc.),
+        use AI + web search to find the original allotment/issue price and create synthetic buy dicts.
+        """
+        # Group orphan sells by ISIN to avoid duplicate lookups
+        by_isin = {}
+        for sell in orphan_sells:
+            isin = sell.get('buyID')
+            if isin and isin not in by_isin:
+                by_isin[isin] = sell
+
+        if not by_isin:
+            return []
+
+        # Build a single prompt for all orphan securities
+        lines = []
+        for isin, sell in by_isin.items():
+            lines.append(f"- {sell['securityCode']} (ISIN: {isin}), first sell date: {sell['date']}")
+
+        prompt = (
+            "I need the IPO allotment price (issue price to retail investors) for the following "
+            "Indian stocks. These were likely acquired via IPO allotment or corporate action "
+            "before being sold on NSE.\n\n"
+            + "\n".join(lines) +
+            "\n\nFor each stock, search the web and return a JSON object with this exact format:\n"
+            "{\n"
+            '  "results": [\n'
+            '    {"symbol": "SYMBOL", "isin": "ISIN", "allotment_price": 123.45, "allotment_date": "YYYY-MM-DD", "source": "brief description"},\n'
+            "    ...\n"
+            "  ]\n"
+            "}\n\n"
+            "The allotment_price should be the price at which retail investors were allotted shares in the IPO. "
+            "If the stock was received via a corporate action (demerger, bonus, etc.) rather than an IPO, "
+            "use the listing price on the first day of trading. "
+            "allotment_date should be the IPO allotment date or listing date."
+        )
+
+        self.logger.info(f"Querying AI for IPO allotment prices of {len(by_isin)} securities")
+        result = fetch_via_ai(prompt)
+
+        if not result or 'results' not in result:
+            self.logger.warning(f"AI returned no results for IPO price lookup: {result}")
+            return []
+
+        synthetic_buys = []
+        for entry in result['results']:
+            isin = entry.get('isin')
+            price = entry.get('allotment_price')
+            if not isin or not price or isin not in by_isin:
+                continue
+
+            sell = by_isin[isin]
+            # Total quantity for this ISIN across all orphan sells
+            total_qty = sum(s['sellQuant'] for s in orphan_sells if s.get('buyID') == isin)
+            allotment_date = entry.get('allotment_date', str(sell['date']))
+
+            synthetic_buys.append({
+                'buyID': isin,
+                'securityCode': sell['securityCode'],
+                'date': allotment_date,
+                'buyQuant': total_qty,
+                'buyPrice': price,
+                'tradeID': f"IPO_{isin}_{allotment_date}",
+            })
+            self.logger.info(
+                f"AI resolved: {sell['securityCode']} IPO allotment @ {price} "
+                f"(qty={total_qty}, date={allotment_date}, source={entry.get('source', 'unknown')})"
+            )
+
+        return synthetic_buys
 
     def getSecurityList(self):
         self.JsonDownloadService.getStockList()

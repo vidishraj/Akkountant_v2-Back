@@ -22,3 +22,4 @@ class User(Base):
     deposit_relationship = relationship('DepositSecurities', back_populates='user_relationship')
     transaction_relationship = relationship('SecurityTransactions', back_populates='user_relationship')
     investment_history = relationship('InvestmentHistory', back_populates='user_relationship')
+    fo_trades = relationship('FOTrade', back_populates='user_relationship')

@@ -177,6 +177,9 @@ class Akkountant(Flask):
 
     def _setup_schedulers(self):
         """Set up background tasks: TaskScheduler (worker) + CronAgent (brain)."""
+        if os.getenv('ENV') == 'LOCAL':
+            self.logger.info("Skipping schedulers in LOCAL environment.")
+            return
         with self.app_context():
             db_url = os.getenv('DATABASE_URL')
 
@@ -257,7 +260,10 @@ class Akkountant(Flask):
             ('/getsJobs', 'GET', self.investmentEP.getJobsTable),
             ('/startJob', 'GET', self.investmentEP.setJobs),
             ('/fetchTimeStamps', 'GET', self.investmentEP.fetchTimeStamps),
+            ('/fetchRealizedPnL', 'GET', self.investmentEP.fetchRealizedPnL),
             ('/deleteSingleInvestment', 'GET', self.investmentEP.deleteSingleRecord),
+            ('/fetchFOSummary', 'GET', self.investmentEP.fetchFOSummary),
+            ('/fetchFOTrades', 'GET', self.investmentEP.fetchFOTrades),
             ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
             # Kite Connect API endpoints
             ('/kite/login-url', 'GET', self.investmentEP.getKiteLoginUrl),

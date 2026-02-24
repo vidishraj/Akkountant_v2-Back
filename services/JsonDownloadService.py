@@ -52,7 +52,7 @@ class JSONDownloadService:
             return "SUZLON" # Corner case
         fileCheck = self.checkJsonInDirectory(self.listType, self.StockOldDetails)
         if not fileCheck:
-            raise FileNotFoundError("Stock old symbol not available right now")
+            return None
         filepath = self.getLatestFile(self.listType, self.StockOldDetails)
         with open(filepath, 'r') as f:
             jsonData = json.load(f)

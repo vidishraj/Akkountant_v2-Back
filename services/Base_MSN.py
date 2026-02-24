@@ -138,7 +138,7 @@ class Base_MSN:
             total_invested = self.db.session.query(
                 func.sum(PurchasedSecurities.buyPrice * PurchasedSecurities.buyQuant)
             ).filter(
-                PurchasedSecurities.serviceType == service_type,
+                PurchasedSecurities.securityType == service_type,
                 PurchasedSecurities.userID == user_id  # Filter by userID
             ).scalar()
 
@@ -162,7 +162,7 @@ class Base_MSN:
             ).join(
                 PurchasedSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID
             ).filter(
-                PurchasedSecurities.serviceType == service_type,
+                PurchasedSecurities.securityType == service_type,
                 PurchasedSecurities.userID == user_id  # Filter by userID
             ).scalar()
 
@@ -250,6 +250,14 @@ class Base_MSN:
         except SQLAlchemyError as e:
             self.logger.error(f"Database error occurred: {e}")
             return []
+
+    def findByBuyID(self, userId, buyID):
+        """Find a purchased security by its exact ISIN/buyID."""
+        result = self.db.session.query(PurchasedSecurities).filter(
+            PurchasedSecurities.userID == userId,
+            PurchasedSecurities.buyID == buyID
+        ).first()
+        return result if result else None
 
     def findIdIfSecurityBought(self, userId, securityCode):
         result = self.db.session.query(PurchasedSecurities).filter(
@@ -485,6 +493,66 @@ class Base_MSN:
             # Handle/log exception appropriately
             self.logger.error(f"Error fetching transactions for user {user_id} and security type {security_type}: {ex}")
             return []
+
+    def getRealizedPnL(self, security_type: str, user_id: str):
+        """
+        Fetch realized P&L from sold securities and historical closed trades.
+        Returns net P&L summary and list of individual sold trades.
+        """
+        try:
+            sold_trades = (
+                self.db.session.query(SoldSecurities, PurchasedSecurities)
+                .join(PurchasedSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID)
+                .filter(
+                    PurchasedSecurities.securityType == security_type,
+                    PurchasedSecurities.userID == user_id,
+                    SoldSecurities.source_type == 'purchased'
+                )
+                .order_by(SoldSecurities.date.desc())
+                .all()
+            )
+
+            total_realized_profit = Decimal('0')
+            total_realized_loss = Decimal('0')
+            trades_list = []
+
+            for sold, purchase in sold_trades:
+                profit = Decimal(str(sold.profit)) if sold.profit else Decimal('0')
+                if profit >= 0:
+                    total_realized_profit += profit
+                else:
+                    total_realized_loss += profit
+
+                trades_list.append({
+                    'sellID': sold.sellID,
+                    'symbol': purchase.securityCode,
+                    'buyPrice': float(purchase.buyPrice),
+                    'sellPrice': float(sold.sellPrice),
+                    'quantity': sold.sellQuant,
+                    'sellDate': sold.date.strftime('%Y-%m-%d'),
+                    'profit': float(profit),
+                    'buyID': purchase.buyID,
+                })
+
+            net_pnl = total_realized_profit + total_realized_loss
+
+            return {
+                'totalRealizedProfit': float(total_realized_profit),
+                'totalRealizedLoss': float(total_realized_loss),
+                'netRealizedPnL': float(net_pnl),
+                'tradeCount': len(trades_list),
+                'trades': trades_list,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error fetching realized P&L for {security_type}, user {user_id}: {e}")
+            return {
+                'totalRealizedProfit': 0,
+                'totalRealizedLoss': 0,
+                'netRealizedPnL': 0,
+                'tradeCount': 0,
+                'trades': [],
+            }
 
     def delete_purchased_securities_by_user(self, user_id: str):
         """

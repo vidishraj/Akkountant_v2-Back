@@ -165,11 +165,101 @@ class KiteService(BaseService):
             access_token = self._get_user_access_token(user_id)
             if not access_token:
                 raise ValueError("Access token not found. Please authenticate first.")
-            
+
             self.kite.set_access_token(access_token)
             instruments = self.kite.instruments()
             self.logger.info(f"Fetched {len(instruments)} instruments from Kite for user {user_id}")
             return instruments
         except Exception as e:
             self.logger.error(f"Error fetching instruments: {str(e)}")
+            raise
+
+    def get_trades(self, user_id):
+        """Fetch today's executed trades from Kite"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+
+            self.kite.set_access_token(access_token)
+            trades = self.kite.trades()
+            self.logger.info(f"Fetched {len(trades)} trades from Kite for user {user_id}")
+            return trades
+        except Exception as e:
+            self.logger.error(f"Error fetching trades: {str(e)}")
+            raise
+
+    def get_orders(self, user_id):
+        """Fetch today's orders from Kite"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+
+            self.kite.set_access_token(access_token)
+            orders = self.kite.orders()
+            self.logger.info(f"Fetched {len(orders)} orders from Kite for user {user_id}")
+            return orders
+        except Exception as e:
+            self.logger.error(f"Error fetching orders: {str(e)}")
+            raise
+
+    def get_margins(self, user_id):
+        """Fetch user's fund/margin details from Kite"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+
+            self.kite.set_access_token(access_token)
+            margins = self.kite.margins()
+            self.logger.info(f"Fetched margins from Kite for user {user_id}")
+            return margins
+        except Exception as e:
+            self.logger.error(f"Error fetching margins: {str(e)}")
+            raise
+
+    def get_mf_holdings(self, user_id):
+        """Fetch mutual fund holdings from Kite (Coin)"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+
+            self.kite.set_access_token(access_token)
+            holdings = self.kite.mf_holdings()
+            self.logger.info(f"Fetched {len(holdings)} MF holdings from Kite for user {user_id}")
+            return holdings
+        except Exception as e:
+            self.logger.error(f"Error fetching MF holdings: {str(e)}")
+            raise
+
+    def get_mf_orders(self, user_id):
+        """Fetch mutual fund orders from Kite (last 7 days)"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+
+            self.kite.set_access_token(access_token)
+            orders = self.kite.mf_orders()
+            self.logger.info(f"Fetched {len(orders)} MF orders from Kite for user {user_id}")
+            return orders
+        except Exception as e:
+            self.logger.error(f"Error fetching MF orders: {str(e)}")
+            raise
+
+    def get_mf_sips(self, user_id):
+        """Fetch mutual fund SIPs from Kite"""
+        try:
+            access_token = self._get_user_access_token(user_id)
+            if not access_token:
+                raise ValueError("Access token not found. Please authenticate first.")
+
+            self.kite.set_access_token(access_token)
+            sips = self.kite.mf_sips()
+            self.logger.info(f"Fetched {len(sips)} MF SIPs from Kite for user {user_id}")
+            return sips
+        except Exception as e:
+            self.logger.error(f"Error fetching MF SIPs: {str(e)}")
             raise
