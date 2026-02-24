@@ -134,13 +134,6 @@ class Base_MSN:
         :return: Active money invested as a float.
         """
         try:
-            """
-                    Calculates the total active invested value for a specific user.
-
-                    :param user_id: The ID of the user whose investment is calculated.
-                    :param security_type: Optional filter for security type (e.g., 'Stocks').
-                    :return: Total active invested value.
-                    """
             query = self.db.session.query(
                 func.sum(PurchasedSecurities.buyQuant * PurchasedSecurities.buyPrice).label("total_invested")
             ).filter(
