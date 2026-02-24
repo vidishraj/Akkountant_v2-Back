@@ -519,7 +519,7 @@ class Base_MSN:
             trades_list = []
 
             for sold, purchase in sold_trades:
-                profit = Decimal(str(sold.profit)) if sold.profit else Decimal('0')
+                profit = Decimal(str(sold.profit)) if sold.profit is not None else Decimal('0')
                 if profit >= 0:
                     total_realized_profit += profit
                 else:
