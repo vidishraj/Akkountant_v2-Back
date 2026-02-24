@@ -312,12 +312,15 @@ class Base_MSN:
         except Exception as e:
             self.logger.error(f"An error occurred while updating row {e}")
 
+    def resolveSymbol(self, buyCode: str) -> str:
+        """Resolve buyCode to the actual trading symbol (handles renamed symbols)."""
+        resolved = self.JsonDownloadService.checkSymbolChange(buyCode)
+        return resolved if resolved else buyCode
+
     def calculateStockRates(self, data_list):
         with ThreadPoolExecutor(max_workers=min(20, len(data_list))) as executor:
-            # Submit tasks to threads and collect Future objects
-            # @TODO Manage changed symbols and edge case for SUZLON-BE
             futures = {
-                executor.submit(self.findSecurity, data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON"): data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON"
+                executor.submit(self.findSecurity, self.resolveSymbol(data['buyCode'])): self.resolveSymbol(data['buyCode'])
                 for data in data_list
             }
 

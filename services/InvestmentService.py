@@ -229,7 +229,7 @@ class InvestmentService(BaseService):
 
         for security in activeSecurities:
             if securityType == MSNENUM.Stocks.value:
-                symbol = security['buyCode'] if security['buyCode'] != "SUZLON-BE" else "SUZLON"
+                symbol = self.StockService.resolveSymbol(security['buyCode'])
                 security['info'] = stockRates.get(symbol, {
                     'symbol': symbol, 'lastPrice': 0, 'change': 0,
                     'pChange': 0, 'previousClose': 0, 'error': 'NOT_FOUND'
