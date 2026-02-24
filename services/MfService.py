@@ -32,6 +32,9 @@ class MfService(Base_MSN, ABC):
 
     def buySecurity(self, security_data, userId):
         try:
+            # Validate quantity and price are positive
+            if Decimal(security_data['buyQuant']) <= 0 or Decimal(security_data['buyPrice']) <= 0:
+                return {"error": "Quantity and price must be positive"}
             # Validate the securityCode using the separate function
             if not self.checkIfSecurityExists(str(security_data['securityCode'])):
                 return {"error": "Invalid code"}
@@ -77,6 +80,9 @@ class MfService(Base_MSN, ABC):
 
     def sellSecurity(self, sell_data, userId):
         try:
+            # Validate quantity and price are positive
+            if Decimal(sell_data['sellQuant']) <= 0 or Decimal(sell_data['sellPrice']) <= 0:
+                return {"error": "Quantity and price must be positive"}
             # Fetch the corresponding purchase record
             purchase = self.findIdIfSecurityBought(userId, sell_data['securityCode'])
             if purchase is None:
