@@ -30,7 +30,6 @@ class Base_MSN:
     @property
     def db(self):
         """Retrieve the database session from the Flask global `g`."""
-        """Retrieve the database session from the Flask global `g`."""
         if g.get('db') is None:
             DATABASE_URL = os.getenv('DATABASE_URL')
 
