@@ -1,9 +1,8 @@
 from abc import ABC
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy.exc import NoResultFound, SQLAlchemyError
-from werkzeug.routing import ValidationError
 
 from enums.MsnEnum import MSNENUM
 from models import PurchasedSecurities
@@ -95,7 +94,7 @@ class StocksService(Base_MSN, ABC):
             self.db.session.add(newTrade)
             return {"message": "Security purchased successfully"}
 
-        except ValidationError as e:
+        except Exception as e:
             return {"error": str(e)}
 
     def sellSecurity(self, sell_data, userId):
@@ -164,6 +163,9 @@ class StocksService(Base_MSN, ABC):
     def deleteSecurity(self, buyId):
         security = self.db.session.query(PurchasedSecurities).filter(
             PurchasedSecurities.buyID == buyId).first()
+        if security is None:
+            self.logger.warning(f"deleteSecurity: No record found for buyID {buyId}")
+            return
         # Setting quant and price to 0 is equivalent
         security.buyQuant = 0
         security.buyPrice = 0
