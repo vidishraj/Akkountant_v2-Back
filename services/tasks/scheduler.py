@@ -72,11 +72,14 @@ class TaskScheduler:
                 self.logger.info(f"Job result: {result}, status: {status}")
                 job.result = result
                 job.status = JobStatus[status.upper()].value
-                if status == JobStatus.FAILED.value and job.failures < 10:
-                    job.failures += 1
-                if job.failures == 10:
-                    self.logger.error(f"Reached failure limit for job {job.title}")
-                # session.add(job)
+
+                # Track failures: increment on failure, reset on success
+                if status == JobStatus.FAILED.value:
+                    job.failures = min(job.failures + 1, 10)
+                    if job.failures == 10:
+                        self.logger.error(f"Reached failure limit for job {job.title}, will not reschedule")
+                else:
+                    job.failures = 0
 
                 if interval and job.failures < 10:
                     new_job = Job(
@@ -85,7 +88,7 @@ class TaskScheduler:
                         status=JobStatus.PENDING.value,
                         due_date=datetime.now() + timedelta(minutes=interval),
                         user_id=job.user_id,
-                        failures=job.failures
+                        failures=0 if status != JobStatus.FAILED.value else job.failures
                     )
                     session.add(new_job)
                 session.commit()
