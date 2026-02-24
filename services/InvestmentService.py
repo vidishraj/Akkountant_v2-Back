@@ -488,6 +488,13 @@ class InvestmentService(BaseService):
     def setJobsTable(self, jobId: str, user_id: str):
         if jobId not in list(self.jobsObject.keys()):
             return jsonify({"Error": "Invalid Job"}), 406
+        # Check for existing Pending or Overdue job with the same title
+        existing = self.db.session.query(Jobs.Job).filter(
+            Jobs.Job.title == jobId,
+            Jobs.Job.status.in_(["Pending", "Overdue"])
+        ).first()
+        if existing:
+            return jsonify({"Error": f"Job '{jobId}' is already queued (status: {existing.status})"}), 409
         newJob = Jobs.Job(
                 title=jobId,
                 status="Pending",
