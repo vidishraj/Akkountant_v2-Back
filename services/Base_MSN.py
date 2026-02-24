@@ -300,12 +300,14 @@ class Base_MSN:
         try:
             # Fetch the record with the given buyID
             security = self.db.session.query(PurchasedSecurities).filter(PurchasedSecurities.buyID == buyId).first()
+            if security is None:
+                self.logger.warning(f"updatePriceAndQuant: No record found for buyID {buyId}")
+                return
 
             # Update fields with new values
             security.buyPrice = newPrice
             security.buyQuant = newQuant
 
-            # Commit the changes to the database
             self.logger.info(f"Record with buyID {buyId} successfully updated.")
         except Exception as e:
             self.logger.error(f"An error occurred while updating row {e}")
@@ -313,7 +315,7 @@ class Base_MSN:
     def calculateStockRates(self, data_list):
         with ThreadPoolExecutor(max_workers=min(20, len(data_list))) as executor:
             # Submit tasks to threads and collect Future objects
-            # @TODO Manage changed symbols and edge case for fucking SUZLON-BC
+            # @TODO Manage changed symbols and edge case for SUZLON-BE
             futures = {
                 executor.submit(self.findSecurity, data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON"): data['buyCode'] if data['buyCode'] != "SUZLON-BE" else "SUZLON"
                 for data in data_list
