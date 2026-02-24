@@ -18,6 +18,9 @@ class MfService(Base_MSN, ABC):
         self.baseAPIURL = "https://api.mfapi.in/"
         self.logger = Logger(__name__).get_logger()
 
+    def readFromStatement(self, file_path: str, userId):
+        raise NotImplementedError("MF file upload is not supported")
+
     def fetchAllSecurities(self):
         return self.JsonDownloadService.getMfList()
 
