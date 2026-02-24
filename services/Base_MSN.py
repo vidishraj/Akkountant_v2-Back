@@ -346,8 +346,8 @@ class Base_MSN:
                 elif investment_type == MSNENUM.Mutual_Funds.value:
                     rates = self.JsonDownloadService.getMFRate(sec['buyCode'])
                     rate_data = {'lastPrice': rates['nav']}
-                if "error" in rate_data:
-                    self.logger.error(f"Error fetching rate data for {sec['buyCode']}: {rate_data['error']}")
+                if rate_data is None or "error" in rate_data:
+                    self.logger.error(f"Error fetching rate data for {sec['buyCode']}: {rate_data}")
                     continue
 
                 # Calculate current value and profit
