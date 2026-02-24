@@ -127,6 +127,9 @@ class MfService(Base_MSN, ABC):
             return {"message": "Security sold successfully", "sellID": new_sale.sellID, "profit": profit}
         except NoResultFound:
             return {"error": "Purchase record not found for the given buyID"}
+        except Exception as e:
+            self.logger.error(f"Error selling MF security: {e}")
+            return {"error": str(e)}
 
     def checkIfSecurityExists(self, symbol):
         mfList = self.JsonDownloadService.getMfList()
