@@ -95,7 +95,7 @@ class SetMFRate(BaseTask):
                     try:
                         # will try to add additional information about mf here
                         result_data[-1]["fundHouse"] = response[1]['meta']['fund_house']
-                        result_data[-1]["schemeType"] = response[1]['meta']['fund_house']
+                        result_data[-1]["schemeType"] = response[1]['meta']['scheme_type']
                         result_data[-1]["lastDate"] = response[1]['data'][1]['date']
                         result_data[-1]["lastNav"] = response[1]['data'][1]['nav']
                     except Exception as ex:
