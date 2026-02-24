@@ -35,8 +35,10 @@ class MfService(Base_MSN, ABC):
 
     def buySecurity(self, security_data, userId):
         try:
+            buyQuant = Decimal(security_data['buyQuant'])
+            buyPrice = Decimal(security_data['buyPrice'])
             # Validate quantity and price are positive
-            if Decimal(security_data['buyQuant']) <= 0 or Decimal(security_data['buyPrice']) <= 0:
+            if buyQuant <= 0 or buyPrice <= 0:
                 return {"error": "Quantity and price must be positive"}
             # Validate the securityCode using the separate function
             if not self.checkIfSecurityExists(str(security_data['securityCode'])):
@@ -47,7 +49,7 @@ class MfService(Base_MSN, ABC):
             date = security_data.get('date')
             if date is None:
                 date = self.dateTimeUtil.getCurrentDatetimeSqlFormat()
-            transactionObject = dict(date=date, quant=security_data['buyQuant'], price=security_data['buyPrice'],
+            transactionObject = dict(date=date, quant=buyQuant, price=buyPrice,
                                      transactionType="buy", userID=userId, securityType="Mutual_Funds")
 
             if existingRow is None:
@@ -59,8 +61,8 @@ class MfService(Base_MSN, ABC):
                     buyID=randomBuyId,
                     securityCode=security_data['securityCode'],
                     date=date,
-                    buyQuant=security_data['buyQuant'],
-                    buyPrice=security_data['buyPrice'],
+                    buyQuant=buyQuant,
+                    buyPrice=buyPrice,
                     userID=userId,
                     securityType=MSNENUM.Mutual_Funds.value
                 )
@@ -69,9 +71,8 @@ class MfService(Base_MSN, ABC):
             else:
                 # We update the old purchase by finding average of price
                 transactionObject['buyId'] = existingRow.buyID
-                newQuant = existingRow.buyQuant + Decimal(security_data['buyQuant'])
-                newPrice = ((existingRow.buyPrice * existingRow.buyQuant) + (
-                        Decimal(security_data['buyQuant']) * Decimal(security_data['buyPrice']))) / newQuant
+                newQuant = existingRow.buyQuant + buyQuant
+                newPrice = ((existingRow.buyPrice * existingRow.buyQuant) + (buyQuant * buyPrice)) / newQuant
                 self.updatePriceAndQuant(newPrice, newQuant, existingRow.buyID)
             self.insert_security_transaction(transactionObject)
             self.db.session.commit()
