@@ -91,15 +91,17 @@ class MfService(Base_MSN, ABC):
             if purchase is None:
                 return {"error": "Purchase record not found"}
 
-            if sell_data['sellQuant'] > purchase.buyQuant:
+            sellQuant = Decimal(sell_data['sellQuant'])
+            sellPrice = Decimal(sell_data['sellPrice'])
+
+            if sellQuant > purchase.buyQuant:
                 return {"error": "Sell quantity exceeds available quantity"}
 
             # Calculate profit using the averaged buyPrice from the record
-            profit = (Decimal(sell_data['sellQuant']) * Decimal(sell_data['sellPrice'])) - (
-                    Decimal(sell_data['sellQuant']) * purchase.buyPrice)
+            profit = (sellQuant * sellPrice) - (sellQuant * purchase.buyPrice)
 
             # Reduce quantity purchased
-            purchase.buyQuant -= sell_data['sellQuant']
+            purchase.buyQuant -= sellQuant
 
             # Manage date
             date = sell_data.get('date')
