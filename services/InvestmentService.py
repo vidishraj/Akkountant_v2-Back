@@ -120,6 +120,9 @@ class InvestmentService(BaseService):
             return self.FOService.readFromStatement(file_path, userId)
         elif serviceType == EPGEnum.EPF:
             return self.EPFService.readFromStatement(file_path, userId)
+        else:
+            self.logger.error(f"Unsupported service type for file processing: {serviceType}")
+            return {"error": f"Unsupported service type: {serviceType}"}
 
     def fetchActiveSecurities(self, securityType, userId):
         if securityType == MSNENUM.Stocks:
