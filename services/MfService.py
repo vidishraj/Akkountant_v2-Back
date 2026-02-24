@@ -23,6 +23,9 @@ class MfService(Base_MSN, ABC):
 
     def findSecurity(self, securityCode):
         securityItem = self.JsonDownloadService.getMFRate(securityCode)
+        if not securityItem:
+            self.logger.warning(f"No rate data found for MF scheme: {securityCode}")
+            return {'error': 'RATE_NOT_FOUND', 'scheme_id': securityCode}
         secName = self.JsonDownloadService.getMfNameForSchemeId(securityCode)
         securityItem['companyName'] = secName
         return securityItem

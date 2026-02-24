@@ -164,9 +164,11 @@ class JSONDownloadService:
         with open(filepath, 'r') as f:
             jsonData = json.load(f)
         rateList = jsonData['data']
+        scheme_str = str(schemeCode)
         for item in rateList:
-            if item['scheme_id'] == schemeCode:
+            if str(item['scheme_id']) == scheme_str:
                 return item
+        self.logger.warning(f"MF rate not found for scheme: {schemeCode}")
         return {}
 
     """ PPF methods """
