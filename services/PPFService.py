@@ -14,12 +14,39 @@ class PPFService(Base_EPG, ABC):
     def __init__(self):
         super().__init__()
 
+    def _get_fy_total(self, userId, deposit_date):
+        """Get total PPF deposits in the financial year containing deposit_date."""
+        if deposit_date.month >= 4:
+            fy_start = datetime.date(deposit_date.year, 4, 1)
+            fy_end = datetime.date(deposit_date.year + 1, 3, 31)
+        else:
+            fy_start = datetime.date(deposit_date.year - 1, 4, 1)
+            fy_end = datetime.date(deposit_date.year, 3, 31)
+
+        deposits = self.get_securities(userId, EPGEnum.PF.value)
+        fy_total = sum(
+            float(d.depositAmount) for d in deposits
+            if fy_start <= d.date <= fy_end
+        )
+        return fy_total, fy_start.year, fy_end.year
+
     def insertDeposit(self, data, userId):
+        parsed_date = self.dateTimeUtil.convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name)
+        amount = float(data['amount'])
+
+        # Validate PPF annual limit of ₹1,50,000
+        fy_total, fy_start_year, fy_end_year = self._get_fy_total(userId, parsed_date)
+        if fy_total + amount > 150000:
+            return jsonify({
+                "Error": f"PPF annual limit exceeded. FY {fy_start_year}-{fy_end_year} deposits: ₹{fy_total:,.2f}. "
+                         f"Adding ₹{amount:,.2f} would total ₹{fy_total + amount:,.2f} (limit: ₹1,50,000)."
+            }), 406
+
         deposit_security = DepositSecurities(
             buyID=self.genericUtil.generate_custom_buyID(),
-            date=self.dateTimeUtil.convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name),
+            date=parsed_date,
             depositDescription=data['description'],
-            depositAmount=data['amount'],
+            depositAmount=amount,
             userID=userId,
             securityType=EPGEnum.PF.value
         )
