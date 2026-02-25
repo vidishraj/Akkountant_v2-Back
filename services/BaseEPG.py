@@ -75,27 +75,33 @@ class Base_EPG:
             # Validate the security type
             security_type = self.validate_security_type(deposit.securityType)
 
-            # Check for PF and EPF service types to prevent duplicates
+            # Check for duplicate deposits to prevent re-uploads
             if security_type in [EPGEnum.PF, EPGEnum.EPF]:
-                # Query to check for duplicate deposits on the same date
-                existing_deposit = self.db.session.query(DepositSecurities).filter_by(
-                    date=deposit.date,
-                    userID=deposit.userID,
-                    securityType=security_type.value
-                ).first()
-
                 service_name = "PF" if security_type == EPGEnum.PF else "EPF"
+
+                if security_type == EPGEnum.EPF:
+                    # EPF: one deposit per month, match on date only (overwrite on re-upload)
+                    existing_deposit = self.db.session.query(DepositSecurities).filter_by(
+                        date=deposit.date,
+                        userID=deposit.userID,
+                        securityType=security_type.value
+                    ).first()
+                else:
+                    # PPF: allow multiple deposits per day, match on date + amount (re-upload detection)
+                    existing_deposit = self.db.session.query(DepositSecurities).filter_by(
+                        date=deposit.date,
+                        userID=deposit.userID,
+                        securityType=security_type.value,
+                        depositAmount=deposit.depositAmount
+                    ).first()
+
                 if existing_deposit:
                     self.logger.warning(
                         f"Duplicate {service_name} deposit found for date {deposit.date} and userID {deposit.userID}. "
-                        f"Updating existing record instead of creating duplicate.")
-                    
-                    # Update the existing deposit with new values from the statement
+                        f"Updating existing record.")
                     existing_deposit.depositDescription = deposit.depositDescription
                     existing_deposit.depositAmount = deposit.depositAmount
                     self.db.session.commit()
-                    
-                    self.logger.info(f"Updated existing {service_name} deposit for user {deposit.userID} on {deposit.date}.")
                     return {'message': 'updated existing deposit'}
 
                 self.logger.info(f"No existing {service_name} deposit found for {deposit.date}. Creating new record.")
