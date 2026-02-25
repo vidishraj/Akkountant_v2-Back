@@ -220,8 +220,10 @@ class InvestmentController:
 
             # Validate 'date' field
             try:
+                if not data["date"]:
+                    return None, (jsonify({"error": "Date cannot be empty"}), 400)
                 datetime.strptime(data["date"], "%d-%m-%Y")
-            except ValueError:
+            except (ValueError, TypeError):
                 return None, (jsonify({"error": "Invalid date format. Use dd-mm-YYYY"}), 400)
 
             # Validate 'deposit' and 'amount' fields
