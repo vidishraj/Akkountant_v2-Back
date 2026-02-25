@@ -119,22 +119,18 @@ class Base_EPG:
         :raises ValueError: If no deposit with the given buyID is found.
         """
         try:
-            # Query the database for the deposit with the given buyID
-            deposit = self.db.query(DepositSecurities).filter_by(buyID=buyID).first()
+            deposit = self.db.session.query(DepositSecurities).filter_by(buyID=buyID).first()
 
-            # Check if the deposit exists
             if not deposit:
                 self.logger.error(f"No deposit found with buyID '{buyID}'.")
                 raise ValueError(f"No deposit found with buyID '{buyID}'.")
 
-            # Delete the deposit
-            self.db.delete(deposit)
-            self.db.commit()
+            self.db.session.delete(deposit)
+            self.db.session.commit()
             self.logger.info(f"Deposit with buyID '{buyID}' deleted successfully.")
 
         except Exception as e:
-            # Rollback in case of any exception
-            self.db.rollback()
+            self.db.session.rollback()
             self.logger.error(f"Error while deleting deposit with buyID '{buyID}': {e}")
             raise
 
