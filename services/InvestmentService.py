@@ -243,6 +243,7 @@ class InvestmentService(BaseService):
                         self.logger.warning(f"No NPS rate data found for scheme {security['buyCode']}")
                         security['info'] = {
                             'nav': 0,
+                            'name': security['buyCode'],
                             'scheme_id': security['buyCode'],
                             'date': None,
                             'yesterday': 0,
@@ -257,6 +258,7 @@ class InvestmentService(BaseService):
                     nav = npsInfo.get('nav', 0)
                     security['info'] = {
                         'nav': nav,
+                        'name': npsInfo.get('scheme_name', security['buyCode']),
                         'scheme_id': npsInfo.get('scheme_id', security['buyCode']),
                         'date': npsInfo.get('date'),
                         'yesterday': npsInfo.get('yesterday', nav),
@@ -268,6 +270,7 @@ class InvestmentService(BaseService):
                     self.logger.error(f"Error processing NPS data for scheme {security['buyCode']}: {str(e)}")
                     security['info'] = {
                         'nav': 0,
+                        'name': security['buyCode'],
                         'scheme_id': security['buyCode'],
                         'date': None,
                         'yesterday': 0,
@@ -333,18 +336,35 @@ class InvestmentService(BaseService):
         return activeSecurities
 
     def insertSecurityPurchase(self, serviceType, userId, data):
-        # Purchase from the UI is only possible for MF, EPF, PF or Gold
+        # Purchase from the UI is possible for MF, NPS, EPF, PF or Gold
+        # NOTE: buyPrice in the DB = per-unit price (NAV), NOT total amount.
+        # The agent sends {quantity (units), amount (total ₹)} so we compute: NAV = amount / quantity.
         if serviceType == MSNENUM.Mutual_Funds:
+            quantity = float(data['quantity'])
+            amount = float(data['amount'])
             insertionObject = {
                 "securityCode": data['schemeCode'],
                 "date": DateTimeUtil().convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name),
-                "buyQuant": data['quantity'],
-                "buyPrice": data['amount'],
+                "buyQuant": quantity,
+                "buyPrice": amount / quantity if quantity != 0 else 0,
             }
             status = self.MFService.buySecurity(insertionObject, userId)
             if 'error' in status:
                 return jsonify({"Error": "Error in MF entry"}), 406
             return jsonify({"Message": "MF Transaction inserted successfully"}), 200
+        elif serviceType == MSNENUM.NPS:
+            quantity = float(data['quantity'])
+            amount = float(data['amount'])
+            insertionObject = {
+                "securityCode": data['schemeCode'],
+                "date": DateTimeUtil().convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name),
+                "buyQuant": quantity,
+                "buyPrice": amount / quantity if quantity != 0 else 0,
+            }
+            status = self.NPSService.buySecurity(insertionObject, userId)
+            if 'error' in status:
+                return jsonify({"Error": "Error in NPS entry"}), 406
+            return jsonify({"Message": "NPS Transaction inserted successfully"}), 200
         elif serviceType == EPGEnum.EPF:
             return self.EPFService.insertDeposit(data, userId)
         elif serviceType == EPGEnum.PF:

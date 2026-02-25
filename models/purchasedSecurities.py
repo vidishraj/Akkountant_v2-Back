@@ -10,7 +10,7 @@ class PurchasedSecurities(Base):
     buyID = Column(String(30), primary_key=True)
     date = Column(Date, nullable=False)
     securityCode = Column(String(250), nullable=False)
-    buyQuant = Column(Integer, nullable=False)
+    buyQuant = Column(Decimal(15, 5), nullable=False)
     buyPrice = Column(Decimal(10, 2), nullable=False)
     userID = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     securityType = Column(String(20), nullable=False)

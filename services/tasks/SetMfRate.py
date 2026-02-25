@@ -4,13 +4,15 @@ import os
 import time
 
 from services.tasks.baseTask import BaseTask
-from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientResponseError
+from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientResponseError, ClientTimeout
 
 from utils.logger import Logger
 
-CONCURRENT_REQUESTS = 50
-MAX_RETRIES = 2
-RETRY_DELAY = 0
+# Tuned for mfapi.in rate limits
+CONCURRENT_REQUESTS = 25
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds between retries
+RETRY_PASSES = 3  # number of full retry passes for failed schemes
 
 
 class SetMFRate(BaseTask):
@@ -72,66 +74,95 @@ class SetMFRate(BaseTask):
         self.logger.info(f"API URL list built for MF. {len(urls)}")
 
         start_time = time.time()
-        result_data = []
-        requests_processed = 0
+        result_map = {}  # scheme_id -> parsed data
+
+        # First pass
         responses = asyncio.run(self.make_requests(urls))
+        self._process_responses(responses, result_map)
+        self.logger.info(
+            f"Pass 1 complete: {len(result_map)}/{len(urls)} schemes in {time.time() - start_time:.2f}s")
+
+        # Retry passes for failed schemes
+        for retry_pass in range(RETRY_PASSES):
+            failed_urls = [u for u in urls if u.split("/")[-1] not in result_map]
+            if not failed_urls:
+                break
+            self.logger.info(f"Retry pass {retry_pass + 2}: {len(failed_urls)} schemes to retry")
+            # Back off concurrency and add delay between passes
+            time.sleep(5 * (retry_pass + 1))
+            responses = asyncio.run(self.make_requests(
+                failed_urls, concurrency=max(10, CONCURRENT_REQUESTS // (retry_pass + 2))))
+            self._process_responses(responses, result_map)
+            self.logger.info(
+                f"Pass {retry_pass + 2} complete: {len(result_map)}/{len(urls)} schemes in {time.time() - start_time:.2f}s")
+
+        final_failed = len(urls) - len(result_map)
+        if final_failed > 0:
+            self.logger.warning(f"{final_failed} schemes still failed after all retry passes")
+
+        self.logger.info(f"MF rate fetch complete: {len(result_map)} schemes in {time.time() - start_time:.2f}s")
+        return {"data": list(result_map.values())}
+
+    def _process_responses(self, responses, result_map):
+        """Parse successful responses into result_map, skip failures."""
         for response in responses:
-            if isinstance(response, tuple):  # Ensure it's a valid JSON response
-                try:
-                    result_data.append(
-                        {
-                            "date": response[1]['data'][0]['date'],
-                            "nav": response[1]['data'][0]['nav'],
-                            "scheme_id": response[0]
-                        },
-                    )
-                    requests_processed += 1
-                    if requests_processed % 500 == 0:
-                        self.logger.info(
-                            f"Processed {requests_processed} responses in {time.time() - start_time:.2f}s")
-                    try:
-                        # will try to add additional information about mf here
-                        result_data[-1]["fundHouse"] = response[1]['meta']['fund_house']
-                        result_data[-1]["schemeType"] = response[1]['meta']['scheme_type']
-                        result_data[-1]["lastDate"] = response[1]['data'][1]['date']
-                        result_data[-1]["lastNav"] = response[1]['data'][1]['nav']
-                    except Exception as ex:
-                        self.logger.error(f"Error adding addition info for MF {response[0]} {ex}")
-                except Exception as ex:
-                    self.logger.error(f"Error while adding response to the json {ex}")
-                    self.logger.error(f"{response}")
-            else:
-                self.logger.error(f"Skipping invalid response: {response}")
+            if not isinstance(response, tuple):
+                continue
+            scheme_id, data = response
+            if not isinstance(data, dict) or 'data' not in data:
+                continue
+            try:
+                nav_data = data['data']
+                if not nav_data or not isinstance(nav_data, list):
+                    continue
+                entry = {
+                    "date": nav_data[0]['date'],
+                    "nav": nav_data[0]['nav'],
+                    "scheme_id": scheme_id,
+                }
+                # Add optional metadata
+                meta = data.get('meta', {})
+                if meta:
+                    entry["fundHouse"] = meta.get('fund_house', '')
+                    entry["schemeType"] = meta.get('scheme_type', '')
+                if len(nav_data) > 1:
+                    entry["lastDate"] = nav_data[1]['date']
+                    entry["lastNav"] = nav_data[1]['nav']
+                result_map[scheme_id] = entry
+            except (KeyError, IndexError, TypeError) as ex:
+                self.logger.debug(f"Skipping scheme {scheme_id}: {ex}")
 
-        self.logger.info(f"MF rate fetch complete: {requests_processed} schemes in {time.time() - start_time:.2f}s")
-        return {"data": result_data}
-
-    async def make_requests(self, urls: list, **kwargs):
-        semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
-        connector = TCPConnector(limit_per_host=CONCURRENT_REQUESTS)
-        async with ClientSession(connector=connector) as session:
-            tasks = [self.fetch_html(url, session, semaphore, **kwargs) for url in urls]
+    async def make_requests(self, urls: list, concurrency=CONCURRENT_REQUESTS, **kwargs):
+        semaphore = asyncio.Semaphore(concurrency)
+        timeout = ClientTimeout(total=30, connect=10)
+        connector = TCPConnector(limit_per_host=concurrency, force_close=True)
+        async with ClientSession(connector=connector, timeout=timeout) as session:
+            tasks = [self.fetch_scheme(url, session, semaphore) for url in urls]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r for r in results if not isinstance(r, Exception)]
 
-        return results
-
-    async def fetch_html(self, url: str, session: ClientSession, semaphore: asyncio.Semaphore, **kwargs):
-        retries = 0
-        while retries < MAX_RETRIES:
-            async with semaphore:  # Control concurrency with semaphore
+    async def fetch_scheme(self, url: str, session: ClientSession, semaphore: asyncio.Semaphore):
+        scheme_id = url.split("/")[-1]
+        for attempt in range(MAX_RETRIES):
+            async with semaphore:
                 try:
-                    async with session.get(url, timeout=15, **kwargs) as resp:
-                        if resp.status != 200:
-                            self.logger.info(f" Status {resp.status}, Response {resp.text()}")
-                        data = await resp.json()  # Use .json() for JSON responses
-                        return url.split("/")[-1], data
-                except (ClientConnectorError, asyncio.TimeoutError) as e:
-                    retries += 1
-                    await asyncio.sleep(RETRY_DELAY)
+                    async with session.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return scheme_id, data
+                        elif resp.status in (429, 502, 503):
+                            # Rate limited or server overloaded — retry with backoff
+                            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                            continue
+                        else:
+                            body = await resp.text()
+                            self.logger.debug(f"HTTP {resp.status} for {scheme_id}: {body[:100]}")
+                            return scheme_id, resp.status
+                except (ClientConnectorError, asyncio.TimeoutError):
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                 except ClientResponseError as e:
-                    return url, e.status  # Return specific HTTP error code
+                    return scheme_id, e.status
                 except Exception as e:
-                    self.logger.error(f"Unexpected error for {url}: {e.__str__()}")
-                    return url, 500  # General server error
-
-        return url, 408  # Return timeout status after retries
+                    self.logger.error(f"Unexpected error for {scheme_id}: {e}")
+                    return scheme_id, 500
+        return scheme_id, 408  # All retries exhausted

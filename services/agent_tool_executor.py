@@ -116,7 +116,24 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
         return service.fetchSecurityTransactions(MSNENUM[tool_input["service_type"]].value, user_id)
 
     elif tool_name == "search_securities":
-        return service.fetchAllSecurities(MSNENUM[tool_input["service_type"]])
+        query = tool_input.get("query", "").strip().lower()
+        all_securities = service.fetchAllSecurities(MSNENUM[tool_input["service_type"]])
+        items = all_securities.get("data", []) if isinstance(all_securities, dict) else (all_securities if isinstance(all_securities, list) else [])
+
+        def _matches(item, q):
+            searchable = " ".join([
+                str(item.get("schemeName", "")),
+                str(item.get("name", "")),
+                str(item.get("stockCode", "")),
+                str(item.get("pfm_name", "")),
+            ]).lower()
+            return all(word in searchable for word in q.split())
+
+        if query:
+            filtered = [item for item in items if _matches(item, query)]
+            return {"data": filtered[:20], "total_matches": len(filtered), "query": query}
+        # No query: return truncated to prevent buffer overflow
+        return {"data": items[:20], "total": len(items), "truncated": True}
 
     elif tool_name == "fetch_security_rate":
         stype = MSNENUM[tool_input["service_type"]]

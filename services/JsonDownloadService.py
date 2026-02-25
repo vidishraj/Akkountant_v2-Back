@@ -207,9 +207,13 @@ class JSONDownloadService:
                 else:
                     self.logger.warning(f"Unexpected rate format: {rate_value} for year {monthString}")
                     return 0.0
-        # Return default EPF rate if month not found (8.5% as of recent years)
-        self.logger.warning(f"No rate found for month {monthString}, using default EPF rate of 8.5%")
-        return 8.5
+        # Return sensible default rate based on service type
+        if service_type == EPGEnum.PF:
+            self.logger.warning(f"No rate found for month {monthString}, using default PPF rate of 7.1%")
+            return 7.1
+        else:
+            self.logger.warning(f"No rate found for month {monthString}, using default EPF rate of 8.5%")
+            return 8.5
 
     def getPPFRateFile(self):
         filepath = self.getLatestFile(self.ratesType, self.PPFRatePrefix)
@@ -306,10 +310,12 @@ class JSONDownloadService:
                     td = timedelta(days=20)
                 # Compare time difference
                 if time_diff <= td:
-                    # do nothing it
                     return True
                 else:
-                    # Delete the file
+                    # In LOCAL env, never auto-delete stale files — just mark as stale
+                    if os.getenv('ENV') == 'LOCAL':
+                        self.logger.warning(f"Stale file (age: {time_diff}): {most_recent_file_path} — skipping deletion in LOCAL")
+                        return True
                     self.deleteFile(most_recent_file_path)
                     return False
             return False
