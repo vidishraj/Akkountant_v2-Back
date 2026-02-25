@@ -57,13 +57,16 @@ class PPFService(Base_EPG, ABC):
 
     def calculateTransactionTable(self, deposits: [DepositSecurities]):  # Get the deposits here in sorted order
         """
-        For each month from the month of first deposit, the lowest balance between 5th of that month
-        and the end of that month is used to calculate the interest for that month.
-        (Any deposit made between the 5th-4th of the next month will be used for the next month's calculation)
-
-        The interest is credited at the end of the financial year but computed monthly.
-        :param deposits: Row of DepositSecurities
-        :return:
+        PPF interest calculation per PPF Scheme 2019, Paragraph 7:
+        - Interest is calculated monthly on the lowest balance between the close of the 5th
+          and the end of that month. Since we only track deposits (no withdrawals), the minimum
+          balance equals the balance at close of the 5th.
+        - Deposits on days 1-5: count in current month (included at close of 5th).
+        - Deposits on days 6-31: count from next month onwards.
+        - Interest is accumulated monthly but credited annually on March 31.
+        - Annual interest is rounded to nearest rupee (50 paise rounds up) per the scheme.
+        :param deposits: Row of DepositSecurities sorted by date
+        :return: (transactions, netProfit, runningTotal, runningInterest)
         """
         depositMap = {}
         if len(deposits) == 0:
@@ -87,7 +90,7 @@ class PPFService(Base_EPG, ABC):
                     for deposit in depositMap[month]:
                         date = datetime.datetime.strptime(deposit.date.__str__(), '%Y-%m-%d')
                         day = date.day
-                        if 4 < day <= 31:
+                        if day > 5:
                             nextMonth += deposit.depositAmount
                         else:
                             currentMonth += deposit.depositAmount
@@ -97,7 +100,10 @@ class PPFService(Base_EPG, ABC):
                 netProfit += interest
                 runningInterest += interest
                 if month.endswith("03", len(month) - 2, len(month)):
-                    nextMonth = runningInterest  # Adding interest for the year to compound
+                    # Round annual interest to nearest rupee (50 paise rounds up) per PPF Scheme 2019
+                    rounded = round(runningInterest)
+                    netProfit += (rounded - runningInterest)  # Adjust total profit for rounding
+                    nextMonth = rounded  # Credit rounded interest to principal for compounding
                     runningInterest = 0
                 transactions.append({
                     'date': month,
