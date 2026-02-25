@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer, Date, and_
+from sqlalchemy import Column, String, ForeignKey, Integer, Date, Numeric, and_
 
 from sqlalchemy.orm import relationship
 from models.Base import Base
@@ -10,7 +10,7 @@ class DepositSecurities(Base):
     buyID = Column(String(30), primary_key=True)
     date = Column(Date, nullable=False)
     depositDescription = Column(String(250), nullable=False)
-    depositAmount = Column(Integer, nullable=False)
+    depositAmount = Column(Numeric(12, 2), nullable=False)
     userID = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     securityType = Column(String(10), nullable=False)
 
