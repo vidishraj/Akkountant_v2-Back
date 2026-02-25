@@ -38,7 +38,7 @@ class GoldService(Base_EPG, ABC):
             return jsonify({"Message": "Gold Transaction inserted successfully"}), 200
         except Exception as ex:
             self.logger.error(f"Failed while inserting Gold Transaction {ex}")
-            return jsonify({"Error": "Failed while inserting Gold Transaction"}), 5010
+            return jsonify({"error": "Failed while inserting Gold Transaction"}), 500
 
     def insertTransactionType(self, buyId, quantity, goldType):
         goldDetails = GoldDetails(
