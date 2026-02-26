@@ -27,24 +27,26 @@ class EPFService(Base_EPG, ABC):
             date_str = f"01/{month}/{year}"
             date_obj = self.dateTimeUtil.convert_to_sql_datetime(date_str, DateStatementEnum.EPF_STATEMENT.name)
         
-        # Calculate amount based on transaction type
-        # Store only employee portion since application logic expects single party contribution
+        # Extract employee and employer amounts from different data formats
         if 'employee_deposit' in data and 'employer_deposit' in data:
-            # Contribution transaction - store only employee portion
-            amount_to_store = data['employee_deposit']
-        # NOTE: Interest transactions commented out - application calculates interest automatically
-        # elif 'employee_interest' in data and 'employer_interest' in data:
-        #     # Interest transaction - store only employee portion
-        #     amount_to_store = data['employee_interest']
+            # Parser data format (from EPF passbook PDF)
+            employee_amount = data['employee_deposit']
+            employer_amount = data['employer_deposit']
+        elif 'employee_amount' in data and 'employer_amount' in data:
+            # Agent data format (from AI chat)
+            employee_amount = data['employee_amount']
+            employer_amount = data['employer_amount']
         else:
-            # Fallback to existing 'amount' field (assume it's total, so divide by 2)
-            amount_to_store = data['amount'] / 2
-        
+            # Legacy fallback: single 'amount' → split 50/50
+            employee_amount = data['amount'] / 2
+            employer_amount = data['amount'] / 2
+
         deposit_security = DepositSecurities(
             buyID=self.genericUtil.generate_custom_buyID(),
             date=date_obj,
             depositDescription=data['description'],
-            depositAmount=int(amount_to_store),  # Ensure integer type for database
+            depositAmount=int(employee_amount),
+            employerAmount=int(employer_amount),
             userID=userId,
             securityType=EPGEnum.EPF.value
         )
@@ -82,9 +84,9 @@ class EPFService(Base_EPG, ABC):
                 dateString = self.dateTimeUtil.convert_format_for_epf(deposit.date.__str__())
                 date = dateString
                 description = deposit.depositDescription
-                # For EPF, double the stored amount since we store only employee portion
-                # but need to account for total EPF value (employee + employer)
-                amount = deposit.depositAmount * 2
+                employee = float(deposit.depositAmount)
+                employer = float(deposit.employerAmount) if deposit.employerAmount is not None else float(deposit.depositAmount)
+                amount = employee + employer
                 totalContributions += amount
 
                 # Calculate interest for this month (except for first deposit)
@@ -111,7 +113,9 @@ class EPFService(Base_EPG, ABC):
             
             # Generate transactions for months after last deposit
             if len(deposits) > 0:
-                lastDeposit = deposits[-1].depositAmount * 2  # Double for total EPF value
+                lastEmployee = float(deposits[-1].depositAmount)
+                lastEmployer = float(deposits[-1].employerAmount) if deposits[-1].employerAmount is not None else float(deposits[-1].depositAmount)
+                lastDeposit = lastEmployee + lastEmployer
                 lastDescription = deposits[-1].depositDescription
                 lastMonth = transactions[-1]['date']
                 for month in self.dateTimeUtil.iterate_months(deposits[-1].date.__str__()):
@@ -145,18 +149,22 @@ class EPFService(Base_EPG, ABC):
             return transactions, netProfit, finalBalance, runningInterest
         except Exception as ex:
             self.logger.error(f"Error while calculating transaction table for EPF {ex}")
-            return None, None, None
+            return None, None, None, None
 
     def fetchComplete(self, userId):
         # Fetch all the deposits
         deposits = self.get_securities(userId, EPGEnum.EPF.value)
         depositDict = []
         for deposit in deposits:
+            employee = float(deposit.depositAmount)
+            employer = float(deposit.employerAmount) if deposit.employerAmount is not None else float(deposit.depositAmount)
             depositDict.append({
                 'buyId': deposit.buyID,
                 "date": deposit.date,
                 "description": deposit.depositDescription,
-                "amount": deposit.depositAmount * 2,  # Show total EPF value (employee + employer)
+                "amount": employee + employer,
+                "employeeAmount": employee,
+                "employerAmount": employer,
             })
         # calculate the profits based on the deposits
         transaction, netProfit, netInvestment, unaccountedProfit = self.calculateTransactionTable(deposits)

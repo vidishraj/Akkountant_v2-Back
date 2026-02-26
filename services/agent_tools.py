@@ -101,6 +101,18 @@ Collect all required fields one-by-one, validate as you go, and confirm before i
 - **Domain terms**: Lock-in period (15 years), partial withdrawal (from 7th year), loan facility (3rd-6th year), Section 80C, tax-exempt (EEE status), interest credited March 31st, balance for interest = lowest between 5th and end of month
 - **Notes**: PPF interest is calculated automatically by the app based on quarterly RBI rates.
 
+### EPF (Employee Provident Fund)
+- **Required**: date, employee_amount, employer_amount, description
+- **Flow**:
+  1. Ask contribution month/year
+  2. Ask employee contribution (12% of basic deducted from salary)
+  3. Ask employer EPF contribution. Explain: employer's 12% is split between
+     EPF (3.67%) and EPS (8.33%). Only the EPF portion shows in the passbook.
+     If employer puts full 12% into EPF (0% EPS), employer = employee.
+  4. Description defaults to "Contribution for MM/YYYY"
+  5. Suggest passbook upload for bulk accurate import
+- **Notes**: Interest is calculated automatically from EPFO rates.
+
 ### Gold
 - **Required**: date, amount (₹ total cost), quantity (grams), goldType (18/22/24), description
 - **Flow**:
@@ -236,7 +248,7 @@ INVESTMENT_TOOLS = [
     },
     {
         "name": "insert_investment",
-        "description": "Insert a new investment purchase record. For MF/NPS: requires schemeCode, date, quantity, amount. For EPF/PF: requires date, description, amount. For Gold: requires date, description, amount, quantity (grams), goldType (18/22/24).",
+        "description": "Insert a new investment purchase record. For MF/NPS: requires schemeCode, date, quantity, amount. For EPF: requires date, description, employee_amount, employer_amount. For PF: requires date, description, amount. For Gold: requires date, description, amount, quantity (grams), goldType (18/22/24).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -247,14 +259,16 @@ INVESTMENT_TOOLS = [
                 },
                 "data": {
                     "type": "object",
-                    "description": "Investment data. For MF/NPS: {schemeCode, date (dd-mm-YYYY), quantity, amount}. For EPF/PF: {date (dd-mm-YYYY), description, amount}. For Gold: {date (dd-mm-YYYY), description, amount, quantity (grams), goldType (18/22/24)}.",
+                    "description": "Investment data. For MF/NPS: {schemeCode, date (dd-mm-YYYY), quantity, amount}. For EPF: {date (dd-mm-YYYY), description, employee_amount, employer_amount}. For PF: {date (dd-mm-YYYY), description, amount}. For Gold: {date (dd-mm-YYYY), description, amount, quantity (grams), goldType (18/22/24)}.",
                     "properties": {
                         "schemeCode": {"type": "string", "description": "Scheme code for MF or NPS"},
                         "date": {"type": "string", "description": "Date in dd-mm-YYYY format"},
                         "quantity": {"type": "number", "description": "Units purchased (MF/NPS) or grams (Gold)"},
                         "amount": {"type": "number", "description": "Total amount in ₹"},
                         "description": {"type": "string", "description": "Description for EPF/PF/Gold deposits"},
-                        "goldType": {"type": "string", "enum": ["18", "22", "24"], "description": "Gold purity (18/22/24 carat). Required for Gold."}
+                        "goldType": {"type": "string", "enum": ["18", "22", "24"], "description": "Gold purity (18/22/24 carat). Required for Gold."},
+                        "employee_amount": {"type": "number", "description": "Employee EPF contribution in ₹"},
+                        "employer_amount": {"type": "number", "description": "Employer EPF contribution in ₹"}
                     },
                     "required": ["date", "amount"]
                 }

@@ -11,6 +11,7 @@ class DepositSecurities(Base):
     date = Column(Date, nullable=False)
     depositDescription = Column(String(250), nullable=False)
     depositAmount = Column(Numeric(12, 2), nullable=False)
+    employerAmount = Column(Numeric(12, 2), nullable=True, default=None)
     userID = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     securityType = Column(String(10), nullable=False)
 

@@ -101,6 +101,8 @@ class Base_EPG:
                         f"Updating existing record.")
                     existing_deposit.depositDescription = deposit.depositDescription
                     existing_deposit.depositAmount = deposit.depositAmount
+                    if deposit.employerAmount is not None:
+                        existing_deposit.employerAmount = deposit.employerAmount
                     self.db.session.commit()
                     return {'message': 'updated existing deposit'}
 
