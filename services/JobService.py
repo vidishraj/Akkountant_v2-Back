@@ -145,6 +145,51 @@ class JobService(BaseService):
                 'message': f'Failed to get jobs: {str(e)}'
             }
     
+    def get_job_daily_history(self, days=90):
+        """Get day-by-day status counts for each job title over the last N days."""
+        try:
+            from datetime import timedelta
+
+            cutoff = datetime.now() - timedelta(days=days)
+
+            rows = self.db.session.query(
+                Job.title,
+                func.date(Job.due_date).label('job_date'),
+                Job.status,
+                func.count(Job.id).label('count')
+            ).filter(
+                Job.due_date >= cutoff
+            ).group_by(
+                Job.title,
+                func.date(Job.due_date),
+                Job.status
+            ).order_by(
+                Job.title,
+                func.date(Job.due_date)
+            ).all()
+
+            # Build { title: { "2026-03-13": { "Completed": 5, "Failed": 1 }, ... } }
+            history = {}
+            for title, job_date, status, count in rows:
+                if title not in history:
+                    history[title] = {}
+                date_str = str(job_date)
+                if date_str not in history[title]:
+                    history[title][date_str] = {}
+                history[title][date_str][status] = count
+
+            return {
+                'status': 'success',
+                'data': history
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error getting job daily history: {str(e)}")
+            return {
+                'status': 'error',
+                'message': f'Failed to get daily history: {str(e)}'
+            }
+
     def cancel_job(self, job_id):
         """Cancel a pending or overdue job"""
         try:

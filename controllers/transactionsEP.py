@@ -10,8 +10,10 @@ from flask import g
 class TransactionController:
     TransactionService: TransactionService
 
-    def __init__(self, transactionService):
+    def __init__(self, transactionService, mail_processor=None, reconciliation_service=None):
         self.TransactionService = transactionService
+        self.mail_processor = mail_processor
+        self.reconciliation_service = reconciliation_service
         self.logger = Logger(__name__).get_logger()
 
     @Logger.standardLogger
@@ -84,38 +86,35 @@ class TransactionController:
         response = {
             "transaction_dates": transactions.get("transaction_dates", []),
             "statement_dates": transactions.get("statement_dates", []),
+            "covered_periods": transactions.get("covered_periods", []),
         }
 
         return jsonify(response), 200
 
     @Logger.standardLogger
     def triggerEmailCheck(self):
+        """Legacy endpoint — now redirects to unified mail processing pipeline."""
         userId = request.headers.get("X-Firebase-ID")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
-        algorithm = request.args.get('algorithm', 'claude')  # Default to claude, can be 'regex' or 'claude'
-        self.logger.info(f"Reading email for user {userId} using {algorithm} algorithm")
-        successCount, errorCount = \
-            self.TransactionService.readTransactionFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, algorithm=algorithm)
-        return jsonify({"Message": {
-            "read": successCount,
-            "conflicts": errorCount
-        }}), 200
+        self.logger.info(f"Reading email for user {userId} via unified pipeline")
+        if not self.mail_processor:
+            return jsonify({"error": "Mail processor not configured"}), 500
+        result = self.mail_processor.process_emails(userId, dateFrom, dateTo)
+        return jsonify({"Message": result}), 200
 
     @Logger.standardLogger
     def triggerStatementCheck(self):
+        """Legacy endpoint — now redirects to unified mail processing pipeline."""
         userId = request.headers.get("X-Firebase-ID")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
-        bank = request.args.get('bank')
-        algorithm = request.args.get('algorithm', 'claude')  # Default to claude, can be 'regex' or 'claude'
-        self.logger.info(f"Reading statements for user {userId} using {algorithm} algorithm")
-        successCount, errorCount = \
-            self.TransactionService.readStatementsFromMail(dateTo=dateTo, dateFrom=dateFrom, userID=userId, bank=bank, algorithm=algorithm)
-        return jsonify({"Message": {
-            "read": successCount,
-            "conflicts": errorCount
-        }}), 200
+        processing_mode = request.args.get('processing_mode', 'image')
+        self.logger.info(f"Reading statements for user {userId} via unified pipeline ({processing_mode} mode)")
+        if not self.mail_processor:
+            return jsonify({"error": "Mail processor not configured"}), 500
+        result = self.mail_processor.process_emails(userId, dateFrom, dateTo, processing_mode)
+        return jsonify({"Message": result}), 200
 
     @Logger.standardLogger
     def updateTransaction(self):
@@ -232,19 +231,30 @@ class TransactionController:
 
     @Logger.standardLogger
     def downloadFile(self):
-        """Enhanced to handle both legacy Google Drive and local statements"""
+        """Handle download for processed email PDFs, local statements, and legacy Google Drive"""
+        from flask import send_file as flask_send_file
         userId = g.get('firebase_id')
         fileId = request.args.get('fileId')
-        
-        # Ensure all required fields are present
+
         if userId is None or fileId is None:
             return jsonify({"error": "Missing required fields"}), 400
-            
-        # Check if this is a local statement (fileId format: local_BANK_filename)
+
+        # Processed email PDF (fileId format: pe_GMAILID)
+        if fileId.startswith('pe_'):
+            gmail_id = fileId[3:]
+            row = self.TransactionService.getProcessedEmailByGmailId(userId, gmail_id)
+            if not row or not row.pdf_filename:
+                return jsonify({"error": "PDF not available for this statement"}), 404
+            import os
+            file_path = os.path.join(os.getcwd(), "claude_statements", userId, row.pdf_filename)
+            if not os.path.exists(file_path):
+                return jsonify({"error": "PDF file not found on disk"}), 404
+            return flask_send_file(file_path, as_attachment=True, download_name=os.path.basename(row.pdf_filename))
+
+        # Local statement (fileId format: local_BANK_filename)
         if fileId.startswith('local_'):
             try:
-                # Parse local file ID: local_BANK_filename.pdf
-                parts = fileId.split('_', 2)  # Split into max 3 parts
+                parts = fileId.split('_', 2)
                 if len(parts) >= 3:
                     bank = parts[1]
                     filename = parts[2]
@@ -253,10 +263,10 @@ class TransactionController:
                     return jsonify({"error": "Invalid local file ID format"}), 400
             except Exception as e:
                 return jsonify({"error": f"Failed to download local statement: {str(e)}"}), 500
-        else:
-            # Legacy Google Drive download
-            result = self.TransactionService.downloadFile(userId, fileId)
-            return result
+
+        # Legacy Google Drive download
+        result = self.TransactionService.downloadFile(userId, fileId)
+        return result
 
     def downloadLocalStatement_internal(self, userId, bank, filename):
         """Internal method for downloading local statements"""
@@ -314,65 +324,212 @@ class TransactionController:
         return jsonify(stats), 200
 
 
-    # ENHANCED: Legacy endpoints with storage type awareness
+    @Logger.standardLogger
+    def updatePersonalInfo(self):
+        """POST /updatePersonalInfo — Save/update user personal info for PDF password unlocking."""
+        from models.userPersonalInfo import UserPersonalInfo
+        data = request.get_json(force=True)
+        user_id = g.get("firebase_id")
+
+        try:
+            existing = g.db.session.query(UserPersonalInfo).filter_by(user_id=user_id).first()
+            if existing:
+                for field in ["first_name", "last_name", "date_of_birth", "pan_number",
+                              "phone_number", "phone_number_2", "uan_number", "customer_id_hdfc"]:
+                    if field in data:
+                        setattr(existing, field, data[field])
+            else:
+                info = UserPersonalInfo(
+                    user_id=user_id,
+                    first_name=data.get("first_name"),
+                    last_name=data.get("last_name"),
+                    date_of_birth=data.get("date_of_birth"),
+                    pan_number=data.get("pan_number"),
+                    phone_number=data.get("phone_number"),
+                    phone_number_2=data.get("phone_number_2"),
+                    uan_number=data.get("uan_number"),
+                    customer_id_hdfc=data.get("customer_id_hdfc"),
+                )
+                g.db.session.add(info)
+            g.db.session.commit()
+            return jsonify({"message": "Personal info updated successfully"}), 200
+        except Exception as e:
+            g.db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
+    @Logger.standardLogger
+    def getPersonalInfo(self):
+        """GET /getPersonalInfo — Fetch stored personal info (masked for security)."""
+        from models.userPersonalInfo import UserPersonalInfo
+        user_id = g.get("firebase_id")
+
+        info = g.db.session.query(UserPersonalInfo).filter_by(user_id=user_id).first()
+        if not info:
+            return jsonify({"exists": False}), 200
+
+        # Return masked versions for display
+        def mask(val, show=2):
+            if not val:
+                return None
+            if len(val) <= show:
+                return val
+            return val[:show] + "*" * (len(val) - show)
+
+        return jsonify({
+            "exists": True,
+            "first_name": info.first_name,
+            "last_name": info.last_name,
+            "date_of_birth": mask(info.date_of_birth, 5) if info.date_of_birth else None,
+            "pan_number": mask(info.pan_number, 4) if info.pan_number else None,
+            "phone_number": mask(info.phone_number, 4) if info.phone_number else None,
+            "phone_number_2": mask(info.phone_number_2, 4) if info.phone_number_2 else None,
+            "uan_number": mask(info.uan_number, 4) if info.uan_number else None,
+            "customer_id_hdfc": mask(info.customer_id_hdfc, 3) if info.customer_id_hdfc else None,
+        }), 200
+
+    @Logger.standardLogger
+    def processMailPipeline(self):
+        """POST /processMailPipeline — Trigger unified AI email processing pipeline."""
+        data = request.get_json(force=True)
+        date_from = data.get("date_from")
+        date_to = data.get("date_to")
+        processing_mode = data.get("processing_mode", "image")
+        user_id = g.get("firebase_id")
+
+        if not self.mail_processor:
+            return jsonify({"error": "Mail processor not configured"}), 500
+
+        result = self.mail_processor.process_emails(user_id, date_from, date_to, processing_mode)
+        return jsonify(result), 200
+
+    @Logger.standardLogger
+    def reprocessPdf(self):
+        """POST /reprocessPdf — Reprocess a saved PDF directly (bypasses email fetch).
+
+        Body: {
+            "gmail_id": "19cd534052ce39a8",
+            "pdf_path": "/path/to/saved.pdf",   (optional — auto-resolved from claude_statements)
+            "password": "...",                   (optional — auto-tried from personal info)
+            "processing_mode": "text"            (optional — default "text")
+        }
+        """
+        data = request.get_json(force=True)
+        gmail_id = data.get("gmail_id")
+        user_id = g.get("firebase_id")
+        processing_mode = data.get("processing_mode", "text")
+        password = data.get("password")
+        pdf_path = data.get("pdf_path")
+        bank = data.get("bank", "HDFC_DEBIT")
+        only_chunks = data.get("only_chunks")  # e.g. [[31,32],[11,12]]
+
+        if not gmail_id:
+            return jsonify({"error": "gmail_id is required"}), 400
+
+        if not self.mail_processor:
+            return jsonify({"error": "Mail processor not configured"}), 500
+
+        result = self.mail_processor.reprocess_pdf(
+            user_id, gmail_id, pdf_path=pdf_path,
+            password=password, processing_mode=processing_mode,
+            bank=bank, only_chunks=only_chunks,
+        )
+        return jsonify(result), 200
+
+    # ── Reconciliation Endpoints ─────────────────────────────────────
+
+    @Logger.standardLogger
+    def reconcile(self):
+        """POST /reconcile — Trigger cross-instrument reconciliation for a period."""
+        if not self.reconciliation_service:
+            return jsonify({"error": "Reconciliation service not configured"}), 500
+
+        data = request.get_json(force=True)
+        period_start = data.get("period_start")
+        period_end = data.get("period_end")
+        user_id = g.get("firebase_id")
+
+        if not period_start or not period_end:
+            return jsonify({"error": "period_start and period_end are required"}), 400
+
+        from datetime import datetime
+        try:
+            ps = datetime.strptime(period_start, "%Y-%m-%d").date()
+            pe = datetime.strptime(period_end, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Dates must be in YYYY-MM-DD format"}), 400
+
+        result = self.reconciliation_service.reconcile_transfers(user_id, ps, pe)
+        return jsonify(result), 200
+
+    @Logger.standardLogger
+    def zeroSumReport(self):
+        """POST /zeroSumReport — Compute and return zero-sum verification report."""
+        if not self.reconciliation_service:
+            return jsonify({"error": "Reconciliation service not configured"}), 500
+
+        data = request.get_json(force=True)
+        period_start = data.get("period_start")
+        period_end = data.get("period_end")
+        user_id = g.get("firebase_id")
+
+        if not period_start or not period_end:
+            return jsonify({"error": "period_start and period_end are required"}), 400
+
+        from datetime import datetime
+        try:
+            ps = datetime.strptime(period_start, "%Y-%m-%d").date()
+            pe = datetime.strptime(period_end, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Dates must be in YYYY-MM-DD format"}), 400
+
+        result = self.reconciliation_service.compute_zero_sum_report(user_id, ps, pe)
+        return jsonify(result), 200
+
+    @Logger.standardLogger
+    def statementPeriods(self):
+        """GET /statementPeriods — List all tracked statement periods for user."""
+        if not self.reconciliation_service:
+            return jsonify({"error": "Reconciliation service not configured"}), 500
+
+        user_id = g.get("firebase_id")
+        bank = request.args.get("bank")
+
+        periods = self.reconciliation_service.get_statement_periods(user_id, bank)
+        return jsonify({"periods": periods, "count": len(periods)}), 200
+
+    @Logger.standardLogger
+    def reconciliationStatus(self):
+        """GET /reconciliationStatus — Check coverage and reconciliation state for a period."""
+        if not self.reconciliation_service:
+            return jsonify({"error": "Reconciliation service not configured"}), 500
+
+        user_id = g.get("firebase_id")
+        period_start = request.args.get("period_start")
+        period_end = request.args.get("period_end")
+
+        if not period_start or not period_end:
+            return jsonify({"error": "period_start and period_end query params are required"}), 400
+
+        from datetime import datetime
+        try:
+            ps = datetime.strptime(period_start, "%Y-%m-%d").date()
+            pe = datetime.strptime(period_end, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Dates must be in YYYY-MM-DD format"}), 400
+
+        result = self.reconciliation_service.get_reconciliation_status(user_id, ps, pe)
+        return jsonify(result), 200
+
     @Logger.standardLogger
     def fetchFileDetailsEnhanced(self):
-        """Enhanced file details - by default returns local statements only"""
+        """Fetch processed email statements from DB with pagination and filters"""
         data = request.get_json(force=True)
         page = data.get("Page", 1)
         filters = data.get("Filter", {})
         userId = g.get('firebase_id')
-        
-        # Check if legacy statements should be included (opt-in)
-        include_legacy = filters.get("include_legacy", False) if filters else False
-        
-        self.logger.info(f"Fetch Enhanced FileDetails Page {page} with filter {filters}, include_legacy={include_legacy}")
-        
-        # Initialize results
-        legacy_results = []
-        local_results = []
-        
-        # Get legacy file details only if requested
-        if include_legacy:
-            # Add user filter if not present
-            if userId:
-                filters["user"] = userId
-            legacy_files = self.TransactionService.fetchFileDetails(page=page, filters=filters)
-            
-            # Format legacy file details
-            legacy_results = [
-                {**{key: value for key, value in fd.__dict__.items() if key != '_sa_instance_state'},
-                 "storage_type": "google_drive"}
-                for fd in legacy_files["results"]
-            ]
-        
-        # Get local statements (default behavior)
-        local_statements = self.TransactionService.fetchLocalStatements(userId)
-        
-        # Format local statements to match legacy structure
-        for stmt in local_statements.get("statements", []):
-            local_results.append({
-                "fileID": f"local_{stmt['bank']}_{stmt['filename']}",
-                "fileName": stmt["filename"],
-                "bank": stmt["bank"],
-                "fileSize": stmt["file_size"],
-                "uploadDate": stmt["created_date"],
-                "statementCount": "N/A",  # Local statements don't track this
-                "storage_type": "local_claude",
-                "user": userId
-            })
-        
-        # By default, only return local statements
-        results = local_results
-        if include_legacy:
-            results = legacy_results + local_results
-        
-        response = {
-            "total_count": len(results),
-            "legacy_count": len(legacy_results),
-            "local_count": len(local_results),
-            "page": page,
-            "page_size": len(results),
-            "results": results,
-        }
-        return jsonify(response), 200
+
+        self.logger.info(f"Fetch FileDetails Page {page} with filter {filters}")
+
+        limit = filters.get("limit", 100) if filters else 100
+        result = self.TransactionService.fetchProcessedStatements(userId, page=page, limit=limit, filters=filters)
+        return jsonify(result), 200

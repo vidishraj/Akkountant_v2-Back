@@ -78,7 +78,7 @@ def _make_serializable(obj):
 def execute_tool(agent_type, tool_name, tool_input, user_id,
                  investment_service=None, transaction_service=None,
                  invoice_service=None, customer_service=None,
-                 dashboard_service=None):
+                 dashboard_service=None, mail_processor=None):
     """
     Execute a tool call by routing to the appropriate existing service method.
     Returns a JSON-serializable dict with the tool result.
@@ -90,7 +90,7 @@ def execute_tool(agent_type, tool_name, tool_input, user_id,
         if agent_type == "investment":
             result = _execute_investment_tool(tool_name, tool_input, user_id, investment_service)
         elif agent_type == "transaction":
-            result = _execute_transaction_tool(tool_name, tool_input, user_id, transaction_service)
+            result = _execute_transaction_tool(tool_name, tool_input, user_id, transaction_service, mail_processor)
         elif agent_type == "freelance":
             result = _execute_freelance_tool(tool_name, tool_input, user_id,
                                              invoice_service, customer_service, dashboard_service)
@@ -189,7 +189,7 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
         return {"error": f"Unknown investment tool: {tool_name}"}
 
 
-def _execute_transaction_tool(tool_name, tool_input, user_id, service):
+def _execute_transaction_tool(tool_name, tool_input, user_id, service, mail_processor=None):
     if tool_name == "fetch_transactions":
         page = tool_input.get("page", 1)
         page_size = tool_input.get("page_size", 50)
@@ -246,22 +246,30 @@ def _execute_transaction_tool(tool_name, tool_input, user_id, service):
         }
 
     elif tool_name == "scan_emails_for_transactions":
-        date_to = tool_input.get("date_to")
-        date_from = tool_input.get("date_from")
-        algorithm = tool_input.get("algorithm", "claude")
-        success_count, error_count = service.readTransactionFromMail(date_to, date_from, user_id, algorithm)
-        return {"transactions_found": success_count, "conflicts": error_count}
+        # Redirected to unified mail pipeline
+        if mail_processor:
+            date_from = tool_input.get("date_from")
+            date_to = tool_input.get("date_to")
+            return mail_processor.process_emails(user_id, date_from, date_to)
+        return {"error": "Mail processor not configured. Use process_mail_pipeline instead."}
 
     elif tool_name == "scan_statements":
-        date_to = tool_input.get("date_to")
-        date_from = tool_input.get("date_from")
-        bank = tool_input.get("bank")
-        algorithm = tool_input.get("algorithm", "claude")
-        success_count, error_count = service.readStatementsFromMail(date_to, date_from, user_id, bank, algorithm)
-        return {"transactions_found": success_count, "integrity_errors": error_count}
+        # Redirected to unified mail pipeline
+        if mail_processor:
+            date_from = tool_input.get("date_from")
+            date_to = tool_input.get("date_to")
+            return mail_processor.process_emails(user_id, date_from, date_to)
+        return {"error": "Mail processor not configured. Use process_mail_pipeline instead."}
 
     elif tool_name == "delete_file":
         return service.deleteFile(user_id, tool_input["file_id"])
+
+    elif tool_name == "process_mail_pipeline":
+        if not mail_processor:
+            return {"error": "Mail processor service not configured"}
+        date_from = tool_input.get("date_from")
+        date_to = tool_input.get("date_to")
+        return mail_processor.process_emails(user_id, date_from, date_to)
 
     else:
         return {"error": f"Unknown transaction tool: {tool_name}"}

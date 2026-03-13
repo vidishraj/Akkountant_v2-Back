@@ -12,5 +12,11 @@ from models.GoldDetails import GoldDetails
 from models.securityTransactions import SecurityTransactions
 from models.Jobs import Job
 from models.foTrades import FOTrade
+from models.userPersonalInfo import UserPersonalInfo
+from models.processedEmails import ProcessedEmails
+from models.statementPeriods import StatementPeriod
+from models.transferLinks import TransferLink
+from models.investmentSnapshot import InvestmentSnapshot
 from models.Base import Base
-from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PaymentStatusEnum
+from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum
+from .customer_emails import CustomerEmail

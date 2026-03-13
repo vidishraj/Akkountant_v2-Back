@@ -8,3 +8,4 @@ class BankEnums(Enum):
     YES_BANK_DEBIT = "YES_BANK_DEBIT"
     YES_BANK_ACE = "YES_BANK_ACE"
     BOI = "BOI"
+    HDFC_REGALIA = "HDFC_REGALIA"

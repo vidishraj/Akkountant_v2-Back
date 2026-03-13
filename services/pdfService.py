@@ -70,7 +70,9 @@ class PDFService(BaseService):
             )
 
             # Update invoice as signed
+            from datetime import datetime
             invoice.is_signed = True
+            invoice.signed_at = datetime.now()
             self.db.session.commit()
 
             # Save signature record if signature_id provided

@@ -204,6 +204,7 @@ class TemplateService(BaseService):
             "name": template.name,
             "templateData": template.template_data,  # Assumes this is already InvoiceData format
             "customerId": template.customer_id,
+            "isCustomerDefault": template.is_customer_default,
             "createdAt": template.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if template.created_at else "",
             "updatedAt": template.updated_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if template.updated_at else ""
         }

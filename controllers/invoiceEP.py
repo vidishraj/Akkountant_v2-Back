@@ -58,6 +58,9 @@ class InvoiceController:
             # Search parameter
             search = request.args.get("search")
 
+            # Customer filter
+            customer_id = request.args.get("customerId")
+
             if page < 1 or limit < 1 or limit > 100:
                 return jsonify({"error": "Invalid pagination parameters"}), 400
                 
@@ -71,12 +74,13 @@ class InvoiceController:
                 return jsonify({"error": "Invalid sort_order parameter. Valid options: asc, desc"}), 400
 
             result = self.invoice_service.get_invoices(
-                page=page, 
-                limit=limit, 
-                status=status, 
-                sort_by=sort_by, 
-                sort_order=sort_order, 
-                search=search
+                page=page,
+                limit=limit,
+                status=status,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                search=search,
+                customer_id=customer_id
             )
 
             response = {

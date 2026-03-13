@@ -104,6 +104,31 @@ class JobsController:
             }), 500
     
     @Logger.standardLogger
+    def get_jobs_daily_history(self):
+        """Get day-by-day status breakdown for all job types."""
+        try:
+            days = int(request.args.get('days', 90))
+            result = self.job_service.get_job_daily_history(days)
+
+            if result['status'] == 'success':
+                return jsonify({
+                    'status': 'success',
+                    'data': result['data']
+                }), 200
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': result['message']
+                }), 500
+
+        except Exception as e:
+            self.logger.error(f"Error in get_jobs_daily_history: {str(e)}")
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to get daily history: {str(e)}'
+            }), 500
+
+    @Logger.standardLogger
     def cancel_job(self, job_id):
         """
         Cancel a single pending or overdue job.

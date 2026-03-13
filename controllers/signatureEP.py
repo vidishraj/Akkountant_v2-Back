@@ -8,6 +8,22 @@ class SignatureController:
         self.signature_service = signature_service
         self.logger = Logger(__name__).get_logger()
 
+    @staticmethod
+    def _format_signature(signature, include_data=False):
+        """Format a Signature ORM object to a JSON-serializable dict."""
+        result = {
+            "id": signature.id,
+            "name": signature.name,
+            "signature_type": signature.signature_type,
+            "is_default": signature.is_default,
+            "user_id": signature.user_id,
+            "created_at": signature.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if signature.created_at else "",
+            "updated_at": signature.updated_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if signature.updated_at else "",
+        }
+        if include_data:
+            result["signature_data"] = signature.signature_data
+        return result
+
     @Logger.standardLogger
     def upload_signature(self):
         try:
@@ -20,11 +36,8 @@ class SignatureController:
             is_default = request.form.get('is_default', 'false').lower() == 'true'
 
             signature = self.signature_service.upload_signature_file(file, name, is_default)
-            
-            # Don't return signature_data in response for security
-            result = {key: value for key, value in signature.__dict__.items() 
-                     if key not in ['_sa_instance_state', 'signature_data']}
-            
+            result = self._format_signature(signature, include_data=False)
+
             return jsonify({"signature": result}), 201
 
         except ValueError as e:
@@ -43,15 +56,12 @@ class SignatureController:
                 return jsonify({"error": "Name and signature_data are required"}), 400
 
             signature = self.signature_service.create_signature(
-                data['signature_data'], 
-                data['name'], 
+                data['signature_data'],
+                data['name'],
                 data.get('is_default', False)
             )
-            
-            # Don't return signature_data in response for security
-            result = {key: value for key, value in signature.__dict__.items() 
-                     if key not in ['_sa_instance_state', 'signature_data']}
-            
+            result = self._format_signature(signature, include_data=False)
+
             return jsonify({"signature": result}), 201
 
         except ValueError as e:
@@ -64,14 +74,8 @@ class SignatureController:
     def get_signatures(self):
         try:
             signatures = self.signature_service.get_signatures()
-            
-            # Include signature_data in response for frontend display
-            results = [
-                {key: value for key, value in signature.__dict__.items() 
-                 if key not in ['_sa_instance_state']}
-                for signature in signatures
-            ]
-            
+            results = [self._format_signature(sig, include_data=True) for sig in signatures]
+
             return jsonify(results), 200
 
         except Exception as e:
@@ -85,11 +89,8 @@ class SignatureController:
                 return jsonify({"error": "Signature ID is required"}), 400
 
             signature = self.signature_service.get_signature_by_id(signatureId)
-            
-            # Return full signature data including the base64 data
-            result = {key: value for key, value in signature.__dict__.items() 
-                     if key != '_sa_instance_state'}
-            
+            result = self._format_signature(signature, include_data=True)
+
             return jsonify({"signature": result}), 200
 
         except ValueError as e:
@@ -99,13 +100,30 @@ class SignatureController:
             return jsonify({"error": "Internal server error"}), 500
 
     @Logger.standardLogger
+    def set_default_signature(self, signatureId):
+        try:
+            if not signatureId:
+                return jsonify({"error": "Signature ID is required"}), 400
+
+            signature = self.signature_service.set_default_signature(signatureId)
+            result = self._format_signature(signature, include_data=False)
+
+            return jsonify({"signature": result}), 200
+
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 404
+        except Exception as e:
+            self.logger.error(f"Error in set_default_signature: {str(e)}")
+            return jsonify({"error": "Internal server error"}), 500
+
+    @Logger.standardLogger
     def delete_signature(self, signatureId):
         try:
             if not signatureId:
                 return jsonify({"error": "Signature ID is required"}), 400
 
             self.signature_service.delete_signature(signatureId)
-            
+
             return jsonify({"message": "Signature deleted successfully"}), 200
 
         except ValueError as e:

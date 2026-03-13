@@ -92,19 +92,43 @@ class InvoiceService(BaseService):
             self.logger.error(f"Error creating invoice: {str(e)}")
             raise
 
-    def get_invoices(self, page=1, limit=20, status=None, sort_by="created_at", sort_order="desc", search=None):
+    def _mark_overdue_invoices(self, user_id):
+        """Auto-detect and mark sent invoices past their due date as overdue."""
+        try:
+            overdue = self.db.session.query(Invoice).filter(
+                Invoice.user_id == user_id,
+                Invoice.status == 'sent',
+                Invoice.due_date < datetime.now().date()
+            ).all()
+            if overdue:
+                for inv in overdue:
+                    inv.status = 'overdue'
+                self.db.session.commit()
+                self.logger.info(f"Marked {len(overdue)} invoice(s) as overdue for user {user_id}")
+        except Exception as e:
+            self.db.session.rollback()
+            self.logger.error(f"Error marking overdue invoices: {str(e)}")
+
+    def get_invoices(self, page=1, limit=20, status=None, sort_by="created_at", sort_order="desc", search=None, customer_id=None):
         try:
             user_id = g.get('firebase_id')
             if not user_id:
                 raise ValueError("User ID is required")
 
+            # Auto-detect overdue invoices before querying
+            self._mark_overdue_invoices(user_id)
+
             offset = (page - 1) * limit
-            
+
             query = self.db.session.query(Invoice).options(
                 joinedload(Invoice.payments),
                 joinedload(Invoice.custom_fields)
             ).filter_by(user_id=user_id)
             
+            # Apply customer filter
+            if customer_id:
+                query = query.filter(Invoice.customer_id == customer_id)
+
             # Apply status filter
             if status:
                 query = query.filter(Invoice.status == status)
@@ -380,40 +404,6 @@ class InvoiceService(BaseService):
 
         return formatted_invoice
 
-    def _create_payment(self, invoice_id, payment_data):
-        """Helper method to create a payment for an invoice"""
-        # Check if payment already exists for this invoice
-        existing_payment = self.db.session.query(InvoicePayment).filter_by(
-            invoice_id=invoice_id
-        ).first()
-        
-        if existing_payment:
-            raise ValueError("Payment already exists for this invoice. Only one payment per invoice is allowed.")
-        
-        # Get invoice to check currency
-        invoice = self.db.session.query(Invoice).filter_by(id=invoice_id).first()
-        if not invoice:
-            raise ValueError("Invoice not found")
-        
-        # Convert payment amount to INR if needed
-        payment_amount = float(payment_data['amountReceived'])
-        converted_amount = self._convert_to_inr(payment_amount, invoice.currency)
-        
-        payment = InvoicePayment(
-            invoice_id=invoice_id,
-            payment_method=payment_data['paymentMethod'],
-            amount_received=converted_amount,
-            payment_date=datetime.strptime(payment_data['paymentDate'], '%Y-%m-%d').date() if payment_data.get('paymentDate') else None,
-            notes=payment_data.get('notes'),
-            breakdown=payment_data.get('breakdown', {})
-        )
-        self.db.session.add(payment)
-        
-        # Update invoice status to paid if payment covers the full amount
-        # Compare in original currency for status determination
-        if invoice and payment_amount >= float(invoice.total):
-            invoice.status = 'paid'
-    
     def _replace_payment(self, invoice_id, payment_data):
         """Helper method to replace existing payment or create new one for an invoice"""
         # Delete existing payment if it exists

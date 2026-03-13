@@ -13,10 +13,8 @@ class CustomerController:
         try:
             data = request.get_json(force=True)
             
-            # Validate required fields - email is now optional
-            required_fields = ['name']
-            if not all(field in data for field in required_fields):
-                return jsonify({"error": "Name are required"}), 400
+            if not data.get('name'):
+                return jsonify({"error": "Name is required"}), 400
 
             customer = self.customer_service.create_customer(data)
             
@@ -65,6 +63,21 @@ class CustomerController:
 
         except Exception as e:
             self.logger.error(f"Error in get_customers: {str(e)}")
+            return jsonify({"error": "Internal server error"}), 500
+
+    @Logger.standardLogger
+    def get_customer(self, customerId):
+        try:
+            if not customerId:
+                return jsonify({"error": "Customer ID is required"}), 400
+
+            customer = self.customer_service.get_customer_by_id(customerId)
+            return jsonify({"customer": customer}), 200
+
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 404
+        except Exception as e:
+            self.logger.error(f"Error in get_customer: {str(e)}")
             return jsonify({"error": "Internal server error"}), 500
 
     @Logger.standardLogger

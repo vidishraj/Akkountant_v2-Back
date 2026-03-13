@@ -20,18 +20,25 @@ class PDFGenerator:
             'AUD': 'A$'
         }
 
+    @staticmethod
+    def _get(data, camel_key, snake_key, default=None):
+        """Get a value trying camelCase first, then snake_case."""
+        return data.get(camel_key, data.get(snake_key, default))
+
     def generate_invoice_pdf(self, invoice_data):
         try:
             buffer = io.BytesIO()
-            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, 
+            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72,
                                   topMargin=72, bottomMargin=18)
-            
+
             story = []
             styles = getSampleStyleSheet()
-            
-            # Get currency symbol
+
+            # Get currency symbol — handle enum values
             currency = invoice_data.get('currency', 'USD')
-            currency_symbol = self.currency_symbols.get(currency, '$')
+            if hasattr(currency, 'value'):
+                currency = currency.value
+            currency_symbol = self.currency_symbols.get(str(currency), '$')
             
             # Custom styles
             title_style = ParagraphStyle(
@@ -56,10 +63,10 @@ class PDFGenerator:
             
             # Invoice details header
             invoice_details = [
-                ['Invoice Number:', invoice_data.get('invoice_number', 'N/A')],
-                ['Project:', invoice_data.get('project_name', 'N/A')],
-                ['Issue Date:', str(invoice_data.get('issue_date', 'N/A'))],
-                ['Due Date:', str(invoice_data.get('due_date', 'N/A'))]
+                ['Invoice Number:', self._get(invoice_data, 'invoiceNumber', 'invoice_number', 'N/A')],
+                ['Project:', self._get(invoice_data, 'projectName', 'project_name', 'N/A')],
+                ['Issue Date:', str(self._get(invoice_data, 'issueDate', 'issue_date', 'N/A'))],
+                ['Due Date:', str(self._get(invoice_data, 'dueDate', 'due_date', 'N/A'))]
             ]
             
             details_table = Table(invoice_details, colWidths=[2*inch, 3*inch])
@@ -73,18 +80,29 @@ class PDFGenerator:
             story.append(details_table)
             story.append(Spacer(1, 20))
             
-            # From and To section
+            # From and To section — support both flat snake_case and nested camelCase
+            from_data = invoice_data.get('from', {})
+            to_data = invoice_data.get('to', {})
+            from_name = from_data.get('name') or invoice_data.get('from_name', '')
+            from_email = from_data.get('email') or invoice_data.get('from_email', '')
+            from_address = from_data.get('address') or invoice_data.get('from_address', '')
+            from_phone = from_data.get('phone') or invoice_data.get('from_phone', '')
+            to_name = to_data.get('name') or invoice_data.get('to_name', '')
+            to_email = to_data.get('email') or invoice_data.get('to_email', '')
+            to_address = to_data.get('address') or invoice_data.get('to_address', '')
+            to_company = to_data.get('company') or invoice_data.get('to_company', '')
+
             from_to_data = [
                 ['FROM:', 'TO:'],
-                [f"{invoice_data.get('from_name', '')}", f"{invoice_data.get('to_name', '')}"],
-                [f"{invoice_data.get('from_email', '')}", f"{invoice_data.get('to_email', '')}"],
-                [f"{invoice_data.get('from_address', '')}", f"{invoice_data.get('to_address', '')}"]
+                [f"{from_name}", f"{to_name}"],
+                [f"{from_email}", f"{to_email}"],
+                [f"{from_address}", f"{to_address}"]
             ]
-            
-            if invoice_data.get('from_phone'):
-                from_to_data.append([f"Phone: {invoice_data['from_phone']}", ''])
-            if invoice_data.get('to_company'):
-                from_to_data[1][1] = f"{invoice_data['to_company']}\n{from_to_data[1][1]}"
+
+            if from_phone:
+                from_to_data.append([f"Phone: {from_phone}", ''])
+            if to_company:
+                from_to_data[1][1] = f"{to_company}\n{from_to_data[1][1]}"
             
             from_to_table = Table(from_to_data, colWidths=[3*inch, 3*inch])
             from_to_table.setStyle(TableStyle([
@@ -233,14 +251,66 @@ class PDFGenerator:
             raise
 
     def add_signature_to_pdf(self, pdf_data, signature_data, position):
+        """Overlay a base64-encoded signature image onto the existing PDF."""
         try:
-            # This is a simplified implementation
-            # In a real application, you'd use a library like PyPDF2 or reportlab
-            # to add the signature to the existing PDF at the specified position
-            
+            from PyPDF2 import PdfReader, PdfWriter
+            from reportlab.lib.units import mm
+
+            if not signature_data:
+                self.logger.warning("No signature data provided, returning original PDF")
+                return pdf_data
+
+            # Decode the signature image
+            sig_bytes = signature_data
+            if isinstance(sig_bytes, str):
+                # Strip data URL prefix if present
+                if ',' in sig_bytes:
+                    sig_bytes = sig_bytes.split(',', 1)[1]
+                sig_bytes = base64.b64decode(sig_bytes)
+
+            # Create a PDF page with just the signature using reportlab
+            sig_buffer = io.BytesIO()
+            from reportlab.lib.pagesizes import letter
+            from reportlab.pdfgen import canvas as rl_canvas
+
+            c = rl_canvas.Canvas(sig_buffer, pagesize=letter)
+            sig_image = io.BytesIO(sig_bytes)
+
+            x = position.get('x', 100) * mm
+            # reportlab y=0 is bottom; convert from top-origin
+            page_height = letter[1]
+            y = page_height - position.get('y', 100) * mm - position.get('height', 50) * mm
+            w = position.get('width', 100) * mm
+            h = position.get('height', 50) * mm
+
+            try:
+                from reportlab.lib.utils import ImageReader
+                img = ImageReader(sig_image)
+                c.drawImage(img, x, y, width=w, height=h, mask='auto')
+            except Exception as img_err:
+                self.logger.warning(f"Could not draw signature image: {img_err}")
+                return pdf_data
+
+            c.save()
+            sig_buffer.seek(0)
+
+            # Merge the signature overlay onto every page of the original PDF
+            original_reader = PdfReader(io.BytesIO(pdf_data))
+            sig_reader = PdfReader(sig_buffer)
+            writer = PdfWriter()
+
+            sig_page = sig_reader.pages[0]
+            for page in original_reader.pages:
+                page.merge_page(sig_page)
+                writer.add_page(page)
+
+            output = io.BytesIO()
+            writer.write(output)
+            output.seek(0)
+
             self.logger.info("Signature added to PDF successfully")
-            return pdf_data  # Return original for now
-            
+            return output.getvalue()
+
         except Exception as e:
             self.logger.error(f"Error adding signature to PDF: {str(e)}")
             raise

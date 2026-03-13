@@ -23,18 +23,12 @@ class CurrencyEnum(enum.Enum):
     AUD = 'AUD'
     JPY = 'JPY'
 
-class PaymentStatusEnum(enum.Enum):
-    pending = 'pending'
-    completed = 'completed'
-    failed = 'failed'
-    cancelled = 'cancelled'
-
 class Customer(Base):
     __tablename__ = 'customers'
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     user_id = Column(CHAR(36), nullable=False)
     name = Column(String(255), nullable=False)
-    email = Column(String(255), nullable=False)
+    email = Column(String(255), nullable=True)
     company = Column(String(255))
     address = Column(Text)
     phone = Column(String(50))
@@ -45,6 +39,7 @@ class Customer(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     invoices = relationship('Invoice', back_populates='customer', cascade='all, delete')
     invoice_templates = relationship('InvoiceTemplate', back_populates='customer', cascade='all, delete')
+    linked_emails = relationship('CustomerEmail', back_populates='customer', cascade='all, delete-orphan')
 
 class InvoiceTemplate(Base):
     __tablename__ = 'invoice_templates'

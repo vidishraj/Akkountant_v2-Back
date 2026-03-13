@@ -24,22 +24,27 @@ class CustomerService(BaseService):
             if not user_id:
                 raise ValueError("User ID is required")
 
-            # Validate required fields - email is now optional
             if not customer_data.get('name'):
-                raise ValueError("Name and address are required")
+                raise ValueError("Name is required")
 
             customer = Customer(
                 user_id=user_id,
-                name=customer_data['name'], # Required field
-                email=customer_data['email'],
+                name=customer_data['name'],
+                email=customer_data.get('email'),
                 company=customer_data.get('company'),
-                address=customer_data['address'],
+                address=customer_data.get('address'),
                 phone=customer_data.get('phone')
             )
 
             self.db.session.add(customer)
             self.db.session.commit()
-            
+
+            # Auto-link existing emails matching customer's email
+            if customer.email:
+                from services.customerEmailService import CustomerEmailService
+                ce_service = CustomerEmailService()
+                ce_service.batch_auto_link_for_customer(customer.id, user_id)
+
             # Return formatted customer
             formatted_customer = {
                 "id": customer.id,
@@ -225,7 +230,13 @@ class CustomerService(BaseService):
                 customer.phone = customer_data['phone']
 
             self.db.session.commit()
-            
+
+            # Auto-link existing emails if email was updated
+            if 'email' in customer_data and customer.email:
+                from services.customerEmailService import CustomerEmailService
+                ce_service = CustomerEmailService()
+                ce_service.batch_auto_link_for_customer(customer.id, user_id)
+
             # Return formatted customer
             default_template = None
             if customer.invoice_templates:
@@ -251,7 +262,7 @@ class CustomerService(BaseService):
                 "createdAt": customer.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if customer.created_at else "",
                 "updatedAt": customer.updated_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if customer.updated_at else ""
             }
-            
+
             self.logger.info(f"Customer updated successfully: {customer_id}")
             return formatted_customer
 

@@ -159,15 +159,9 @@ class InvestmentService(BaseService):
         totalProfit = 0
         try:
             marketStatus = nsepython.nse_marketStatus()
-        except Exception:
-            marketStatus = None
-        if marketStatus is not None:
             marketStatus = marketStatus['marketState'][0]['marketStatus']
-            if marketStatus == 'Closed':
-                marketStatus = False
-            else:
-                marketStatus = True
-        else:
+            marketStatus = marketStatus != 'Closed'
+        except Exception:
             marketStatus = False
         # Instantiate the schema
         msn_summary_schema = MSNSummary()
@@ -544,6 +538,148 @@ class InvestmentService(BaseService):
 
     def getFileTimeStamps(self):
         return self.StockService.JsonDownloadService.getTimeStampsOfAllFiles()
+
+    def fetchInvestmentEmails(self, user_id, category=None, page=1, page_size=50, service_type=None, categories=None):
+        """Query processedEmails for specified categories (defaults to investment)."""
+        from models.processedEmails import ProcessedEmails
+        from sqlalchemy import cast, String
+
+        if categories is None:
+            categories = [
+                'investment_confirmation', 'epf_passbook', 'gold_receipt', 'nps_statement'
+            ]
+
+        query = self.db.session.query(ProcessedEmails).filter(
+            ProcessedEmails.user_id == user_id,
+            ProcessedEmails.category.in_(categories)
+        )
+
+        if category:
+            query = query.filter(ProcessedEmails.category == category)
+
+        if service_type:
+            query = query.filter(
+                cast(ProcessedEmails.extraction_summary['service_type'], String) == f'"{service_type}"'
+            )
+
+        total = query.count()
+        offset = (page - 1) * page_size
+        rows = query.order_by(ProcessedEmails.email_date.desc()).offset(offset).limit(page_size).all()
+
+        emails = []
+        for row in rows:
+            emails.append({
+                "id": row.id,
+                "gmail_id": row.gmail_id,
+                "sender": row.sender,
+                "subject": row.subject,
+                "email_date": row.email_date.strftime('%Y-%m-%d') if row.email_date else None,
+                "category": row.category,
+                "items_extracted": row.items_extracted,
+                "extraction_summary": row.extraction_summary,
+                "status": row.status,
+            })
+
+        return {
+            "emails": emails,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+
+    def getInvestmentSnapshots(self, user_id, date_from=None, date_to=None, investment_type=None):
+        """Query investment snapshots for growth charts."""
+        from models.investmentSnapshot import InvestmentSnapshot
+
+        query = self.db.session.query(InvestmentSnapshot).filter(
+            InvestmentSnapshot.user == user_id
+        )
+        if date_from:
+            query = query.filter(InvestmentSnapshot.date >= date_from)
+        if date_to:
+            query = query.filter(InvestmentSnapshot.date <= date_to)
+        if investment_type:
+            query = query.filter(InvestmentSnapshot.investment_type == investment_type)
+
+        rows = query.order_by(
+            InvestmentSnapshot.date.asc(), InvestmentSnapshot.investment_type.asc()
+        ).all()
+
+        return [
+            {
+                "date": row.date.strftime('%Y-%m-%d'),
+                "investmentType": row.investment_type,
+                "totalInvested": float(row.total_invested),
+                "currentValue": float(row.current_value),
+                "profit": float(row.profit),
+                "profitPercent": float(row.profit_percent),
+            }
+            for row in rows
+        ]
+
+    def fetchEmailBody(self, user_id, gmail_id):
+        """Fetch full email body from Gmail API for a given gmail_id."""
+        import base64
+        from models.googleTokens import UserToken
+        from enums.ServiceTypeEnum import ServiceTypeEnum
+
+        user_token = self.db.session.query(UserToken).filter_by(
+            user_id=user_id,
+            service_type=ServiceTypeEnum.Gmail.value,
+        ).first()
+        if not user_token:
+            return {"error": "Gmail not connected"}, 401
+
+        token_info = {
+            'token': user_token.access_token,
+            'refresh_token': user_token.refresh_token,
+            'client_id': user_token.client_id,
+            'client_secret': user_token.client_secret,
+        }
+
+        gmail_api = self.gmailService.googleService.get_gmail_service(user_id, token_info)
+        if not gmail_api:
+            return {"error": "Failed to initialize Gmail service"}, 500
+
+        msg = gmail_api.users().messages().get(userId='me', id=gmail_id, format='full').execute()
+        payload = msg.get('payload', {})
+
+        # Extract body — handle both single-part and multipart emails
+        html_body = None
+        text_body = None
+
+        def _extract_parts(parts):
+            nonlocal html_body, text_body
+            for part in parts:
+                mime = part.get('mimeType', '')
+                data = part.get('body', {}).get('data')
+                if data:
+                    decoded = base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
+                    if mime == 'text/html' and not html_body:
+                        html_body = decoded
+                    elif mime == 'text/plain' and not text_body:
+                        text_body = decoded
+                # Recurse into nested parts
+                if 'parts' in part:
+                    _extract_parts(part['parts'])
+
+        if 'parts' in payload:
+            _extract_parts(payload['parts'])
+        else:
+            data = payload.get('body', {}).get('data')
+            if data:
+                decoded = base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
+                mime = payload.get('mimeType', '')
+                if mime == 'text/html':
+                    html_body = decoded
+                else:
+                    text_body = decoded
+
+        return {
+            "gmail_id": gmail_id,
+            "body_html": html_body,
+            "body_text": text_body,
+        }
 
     def fetchKiteHoldings(self, userId):
         """Fetch holdings from Kite Connect API"""

@@ -22,6 +22,8 @@ from controllers.paymentEP import PaymentController
 from controllers.customFieldEP import CustomFieldController
 from controllers.jobsEP import JobsController
 from controllers.agentEP import AgentController
+from controllers.customerEmailEP import CustomerEmailController
+from controllers.fileStorageEP import FileStorageController
 from temp.controllers.job_email_controller import JobEmailController
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
@@ -35,9 +37,14 @@ from services.templateService import TemplateService
 from services.signatureService import SignatureService
 from services.paymentService import PaymentService
 from services.customFieldService import CustomFieldService
+from services.customerEmailService import CustomerEmailService
+from services.fileStorageService import FileStorageService
 from temp.services.job_email_service import JobEmailService
 from services.agentService import AgentService
 from services.cronAgent import CronAgent
+from services.mailProcessorService import MailProcessorService
+from services.reconciliationService import ReconciliationService
+from services.tasks.checkMailUnifiedTask import CheckMailUnifiedTask
 from utils.logger import Logger
 import models
 
@@ -143,7 +150,6 @@ class Akkountant(Flask):
     def _setup_instances(self):
         """Initialize application instances."""
         self.transactionService = TransactionService()
-        self.transactionEP = TransactionController(self.transactionService)
         self.investmentService = InvestmentService()
         self.investmentEP = InvestmentController(self.investmentService)
         self.customerService = CustomerService()
@@ -162,9 +168,26 @@ class Akkountant(Flask):
         self.paymentEP = PaymentController(self.paymentService)
         self.customFieldService = CustomFieldService()
         self.customFieldEP = CustomFieldController(self.customFieldService)
+        self.customerEmailService = CustomerEmailService()
+        self.customerEmailEP = CustomerEmailController(self.customerEmailService)
+        self.fileStorageService = FileStorageService()
+        self.fileStorageEP = FileStorageController(self.fileStorageService)
         self.jobsEP = JobsController()
         self.jobEmailService = JobEmailService()
         self.jobEmailEP = JobEmailController(self.jobEmailService)
+        self.reconciliationService = ReconciliationService()
+        self.mailProcessor = MailProcessorService(
+            flask_app=self,
+            transaction_service=self.transactionService,
+            investment_service=self.investmentService,
+            invoice_service=self.invoiceService,
+            reconciliation_service=self.reconciliationService,
+        )
+        self.transactionEP = TransactionController(
+            self.transactionService,
+            mail_processor=self.mailProcessor,
+            reconciliation_service=self.reconciliationService,
+        )
         self.agentService = AgentService()
         self.agentService.set_services(
             investment_service=self.investmentService,
@@ -172,6 +195,7 @@ class Akkountant(Flask):
             invoice_service=self.invoiceService,
             customer_service=self.customerService,
             dashboard_service=self.dashboardService,
+            mail_processor=self.mailProcessor,
         )
         self.agentEP = AgentController(self.agentService)
 
@@ -196,6 +220,24 @@ class Akkountant(Flask):
             )
             self.cron_agent.start()
             self.logger.info("CronAgent started (30-min interval).")
+
+            # 3. Start CheckMailUnifiedTask (AI email processing)
+            self.mail_cron = CheckMailUnifiedTask(
+                flask_app=self,
+                mail_processor=self.mailProcessor,
+                interval_seconds=3600,
+            )
+            self.mail_cron.start()
+            self.logger.info("CheckMailUnifiedTask started (1-hour interval).")
+
+            # 4. Start InvestmentSnapshotTask (daily at 11PM IST)
+            from services.tasks.investmentSnapshotTask import InvestmentSnapshotTask
+            self.snapshot_task = InvestmentSnapshotTask(
+                flask_app=self,
+                investment_service=self.investmentService,
+            )
+            self.snapshot_task.start()
+            self.logger.info("InvestmentSnapshotTask started (daily at 11PM IST).")
 
     def _insert_initial_jobs(self, title, status, priority, due_date, user_id=None):
         try:
@@ -242,6 +284,14 @@ class Akkountant(Flask):
             ('/setOptedBanks', 'POST', self.transactionEP.setOptedBanks),
             ('/downloadFile', 'GET', self.transactionEP.downloadFile),
             ('/deleteFile', 'GET', self.transactionEP.deleteFile),
+            ('/processMailPipeline', 'POST', self.transactionEP.processMailPipeline),
+            ('/reprocessPdf', 'POST', self.transactionEP.reprocessPdf),
+            ('/updatePersonalInfo', 'POST', self.transactionEP.updatePersonalInfo),
+            ('/getPersonalInfo', 'GET', self.transactionEP.getPersonalInfo),
+            ('/reconcile', 'POST', self.transactionEP.reconcile),
+            ('/zeroSumReport', 'POST', self.transactionEP.zeroSumReport),
+            ('/statementPeriods', 'GET', self.transactionEP.statementPeriods),
+            ('/reconciliationStatus', 'GET', self.transactionEP.reconciliationStatus),
         ]
 
         for rule, method, view_func in transactionRoutes:
@@ -266,6 +316,9 @@ class Akkountant(Flask):
             ('/fetchFOTrades', 'GET', self.investmentEP.fetchFOTrades),
             ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
             # Kite Connect API endpoints
+            ('/fetchInvestmentEmails', 'GET', self.investmentEP.fetchInvestmentEmails),
+            ('/fetchEmailBody', 'GET', self.investmentEP.fetchEmailBody),
+            ('/fetchInvestmentSnapshots', 'GET', self.investmentEP.fetchInvestmentSnapshots),
             ('/kite/login-url', 'GET', self.investmentEP.getKiteLoginUrl),
             ('/kite/generate-session', 'POST', self.investmentEP.generateKiteSession),
             ('/kite/holdings', 'GET', self.investmentEP.fetchKiteHoldings),
@@ -303,9 +356,19 @@ class Akkountant(Flask):
         customerRoutes = [
             ('/freelance/customers', 'GET', self.customerEP.get_customers),
             ('/freelance/customers', 'POST', self.customerEP.create_customer),
+            ('/freelance/customers/<customerId>', 'GET', self.customerEP.get_customer),
             ('/freelance/customers/<customerId>', 'PUT', self.customerEP.update_customer),
             ('/freelance/customers/<customerId>', 'DELETE', self.customerEP.delete_customer),
             ('/freelance/customers/<customerId>/template', 'PUT', self.templateEP.update_customer_template),
+        ]
+
+        # Customer email linking endpoints
+        customerEmailRoutes = [
+            ('/freelance/customers/<customerId>/emails', 'GET', self.customerEmailEP.get_customer_emails),
+            ('/freelance/customers/<customerId>/emails', 'POST', self.customerEmailEP.link_email),
+            ('/freelance/customers/<customerId>/emails/<emailId>', 'DELETE', self.customerEmailEP.unlink_email),
+            ('/freelance/emails/search', 'GET', self.customerEmailEP.search_emails),
+            ('/freelance/emails/batch-relink', 'POST', self.customerEmailEP.batch_relink),
         ]
 
         # Template management endpoints
@@ -321,12 +384,14 @@ class Akkountant(Flask):
             ('/freelance/signatures', 'GET', self.signatureEP.get_signatures),
             ('/freelance/signatures', 'POST', self.signatureEP.upload_signature),
             ('/freelance/signatures/<signatureId>', 'GET', self.signatureEP.get_signature_data),
+            ('/freelance/signatures/<signatureId>/default', 'PUT', self.signatureEP.set_default_signature),
             ('/freelance/signatures/<signatureId>', 'DELETE', self.signatureEP.delete_signature),
         ]
 
         # Jobs management endpoints
         jobsRoutes = [
             ('/jobs/summary', 'GET', self.jobsEP.get_jobs_summary),
+            ('/jobs/daily-history', 'GET', self.jobsEP.get_jobs_daily_history),
             ('/jobs/by-title-status', 'GET', self.jobsEP.get_jobs_by_title_status),
             ('/jobs/<job_id>/cancel', 'DELETE', self.jobsEP.cancel_job),
             ('/jobs/cancel-bulk', 'POST', self.jobsEP.cancel_jobs_bulk),
@@ -345,6 +410,20 @@ class Akkountant(Flask):
             ('/job-scanner/gmail-refresh', 'POST', self.jobEmailEP.refresh_gmail_token),
         ]
 
+        # File Storage (Document Vault) endpoints
+        fileStorageRoutes = [
+            ('/files/upload', 'POST', self.fileStorageEP.upload_file),
+            ('/files/list', 'GET', self.fileStorageEP.list_files),
+            ('/files/<fileId>/download', 'GET', self.fileStorageEP.download_file),
+            ('/files/<fileId>/view', 'GET', self.fileStorageEP.view_file),
+            ('/files/<fileId>', 'DELETE', self.fileStorageEP.delete_file),
+            ('/files/<fileId>/label', 'PUT', self.fileStorageEP.update_label),
+            ('/files/<fileId>/move', 'PUT', self.fileStorageEP.move_file),
+            ('/folders', 'POST', self.fileStorageEP.create_folder),
+            ('/folders/<folderId>', 'PUT', self.fileStorageEP.rename_folder),
+            ('/folders/<folderId>', 'DELETE', self.fileStorageEP.delete_folder),
+        ]
+
         # Agent chat endpoint
         agentRoutes = [
             ('/agent/chat', 'POST', self.agentEP.chat),
@@ -356,11 +435,13 @@ class Akkountant(Flask):
             *invoiceRoutes,
             *pdfRoutes,
             *customerRoutes,
+            *customerEmailRoutes,
             *templateRoutes,
             *signatureRoutes,
             *jobsRoutes,
             *jobEmailRoutes,
             *agentRoutes,
+            *fileStorageRoutes,
         ]
 
         for rule, method, view_func in all_routes:

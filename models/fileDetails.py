@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, ForeignKey
+from sqlalchemy import Column, String, Date, ForeignKey, Boolean
 from models.Base import Base
 from sqlalchemy.orm import relationship
 from sqlalchemy import Integer
@@ -15,6 +15,7 @@ class FileDetails(Base):
     bank = Column(String(100), nullable=False)
     user = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     gmail_message_id = Column(String(500), nullable=True, unique=True)  # Email Message-Id header for statement emails
+    deleted = Column(Boolean, nullable=False, default=False, server_default='0')  # Soft delete flag
 
     transactions = relationship('Transactions', back_populates='file_details')
     user_relationship = relationship('User', back_populates='file_details')

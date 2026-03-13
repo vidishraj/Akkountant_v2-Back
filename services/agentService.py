@@ -35,6 +35,7 @@ DESTRUCTIVE_TOOLS = {
     "scan_emails_for_transactions",
     "scan_statements",
     "sync_kite_holdings",
+    "process_mail_pipeline",
 }
 
 # Tools that mutate data (used to signal frontend to refresh)
@@ -54,6 +55,7 @@ MUTATION_TOOLS = {
     "update_customer",
     "delete_customer",
     "trigger_rate_refresh",
+    "process_mail_pipeline",
 }
 
 MAX_TURNS = 20
@@ -75,16 +77,18 @@ class AgentService(BaseService):
         self.invoice_service = None
         self.customer_service = None
         self.dashboard_service = None
+        self.mail_processor = None
 
     def set_services(self, investment_service=None, transaction_service=None,
                      invoice_service=None, customer_service=None,
-                     dashboard_service=None):
+                     dashboard_service=None, mail_processor=None):
         """Called from app.py to inject existing service instances."""
         self.investment_service = investment_service
         self.transaction_service = transaction_service
         self.invoice_service = invoice_service
         self.customer_service = customer_service
         self.dashboard_service = dashboard_service
+        self.mail_processor = mail_processor
 
     def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None):
         """
@@ -221,6 +225,7 @@ class AgentService(BaseService):
                     invoice_service=self.invoice_service,
                     customer_service=self.customer_service,
                     dashboard_service=self.dashboard_service,
+                    mail_processor=self.mail_processor,
                 )
 
                 # Track mutations
@@ -297,5 +302,6 @@ class AgentService(BaseService):
             "scan_emails_for_transactions": "Scan Gmail for transaction emails? This may take several minutes.",
             "scan_statements": "Scan Gmail for bank statements? This may take several minutes.",
             "sync_kite_holdings": "Sync holdings from Kite Connect into local database?",
+            "process_mail_pipeline": "Scan Gmail for all financial emails and process them? This may take several minutes.",
         }
         return messages.get(tool_name, f"Execute {tool_name}?")

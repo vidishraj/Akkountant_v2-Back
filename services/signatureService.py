@@ -82,7 +82,6 @@ class SignatureService(BaseService):
                 signature_data = base64.b64encode(f.read()).decode('utf-8')
 
             # Create signature record
-            print(signature_data)
             signature = self.create_signature(signature_data, name, is_default)
 
             # Clean up temp file

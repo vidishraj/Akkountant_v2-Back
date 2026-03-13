@@ -23,14 +23,6 @@ class Logger:
 
     def _setup_handlers(self, log_dir: str):
         """Set up file handlers for different log levels."""
-        levels = {
-            'DEBUG': logging.DEBUG,
-            'INFO': logging.INFO,
-            'WARNING': logging.WARNING,
-            'ERROR': logging.ERROR,
-            'CRITICAL': logging.CRITICAL,
-        }
-
         # Creating console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.DEBUG)
@@ -40,22 +32,17 @@ class Logger:
         console_handler.setFormatter(formatter)
         self._logger.addHandler(console_handler)
 
-        # # Creating file handlers for different log levels
-        # for level_name, level_value in levels.items():
-        #     level_dir = os.path.join(log_dir, level_name.lower())
-        #     if not os.path.exists(level_dir):
-        #         os.makedirs(level_dir)
-        #
-        #     # Creating a timed rotating file handler
-        #     file_handler = TimedRotatingFileHandler(
-        #         os.path.join(level_dir, f'{level_name.lower()}_log.log'),
-        #         when='midnight',
-        #         interval=1,
-        #         backupCount=7  # Keep the last 7 log files
-        #     )
-        #     file_handler.setLevel(level_value)
-        #     file_handler.setFormatter(formatter)
-        #     self._logger.addHandler(file_handler)
+        # File handler for pipeline debugging — captures all INFO+ logs
+        log_dir_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+        if not os.path.exists(log_dir_path):
+            os.makedirs(log_dir_path)
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir_path, 'pipeline_debug.log'),
+            mode='a',
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        self._logger.addHandler(file_handler)
 
     @staticmethod
     def standardLogger(func):

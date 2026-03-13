@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, ForeignKey, Enum, UniqueConstraint
+from sqlalchemy import Column, String, Date, ForeignKey, Enum, UniqueConstraint, Index
 from models.Base import Base
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import DECIMAL as Decimal
@@ -24,6 +24,7 @@ class Transactions(Base):
     user = Column(String(100), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     processed_via = Column(Enum(ProcessingMethod), default=ProcessingMethod.PATTERN_MATCH)
     gmail_message_id = Column(String(500), nullable=True, unique=True)  # Email Message-Id header for unique identification
+    transfer_group_id = Column(String(64), nullable=True, index=True)
 
     file_details = relationship('FileDetails', back_populates='transactions')
     user_relationship = relationship('User', back_populates='transactions')

@@ -119,28 +119,23 @@ class DashboardService(BaseService):
             ]
 
             # Earnings by client combined (paid + unpaid with currency conversion to INR)
-            # Simple exchange rates (should be made dynamic in production)
-            exchange_rates = {
-                'USD': 83.0,  # 1 USD = 83 INR (approximate)
-                'GBP': 105.0,  # 1 GBP = 105 INR (approximate)
-                'INR': 1.0
-            }
-            
+            from services.currencyService import CurrencyService
+            currency_service = CurrencyService()
+
             client_earnings_combined = {}
             for invoice in all_invoices:
                 client_name = invoice.customer.name if invoice.customer else invoice.to_name
                 if client_name not in client_earnings_combined:
                     client_earnings_combined[client_name] = 0
-                
+
                 if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
                     # For paid invoices, use payment amounts (already in INR)
                     earnings_inr = sum(float(payment.amount_received) for payment in invoice.payments)
                 else:
-                    # For unpaid invoices, convert using exchange rates
+                    # For unpaid invoices, convert using CurrencyService
                     currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
-                    exchange_rate = exchange_rates.get(currency, 1.0)
-                    earnings_inr = float(invoice.total) * exchange_rate
-                
+                    earnings_inr = currency_service.convert_to_inr(float(invoice.total), currency)
+
                 client_earnings_combined[client_name] += earnings_inr
 
             earnings_by_client_combined = [
@@ -232,10 +227,16 @@ class DashboardService(BaseService):
 
             invoice_details = []
             for invoice in invoices:
-                invoice_dict = {key: value for key, value in invoice.__dict__.items() 
-                               if key != '_sa_instance_state'}
-                if invoice.customer:
-                    invoice_dict['customer_name'] = invoice.customer.name
+                invoice_dict = {
+                    "invoiceNumber": invoice.invoice_number,
+                    "projectName": invoice.project_name,
+                    "clientName": invoice.customer.name if invoice.customer else invoice.to_name,
+                    "amount": float(invoice.total),
+                    "currency": invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency),
+                    "status": invoice.status.value if hasattr(invoice.status, 'value') else str(invoice.status),
+                    "issueDate": invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else "",
+                    "dueDate": invoice.due_date.strftime('%Y-%m-%d') if invoice.due_date else "",
+                }
                 invoice_details.append(invoice_dict)
 
             return {

@@ -574,7 +574,25 @@ TRANSACTION_TOOLS = [
             },
             "required": ["file_id"]
         }
-    }
+    },
+    {
+        "name": "process_mail_pipeline",
+        "description": "Scan Gmail for all financial emails (transactions, statements, investments, EPF, gold, freelance) and process them automatically using AI. This replaces the old scan_emails_for_transactions and scan_statements tools with a unified pipeline.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {
+                    "type": "string",
+                    "description": "Start date for email scan (YYYY/M/D format)"
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "End date for email scan (YYYY/M/D format)"
+                },
+            },
+            "required": []
+        }
+    },
 ]
 
 FREELANCE_TOOLS = [

@@ -5,20 +5,10 @@ from flask_sqlalchemy.session import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import func, case
 
-from enums.BanksEnum import BankEnums
 from enums.ServiceTypeEnum import ServiceTypeEnum
-from enums.StatementPatternEnum import StatementPatternEnum
-from enums.PatternEnum import PatternEnum
 from enums.TransactionTypeEnum import TransactionTypeEnum
 from models import User, UserToken, Transactions, TransactionForReview, StatementPasswords, FileDetails
 from models.transactions import ProcessingMethod
-from utils.EmailClassifier import EmailClassifier
-from services.parsers.HDFC_Credit import HDFCMilleniaParse
-from services.parsers.HDFC_Debit import HDFCDebitParser
-from services.parsers.ICICI_Amazon_Credit import ICICICreditCardStatementParser
-from services.parsers.YES_Credit import YESBankCreditParser
-from services.parsers.YES_Debit import YESBankDebitParser
-from services.parsers.BOI_Debit import BOIDebitParser
 from services.Base_Service import BaseService
 from utils.logger import Logger
 
@@ -161,12 +151,16 @@ class TransactionService(BaseService):
         }
 
     def fetchBanksOptedByUser(self, userID):
-        return self.db.session.query(User).filter_by(userID=userID).first().optedBanks.split(',')
+        from enums.BanksEnum import BankEnums
+        return [bank.value for bank in BankEnums]
 
     def fetchTransactionDates(self, date_from: str, date_to: str):
         """
-        Service to fetch transaction and statement dates within a given date range.
+        Service to fetch transaction and statement dates within a given date range,
+        plus statement period coverage for the calendar.
         """
+        from models.statementPeriods import StatementPeriod
+
         transaction_query = (
             self.db.session.query(Transactions.date)
             .filter(Transactions.date.between(date_from, date_to))
@@ -176,66 +170,30 @@ class TransactionService(BaseService):
         statement_query = (
             self.db.session.query(FileDetails.uploadDate)
             .filter(FileDetails.uploadDate.between(date_from, date_to))
+            .filter(FileDetails.deleted == False)
             .distinct()
         )
 
+        # Statement periods that overlap with the requested date range
+        period_query = self.db.session.query(StatementPeriod).filter(
+            StatementPeriod.period_start <= date_to,
+            StatementPeriod.period_end >= date_from,
+        ).all()
+
         transaction_dates = [t[0].strftime("%Y-%m-%d") for t in transaction_query]
         statement_dates = [s[0].strftime("%Y-%m-%d") for s in statement_query]
+        covered_periods = [{
+            "bank": p.bank,
+            "period_start": p.period_start.isoformat(),
+            "period_end": p.period_end.isoformat(),
+        } for p in period_query]
 
         return {
             "transaction_dates": transaction_dates,
             "statement_dates": statement_dates,
+            "covered_periods": covered_periods,
         }
 
-    def readTransactionFromMail(self, dateTo, dateFrom, userID, algorithm='claude'):
-        if dateTo is None or dateFrom is None:
-            # If we are not reading for a specific range, read for current month
-            dateFrom, dateTo = self.dateTimeUtil.currentMonthDatesForEmail()
-
-        token = self.fetchGmailTokenForUser(userID)
-        totalMails = 0
-        conflicts = 0
-        
-        # PRIMARY: Use EmailClassifier for intelligent email detection
-        all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, token, dateFrom, dateTo))
-        self.logger.info(f"Fetched {len(all_raw_emails)} emails from Gmail for period {dateFrom} to {dateTo}")
-        
-        # Debug: Log first few email senders and subjects
-        for i, email in enumerate(all_raw_emails[:5]):
-            sender = email.get('sender', 'No sender')
-            subject = email.get('subject', 'No subject')
-            self.logger.debug(f"Email {i+1}: From '{sender}' Subject '{subject[:50]}'")
-        
-        # Use EmailClassifier to separate transaction emails from statement emails
-        classification_results = EmailClassifier().classify_banking_emails(all_raw_emails)
-        transaction_emails = classification_results['transaction_emails']  # Only process transaction alerts, NOT statements
-        
-        self.logger.info(f"Email processing: Found {len(transaction_emails)} transaction alerts (excluding {len(classification_results['statement_emails'])} statements)")
-        
-        # Group transaction emails by bank for processing
-        emails_by_bank = {}
-        for email in transaction_emails:
-            bank = email.get('bank', 'UNKNOWN')
-            if bank not in emails_by_bank:
-                emails_by_bank[bank] = []
-            emails_by_bank[bank].append(email)
-        
-        # Process emails for each bank
-        for bank, bank_emails in emails_by_bank.items():
-            if bank == 'UNKNOWN':
-                continue
-                
-            # Process the items to get them all in the required format
-            cleanedMails, bank_conflicts = self.genericUtil.extractDetailsFromEmail(bank_emails, bank, algorithm)
-            totalMails += len(cleanedMails)
-            conflicts += len(bank_conflicts)
-            
-            # Insert the processed transactions in the database
-            self.insertTransactions(cleanedMails, bank, userID, bank_conflicts, TransactionTypeEnum.Email.value, fileId=None, source_emails=bank_emails)
-            
-        self.logger.info(f"Finished reading mail with intelligent detection. Inserted {totalMails} transactions.")
-        return totalMails, conflicts
-    
 
 
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None, source_emails=None):
@@ -361,25 +319,6 @@ class TransactionService(BaseService):
                 
         return integrityErrors
 
-    @staticmethod
-    def getParserInstanceByBank(bank):
-        bank = getattr(StatementPatternEnum, bank)
-
-        # Define a mapping of StatementPatternEnum values to parser classes
-        parser_mapping = {
-            StatementPatternEnum.YES_BANK_DEBIT: YESBankDebitParser,
-            StatementPatternEnum.YES_BANK_ACE: YESBankCreditParser,
-            StatementPatternEnum.ICICI_AMAZON_PAY: ICICICreditCardStatementParser,
-            StatementPatternEnum.HDFC_DEBIT: HDFCDebitParser,
-            StatementPatternEnum.Millenia_Credit: HDFCMilleniaParse,
-            StatementPatternEnum.BOI: BOIDebitParser
-        }
-
-        # Get the appropriate parser class from the mapping
-        parser_class = parser_mapping.get(bank)
-
-        return parser_class()
-
     def fetchGmailTokenForUser(self, userID):
         userToken = self.db.session.query(UserToken).filter_by(user_id=userID) \
             .filter_by(service_type=ServiceTypeEnum.Gmail.value).first()
@@ -399,178 +338,6 @@ class TransactionService(BaseService):
             'client_id': userToken.client_id,
             'client_secret': userToken.client_secret,
         }
-
-    def readStatementsFromMail(self, dateTo, dateFrom, userID, bank, algorithm='claude'):
-        """
-        We download all the files first. Then individually process and upload them. Current approach is to upload the
-        file first. If there is a failure during processing and insertion, then we delete the file from googleDrive.
-            :param dateTo: Date Range Info
-            :param dateTo:
-            :param dateFrom: Date Range Info
-            :param userID: UserID firebase
-            :param bank: bank
-            :return:
-        """
-        if dateTo is None or dateFrom is None:
-            # If we are not reading for a specific range, read for current month
-            dateFrom, dateTo = self.dateTimeUtil.currentMonthDatesForEmail()
-            
-        # Fetch the gmail token of the user
-        gmailToken = self.fetchGmailTokenForUser(userID)
-        # Fetch the drive token of the user
-        driveToken = self.fetchDriveTokenForUser(userID)
-        
-        # PRIMARY: Use EmailClassifier for intelligent statement email detection
-        all_raw_emails = list(self.gmailService.findAllEmailsInInterval(userID, gmailToken, dateFrom, dateTo))
-        classification_results = EmailClassifier().classify_banking_emails(all_raw_emails)
-        statement_emails = classification_results['statement_emails']  # Only process statement emails, NOT transaction alerts
-        
-        self.logger.info(f"Statement processing: Found {len(statement_emails)} statement emails (excluding {len(classification_results['transaction_emails'])} transaction alerts)")
-        
-        # Filter by specific banks if requested
-        if bank is not None:
-            requested_banks = bank.split(',')
-            statement_emails = [email for email in statement_emails if email.get('bank') in requested_banks]
-        
-        totalTransactions = 0
-        totalIntegrityErrors = 0
-        
-        # Group statement emails by bank for processing
-        emails_by_bank = {}
-        for email in statement_emails:
-            bank_name = email.get('bank', 'UNKNOWN')
-            if bank_name not in emails_by_bank:
-                emails_by_bank[bank_name] = []
-            emails_by_bank[bank_name].append(email)
-        
-        for bank_name, bank_statement_emails in emails_by_bank.items():
-            if bank_name == 'UNKNOWN':
-                continue
-            # Fetch the password for the bank
-            self.logger.info(f"Processing bank {bank_name}")
-            password = self.db.session.query(StatementPasswords).filter_by(user=userID).filter_by(bank=bank_name).first()
-            
-            if len(bank_statement_emails) > 0:
-                self.logger.info(f"EmailClassifier found {len(bank_statement_emails)} statement emails for {bank_name}")
-                
-                # Filter out already processed statement emails by Message-ID
-                unprocessed_emails = []
-                for email in bank_statement_emails:
-                    email_message_id = email.get('message_id')
-                    if email_message_id:
-                        existing_file = self.db.session.query(FileDetails).filter_by(gmail_message_id=email_message_id).first()
-                        if existing_file:
-                            self.logger.info(f"Skipping already processed statement email (Message-ID: {email_message_id[:20]}...)")
-                            continue
-                    unprocessed_emails.append(email)
-                
-                if not unprocessed_emails:
-                    self.logger.info(f"All statement emails for {bank_name} already processed")
-                    continue
-                    
-                self.logger.info(f"Processing {len(unprocessed_emails)} new statement emails for {bank_name}")
-                # Download files using existing method (still works, just less precise)
-                filepaths = self.gmailService.downloadFilesInRange(userID, gmailToken, password, bank_name, dateTo, dateFrom)
-            else:
-                self.logger.info(f"No statement emails found for {bank_name}")
-                continue
-
-            # Map filepaths to emails by index or other logic
-            for i, path in enumerate(filepaths):
-                self.logger.info(f"Processing file {path}")
-                
-                # Get the corresponding email Message-ID (if available)
-                # Note: This assumes filepaths[i] corresponds to unprocessed_emails[i]
-                # The download logic should maintain this correspondence
-                email_message_id = None
-                if i < len(unprocessed_emails):
-                    email_message_id = unprocessed_emails[i].get('message_id')
-                
-                pdf_path = os.getcwd() + '/tmp/' + path
-                transactions = []
-                
-                if algorithm == 'claude':
-                    # Try Claude Code PDF analysis first
-                    transactions = self.genericUtil._try_claude_pdf_extraction(pdf_path, bank_name, password.password_hash if password else None)
-                    
-                    if transactions:
-                        self.logger.info(f"Claude Code successfully parsed {len(transactions)} transactions from PDF")
-                        # Save Claude-analyzed statement to permanent directory
-                        self._save_claude_statement(pdf_path, bank_name, userID, email_message_id or path)
-                    else:
-                        # FALLBACK: Use existing tabula-based parser
-                        self.logger.info("Claude PDF parsing failed, falling back to tabula parser")
-                        parserInstance = self.getParserInstanceByBank(bank_name)
-                        parserInstance.setPath(pdf_path)
-                        parserInstance.setPassword(password.password_hash)
-                        transactions = parserInstance.parseFile()
-                        # Mark transactions as processed via pattern match (legacy method)
-                        for txn in transactions:
-                            txn['processed_via'] = 'PATTERN_MATCH'
-                else:
-                    # Use regex/tabula parser only
-                    self.logger.info("Using tabula parser for PDF processing")
-                    parserInstance = self.getParserInstanceByBank(bank_name)
-                    parserInstance.setPath(pdf_path)
-                    parserInstance.setPassword(password.password_hash)
-                    transactions = parserInstance.parseFile()
-                    # Mark transactions as processed via pattern match
-                    for txn in transactions:
-                        txn['processed_via'] = 'PATTERN_MATCH'
-                
-                totalTransactions += len(transactions)
-                self.logger.info(f"Finished reading {len(transactions)} transactions")
-                if len(transactions) > 0:
-                    # Get fileName
-                    month = self.dateTimeUtil.getMonthYearRange(transactions[0]['date'], transactions[-1]['date'], bank_name)
-                    fileName = f"{bank_name}_{month}.pdf"
-                    
-                    # Generate a local fileId
-                    fileId = f"local_{userID}_{bank_name}_{month}_{i}"
-                    
-                    # Insert file details with email Message-ID
-                    self.insertFileDetails(fileId, fileName, len(transactions), bank_name, userID, path, email_message_id)
-                    
-                    # Insert transactions
-                    try:
-                        integrityErrors = self.insertTransactions(transactions, bank_name, userID, [],
-                                                                  TransactionTypeEnum.Statement.value,
-                                                                  fileId)
-                        totalIntegrityErrors += integrityErrors
-                        if integrityErrors == len(transactions):
-                            # No transaction were inserted, delete the file record
-                            self.deleteFileDetails(fileId)
-                        elif integrityErrors > 0:
-                            self.updateStatementCount(fileId, len(transactions) - integrityErrors)
-                    except Exception as ex:
-                        self.logger.error(f"Error occurred while inserting transaction. Possibly EOF {ex}")
-                        # Delete file details if error occurred
-                        self.deleteFileDetails(fileId)
-
-        # Delete the file from temp
-        self.genericUtil.emptyTemp()
-
-        self.logger.info(f"Finished reading statements with intelligent detection. Inserted {totalTransactions} transactions")
-        return totalTransactions, totalIntegrityErrors
-    
-    def _save_claude_statement(self, pdf_path, bank_name, userID, identifier):
-        """Save Claude-analyzed statement to permanent directory"""
-        try:
-            # Create directory structure: claude_statements/userID/bank_name/
-            save_dir = os.path.join(os.getcwd(), "claude_statements", userID, bank_name)
-            os.makedirs(save_dir, exist_ok=True)
-            
-            # Use identifier (message ID or filename) as unique filename
-            safe_identifier = identifier.replace('/', '_').replace('<', '').replace('>', '') if identifier else 'unknown'
-            filename = f"{safe_identifier}.pdf"
-            save_path = os.path.join(save_dir, filename)
-            
-            # Copy file to permanent location
-            shutil.copy2(pdf_path, save_path)
-            self.logger.info(f"Saved Claude-analyzed statement to {save_path}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to save Claude statement: {str(e)}")
 
     def insertFileDetails(self, fileId, fileName, statementCount,
                           bank, user, path, gmail_message_id=None):
@@ -620,7 +387,7 @@ class TransactionService(BaseService):
                 self.db.session.commit()
 
     def fetchFileDetails(self, page: int, filters: dict, page_size: int = 100):
-        query = self.db.session.query(FileDetails)
+        query = self.db.session.query(FileDetails).filter(FileDetails.deleted == False)
 
         # Apply filters if they are provided
         if filters:
@@ -952,6 +719,156 @@ class TransactionService(BaseService):
         except Exception as e:
             self.logger.error(f"Error deleting local statement: {str(e)}")
             return {"error": str(e)}
+
+    def fetchProcessedStatements(self, userId, page=1, limit=100, filters=None):
+        """Fetch processed email records from processedEmails table for the statements view."""
+        from models.processedEmails import ProcessedEmails
+        from sqlalchemy import desc, asc
+
+        filters = filters or {}
+        query = self.db.session.query(ProcessedEmails).filter_by(user_id=userId)
+
+        # Default to bank_statement category — only show statement files
+        # unless a specific category filter is provided
+        bank_filter = filters.get("bank")
+        if bank_filter:
+            query = query.filter(ProcessedEmails.category == bank_filter)
+        else:
+            query = query.filter(ProcessedEmails.category == 'bank_statement')
+
+        # Filter by fileName (search in subject)
+        file_name_filter = filters.get("fileName")
+        if file_name_filter:
+            query = query.filter(ProcessedEmails.subject.ilike(f"%{file_name_filter}%"))
+
+        # Date range filter
+        date_range = filters.get("dateRange")
+        if date_range:
+            if date_range.get("dateFrom"):
+                query = query.filter(ProcessedEmails.email_date >= date_range["dateFrom"])
+            if date_range.get("dateTo"):
+                query = query.filter(ProcessedEmails.email_date <= date_range["dateTo"])
+
+        # Sort
+        sorted_config = filters.get("sorted", {})
+        sort_col_name = sorted_config.get("column", "processed_at")
+        sort_dir = sorted_config.get("order", "desc")
+
+        col_map = {
+            "uploadDate": ProcessedEmails.processed_at,
+            "processed_at": ProcessedEmails.processed_at,
+            "fileName": ProcessedEmails.subject,
+            "bank": ProcessedEmails.category,
+            "email_date": ProcessedEmails.email_date,
+        }
+        sort_col = col_map.get(sort_col_name, ProcessedEmails.processed_at)
+        order_fn = desc if sort_dir == "desc" else asc
+        query = query.order_by(order_fn(sort_col))
+
+        total = query.count()
+        offset = (page - 1) * limit
+        rows = query.offset(offset).limit(limit).all()
+
+        # Batch-load statement periods for all gmail_ids in this page
+        from models.statementPeriods import StatementPeriod
+        gmail_ids = [row.gmail_id for row in rows if row.gmail_id]
+        period_map = {}
+        if gmail_ids:
+            periods = self.db.session.query(StatementPeriod).filter(
+                StatementPeriod.gmail_message_id.in_(gmail_ids),
+                StatementPeriod.user == userId,
+            ).all()
+            for p in periods:
+                period_map[p.gmail_message_id] = p
+
+        results = []
+        for row in rows:
+            has_pdf = False
+            if row.pdf_filename:
+                full_path = os.path.join(os.getcwd(), "claude_statements", userId, row.pdf_filename)
+                has_pdf = os.path.exists(full_path)
+
+            # Extract bank from extraction_summary if available
+            summary = row.extraction_summary or {}
+            bank = summary.get("bank", row.category or "Unknown")
+
+            # Build a human-readable summary string
+            summary_text = ""
+            items = row.items_extracted or 0
+            if items > 0:
+                summary_text = f"{items} item(s) extracted"
+                if summary.get("inserted"):
+                    summary_text = f"{summary['inserted']} inserted"
+                if summary.get("duplicates"):
+                    summary_text += f", {summary['duplicates']} duplicates"
+            elif row.status == "skipped":
+                summary_text = row.error_message or "Skipped"
+            elif row.status == "failed":
+                summary_text = row.error_message or "Processing failed"
+            else:
+                summary_text = "No items extracted"
+
+            # Look up statement period coverage
+            period_record = period_map.get(row.gmail_id)
+
+            results.append({
+                "fileID": f"pe_{row.gmail_id}",
+                "fileName": row.subject or row.pdf_filename or row.gmail_id,
+                "bank": bank,
+                "uploadDate": row.processed_at.isoformat() if row.processed_at else "",
+                "email_date": row.email_date.isoformat() if row.email_date else "",
+                "statementCount": items,
+                "category": row.category,
+                "status": row.status,
+                "items_extracted": items,
+                "extraction_summary": summary,
+                "summary_text": summary_text,
+                "sender": row.sender,
+                "subject": row.subject,
+                "has_pdf": has_pdf,
+                "user": userId,
+                "period_start": period_record.period_start.isoformat() if period_record and period_record.period_start else None,
+                "period_end": period_record.period_end.isoformat() if period_record and period_record.period_end else None,
+            })
+
+        return {
+            "total_count": total,
+            "page": page,
+            "page_size": limit,
+            "results": results,
+        }
+
+    def getProcessedEmailByGmailId(self, userId, gmail_id):
+        """Look up a processedEmails row by gmail_id and user_id."""
+        from models.processedEmails import ProcessedEmails
+        try:
+            return self.db.session.query(ProcessedEmails).filter_by(
+                gmail_id=gmail_id, user_id=userId
+            ).first()
+        except Exception as e:
+            self.logger.error(f"Error fetching processed email {gmail_id}: {str(e)}")
+            return None
+
+    def delete_email_transactions_for_period(self, user_id, bank, period_start, period_end):
+        """Delete email-sourced transactions for a bank+period. Returns count deleted."""
+        try:
+            from sqlalchemy import func as sa_func
+            deleted = self.db.session.query(Transactions).filter(
+                Transactions.user == user_id,
+                Transactions.bank == bank,
+                sa_func.lower(Transactions.source) == 'email',
+                Transactions.date.between(period_start, period_end),
+            ).delete(synchronize_session='fetch')
+            self.db.session.commit()
+            self.logger.info(
+                f"Deleted {deleted} email transactions for {bank} "
+                f"({period_start} to {period_end})"
+            )
+            return deleted
+        except Exception as e:
+            self.db.session.rollback()
+            self.logger.error(f"Error deleting email transactions: {str(e)}")
+            return 0
 
     def fetchAllStatements(self, userId, include_legacy=True, include_local=True):
         """Fetch both legacy (Google Drive) and local statements"""

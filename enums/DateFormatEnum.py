@@ -9,5 +9,6 @@ class DateStatementEnum(Enum):
     YES_BANK_ACE = "%d/%m/%Y"
     YES_BANK_DEBIT = "%d/%m/%Y"
     BOI = "%d/%m/%Y"
+    HDFC_REGALIA = "%d/%m/%Y"
     EPF_STATEMENT = "%d-%m-%Y"
 

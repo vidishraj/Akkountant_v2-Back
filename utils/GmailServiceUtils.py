@@ -1,8 +1,14 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from services.StatementDownloadService import StatementDownloadService
 from utils.GoogleServiceSingleton import GoogleServiceSingleton
 from utils.logger import Logger
 from datetime import datetime
-from typing import Iterator, Dict, Any
+from typing import Iterator, Dict, Any, List
+
+# Concurrency settings for metadata fetching
+METADATA_FETCH_WORKERS = 10
+METADATA_BATCH_SIZE = 50
 
 
 class GmailServiceUtils:
@@ -46,12 +52,17 @@ class GmailServiceUtils:
         return self.googleService.is_token_valid(token)
 
     def _get_email_details(self, gmailService: Any, email_id: str) -> Dict[str, Any]:
-        """Get essential email details with memory-efficient fields"""
+        """Get essential email details + PDF attachment check in a single API call.
+
+        Uses format='full' with a fields mask so we get headers AND the parts
+        structure (filenames/mimeTypes) without downloading body data.
+        """
         email_data = gmailService.users().messages().get(
-            userId="me", 
+            userId="me",
             id=email_id,
-            format='metadata',
-            metadataHeaders=['subject', 'from', 'message-id']
+            format='full',
+            fields='id,internalDate,snippet,payload/headers,payload/mimeType,'
+                   'payload/parts(filename,mimeType,parts/filename,parts/mimeType)'
         ).execute()
 
         # Get subject, sender, and message-id from headers
@@ -81,44 +92,113 @@ class GmailServiceUtils:
         else:
             email_time = None
 
+        # Check for PDF attachments from the parts structure (no extra API call)
+        has_pdf = self._check_for_pdf_in_payload(email_data.get('payload', {}))
+
         return {
             'time': email_time,
             'subject': subject,
-            'sender': sender,  # Add sender information
-            'message': snippet,  # Using snippet instead of full body
-            'message_id': email_id,  # Use Gmail ID directly for uniqueness (not header Message-ID)
-            'gmail_id': email_id,  # Also track Gmail's internal ID for debugging
-            'header_message_id': header_message_id  # Keep original header for reference
+            'sender': sender,
+            'message': snippet,
+            'message_id': email_id,
+            'gmail_id': email_id,
+            'header_message_id': header_message_id,
+            '_has_pdf': has_pdf,
         }
 
+    @staticmethod
+    def _check_for_pdf_in_payload(payload: Dict[str, Any]) -> bool:
+        """Recursively check if the payload contains any PDF attachment parts."""
+        parts = payload.get('parts', [])
+        for part in parts:
+            filename = part.get('filename', '')
+            if filename and filename.lower().endswith('.pdf'):
+                return True
+            mime = part.get('mimeType', '')
+            if mime == 'application/pdf':
+                return True
+            # Check nested parts (e.g. multipart/mixed → multipart/alternative → parts)
+            if GmailServiceUtils._check_for_pdf_in_payload(part):
+                return True
+        return False
+
+    def _build_gmail_service(self, token: Any) -> Any:
+        """Build a fresh Gmail API service instance (not cached).
+
+        Used to create per-thread clients since httplib2 is not thread-safe.
+        """
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        credentials = Credentials(
+            token=token['token'],
+            refresh_token=token.get('refresh_token'),
+            client_id=token.get('client_id'),
+            client_secret=token.get('client_secret'),
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=['https://www.googleapis.com/auth/gmail.readonly'],
+        )
+        return build('gmail', 'v1', credentials=credentials)
+
+    def _fetch_email_details_with_own_client(self, token: Any, email_id: str) -> Dict[str, Any]:
+        """Build a thread-local Gmail client and fetch a single email's details.
+
+        Each call creates its own httplib2 transport so there are no SSL
+        conflicts when called from multiple threads concurrently.
+        """
+        gmail_svc = self._build_gmail_service(token)
+        return self._get_email_details(gmail_svc, email_id)
+
     def iter_emails_in_interval(self, userId: str, token: str, dateFrom: str, dateTo: str) -> Iterator[Dict[str, Any]]:
-        """Iterator that yields emails one at a time to prevent memory buildup"""
+        """Fetch emails concurrently using ThreadPoolExecutor.
+
+        Phase 1: Collect all message IDs via pagination (sequential, lightweight).
+        Phase 2: Fetch full details in concurrent batches of METADATA_BATCH_SIZE
+                 with METADATA_FETCH_WORKERS threads. Each thread builds its own
+                 Gmail API client to avoid httplib2 SSL conflicts.
+        """
         gmailService = self.googleService.get_gmail_service(userId, token)
-        
-        # OPTIMIZATION: Initial request with deduplication and larger page size
+
+        # ── Phase 1: Collect all message IDs ──────────────────────────
+        all_message_ids: List[str] = []
         request = gmailService.users().messages().list(
             userId='me',
-            q=f"after:{dateFrom} before:{dateTo}",  # Search ALL emails, not just inbox
-            maxResults=min(500, self.PAGE_SIZE * 5),  # Larger batches for faster fetching
-            includeSpamTrash=True  # Include spam and trash
+            q=f"after:{dateFrom} before:{dateTo}",
+            maxResults=min(500, self.PAGE_SIZE * 5),
+            includeSpamTrash=True,
         )
 
         while request is not None:
             response = request.execute()
             messages = response.get('messages', [])
-            
-            # Process emails individually - batch API has configuration issues
             if messages:
-                for message in messages:
-                    try:
-                        email_details = self._get_email_details(gmailService, message['id'])
-                        yield email_details
-                    except Exception as e:
-                        self.logger.warning(f"Error processing email {message['id']}: {str(e)}")
-                        continue
-
-            # Get the next page of emails
+                all_message_ids.extend(m['id'] for m in messages)
             request = gmailService.users().messages().list_next(request, response)
+
+        if not all_message_ids:
+            return
+
+        self.logger.info(
+            f"Collected {len(all_message_ids)} message IDs, "
+            f"fetching details with {METADATA_FETCH_WORKERS} workers"
+        )
+
+        # ── Phase 2: Fetch details concurrently in batches ────────────
+        # Each thread gets its own Gmail API client (httplib2 is NOT thread-safe)
+        for batch_start in range(0, len(all_message_ids), METADATA_BATCH_SIZE):
+            batch_ids = all_message_ids[batch_start:batch_start + METADATA_BATCH_SIZE]
+
+            with ThreadPoolExecutor(max_workers=METADATA_FETCH_WORKERS) as executor:
+                future_to_id = {
+                    executor.submit(self._fetch_email_details_with_own_client, token, mid): mid
+                    for mid in batch_ids
+                }
+                for future in as_completed(future_to_id):
+                    mid = future_to_id[future]
+                    try:
+                        yield future.result()
+                    except Exception as e:
+                        self.logger.warning(f"Error processing email {mid}: {str(e)}")
 
     def findAllEmailsInInterval(self, userId: str, token: str, dateFrom: str, dateTo: str) -> Iterator[Dict[str, Any]]:
         """Memory-efficient version that returns an iterator instead of a list"""

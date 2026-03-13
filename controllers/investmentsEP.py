@@ -347,6 +347,50 @@ class InvestmentController:
         return jsonify(self.InvestmentService.getFileTimeStamps()), 200
 
     @Logger.standardLogger
+    def fetchInvestmentEmails(self):
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        category = request.args.get('category')
+        service_type = request.args.get('serviceType')
+        page = int(request.args.get('page', 1))
+        page_size = int(request.args.get('pageSize', 50))
+        categories_param = request.args.get('categories')
+        categories = categories_param.split(',') if categories_param else None
+        return jsonify(self.InvestmentService.fetchInvestmentEmails(user_id, category, page, page_size, service_type, categories)), 200
+
+    @Logger.standardLogger
+    def fetchInvestmentSnapshots(self):
+        """Fetch historical investment snapshots for growth charts."""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        date_from = request.args.get('dateFrom')
+        date_to = request.args.get('dateTo')
+        investment_type = request.args.get('investmentType')
+        result = self.InvestmentService.getInvestmentSnapshots(
+            user_id, date_from, date_to, investment_type
+        )
+        return jsonify({"snapshots": result}), 200
+
+    @Logger.standardLogger
+    def fetchEmailBody(self):
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        gmail_id = request.args.get('gmailId')
+        if not gmail_id:
+            return jsonify({"error": "gmailId parameter is required"}), 400
+        try:
+            result = self.InvestmentService.fetchEmailBody(user_id, gmail_id)
+            if isinstance(result, tuple):
+                return jsonify(result[0]), result[1]
+            return jsonify(result), 200
+        except Exception as e:
+            self.logger.error(f"Error fetching email body: {str(e)}")
+            return jsonify({"error": "Failed to fetch email body"}), 500
+
+    @Logger.standardLogger
     def fetchKiteHoldings(self):
         """Fetch holdings from Kite Connect API"""
         user_id = g.get('firebase_id')

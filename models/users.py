@@ -22,4 +22,8 @@ class User(Base):
     deposit_relationship = relationship('DepositSecurities', back_populates='user_relationship')
     transaction_relationship = relationship('SecurityTransactions', back_populates='user_relationship')
     investment_history = relationship('InvestmentHistory', back_populates='user_relationship')
+    investment_snapshots = relationship('InvestmentSnapshot', back_populates='user_relationship')
     fo_trades = relationship('FOTrade', back_populates='user_relationship')
+    processed_emails = relationship('ProcessedEmails', back_populates='user_relationship')
+    statement_periods = relationship('StatementPeriod', back_populates='user_relationship')
+    transfer_links = relationship('TransferLink', back_populates='user_relationship')
