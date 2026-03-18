@@ -28,3 +28,7 @@ class Transactions(Base):
 
     file_details = relationship('FileDetails', back_populates='transactions')
     user_relationship = relationship('User', back_populates='transactions')
+
+    __table_args__ = (
+        Index('idx_txn_user_date', 'user', 'date'),
+    )

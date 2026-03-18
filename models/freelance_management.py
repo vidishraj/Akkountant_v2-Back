@@ -26,7 +26,7 @@ class CurrencyEnum(enum.Enum):
 class Customer(Base):
     __tablename__ = 'customers'
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    user_id = Column(CHAR(36), nullable=False)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     name = Column(String(255), nullable=False)
     email = Column(String(255), nullable=True)
     company = Column(String(255))
@@ -44,7 +44,7 @@ class Customer(Base):
 class InvoiceTemplate(Base):
     __tablename__ = 'invoice_templates'
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    user_id = Column(CHAR(36), nullable=False)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     customer_id = Column(CHAR(36), ForeignKey('customers.id', ondelete='CASCADE'), nullable=True)
     name = Column(String(255), nullable=False)
     template_data = Column(JSON, nullable=False)
@@ -103,7 +103,7 @@ class InvoiceTemplate(Base):
 class Invoice(Base):
     __tablename__ = 'invoices'
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    user_id = Column(CHAR(36), nullable=False)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     customer_id = Column(CHAR(36), ForeignKey('customers.id', ondelete='SET NULL'), nullable=True)
     invoice_number = Column(String(50), nullable=False)
     project_name = Column(String(255), nullable=False)
@@ -175,7 +175,7 @@ class InvoiceItem(Base):
 class Signature(Base):
     __tablename__ = 'signatures'
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    user_id = Column(CHAR(36), nullable=False)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     name = Column(String(255), nullable=False)
     signature_data = Column(Text, nullable=False)
     signature_type = Column(String(20), default='image')

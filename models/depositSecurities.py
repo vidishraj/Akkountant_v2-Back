@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer, Date, Numeric, and_
+from sqlalchemy import Column, String, ForeignKey, Integer, Date, Numeric, and_, Index
 
 from sqlalchemy.orm import relationship
 from models.Base import Base
@@ -16,6 +16,10 @@ class DepositSecurities(Base):
     securityType = Column(String(10), nullable=False)
 
     user_relationship = relationship('User', back_populates='deposit_relationship')
+
+    __table_args__ = (
+        Index('idx_ds_userid_date', 'userID', 'date'),
+    )
 
     # Use string references to avoid circular import
     sold_securities = relationship(

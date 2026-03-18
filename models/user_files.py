@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, DateTime, Index, func
+from sqlalchemy import Column, String, Text, Integer, DateTime, Index, ForeignKey, func
 from sqlalchemy.dialects.mysql import CHAR
 from .Base import Base
 import uuid
@@ -12,9 +12,9 @@ class UserFolder(Base):
     __tablename__ = 'user_folders'
 
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    user_id = Column(CHAR(36), nullable=False)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     name = Column(String(255), nullable=False)
-    parent_folder_id = Column(CHAR(36), nullable=True)
+    parent_folder_id = Column(CHAR(36), ForeignKey('user_folders.id', ondelete='SET NULL'), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -28,7 +28,7 @@ class UserFile(Base):
     __tablename__ = 'user_files'
 
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
-    user_id = Column(CHAR(36), nullable=False)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     original_filename = Column(String(500), nullable=False)
     stored_filename = Column(String(300), nullable=False)
     file_type = Column(String(50), nullable=False)
@@ -37,7 +37,7 @@ class UserFile(Base):
     label = Column(String(255), nullable=True)
     thumbnail_data = Column(Text, nullable=True)
     storage_path = Column(String(500), nullable=False)
-    folder_id = Column(CHAR(36), nullable=True)
+    folder_id = Column(CHAR(36), ForeignKey('user_folders.id', ondelete='SET NULL'), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

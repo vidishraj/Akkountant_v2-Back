@@ -85,7 +85,7 @@ class Base_EPG:
                         date=deposit.date,
                         userID=deposit.userID,
                         securityType=security_type.value
-                    ).first()
+                    ).with_for_update().first()
                 else:
                     # PPF: allow multiple deposits per day, match on date + amount (re-upload detection)
                     existing_deposit = self.db.session.query(DepositSecurities).filter_by(
@@ -93,7 +93,7 @@ class Base_EPG:
                         userID=deposit.userID,
                         securityType=security_type.value,
                         depositAmount=deposit.depositAmount
-                    ).first()
+                    ).with_for_update().first()
 
                 if existing_deposit:
                     self.logger.warning(

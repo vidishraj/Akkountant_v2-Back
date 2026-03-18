@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer, Date
+from sqlalchemy import Column, String, ForeignKey, Integer, Date, Index
 from sqlalchemy.types import DECIMAL as Decimal
 from sqlalchemy.orm import relationship
 from models.Base import Base
@@ -16,6 +16,10 @@ class PurchasedSecurities(Base):
     securityType = Column(String(20), nullable=False)
 
     user_relationship = relationship('User', back_populates='purchased_securities')
+
+    __table_args__ = (
+        Index('idx_ps_userid_date', 'userID', 'date'),
+    )
 
     # Use string references to avoid circular import
     sold_securities = relationship(

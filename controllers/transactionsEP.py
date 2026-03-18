@@ -1,3 +1,4 @@
+from datetime import datetime
 from enums.BanksEnum import BankEnums
 from enums.ServiceTypeEnum import ServiceTypeEnum
 from services.transactionsService import TransactionService
@@ -21,8 +22,9 @@ class TransactionController:
         data = request.get_json(force=True)
         page = data.get("Page", 1)
         filters = data.get("Filter", None)
+        user_id = g.get('firebase_id')
         self.logger.info(f"Fetch {page} with filter {filters}")
-        transactions = self.TransactionService.fetchTransactions(page=page, filters=filters)
+        transactions = self.TransactionService.fetchTransactions(page=page, filters=filters, user_id=user_id)
         # Format the transactions for JSON response
         results = []
         for t in transactions["results"]:
@@ -78,8 +80,9 @@ class TransactionController:
         self.logger.info(f"Fetching transactions for range: {month_start} - {month_end}")
 
         # Fetch transactions and statements from the service
+        user_id = g.get('firebase_id')
         transactions = self.TransactionService.fetchTransactionDates(
-            date_from=month_start, date_to=month_end
+            date_from=month_start, date_to=month_end, user_id=user_id
         )
 
         # Format the response
@@ -121,11 +124,12 @@ class TransactionController:
         data = request.get_json()
         reference_id = data.get("referenceID")
         updates = data.get("updates", {})
+        user_id = g.get('firebase_id')
         # Validate that referenceID is provided
         if not reference_id:
             return jsonify({"error": "referenceID is required"}), 400
         # Call the update service function
-        result = self.TransactionService.updateTransaction(reference_id, updates)
+        result = self.TransactionService.updateTransaction(reference_id, updates, user_id=user_id)
         if "error" in result:
             return jsonify(result), 404  # Return 404 if transaction not found
         return jsonify(result), 200  # Return 200 if update is successful
@@ -331,19 +335,30 @@ class TransactionController:
         data = request.get_json(force=True)
         user_id = g.get("firebase_id")
 
+        # Parse date_of_birth string (DD/MM/YYYY) to date object
+        dob_str = data.get("date_of_birth")
+        dob_date = None
+        if dob_str:
+            try:
+                dob_date = datetime.strptime(dob_str, "%d/%m/%Y").date()
+            except ValueError:
+                dob_date = None
+
         try:
             existing = g.db.session.query(UserPersonalInfo).filter_by(user_id=user_id).first()
             if existing:
-                for field in ["first_name", "last_name", "date_of_birth", "pan_number",
+                for field in ["first_name", "last_name", "pan_number",
                               "phone_number", "phone_number_2", "uan_number", "customer_id_hdfc"]:
                     if field in data:
                         setattr(existing, field, data[field])
+                if "date_of_birth" in data:
+                    existing.date_of_birth = dob_date
             else:
                 info = UserPersonalInfo(
                     user_id=user_id,
                     first_name=data.get("first_name"),
                     last_name=data.get("last_name"),
-                    date_of_birth=data.get("date_of_birth"),
+                    date_of_birth=dob_date,
                     pan_number=data.get("pan_number"),
                     phone_number=data.get("phone_number"),
                     phone_number_2=data.get("phone_number_2"),
@@ -379,7 +394,7 @@ class TransactionController:
             "exists": True,
             "first_name": info.first_name,
             "last_name": info.last_name,
-            "date_of_birth": mask(info.date_of_birth, 5) if info.date_of_birth else None,
+            "date_of_birth": mask(info.date_of_birth.strftime("%d/%m/%Y"), 5) if info.date_of_birth else None,
             "pan_number": mask(info.pan_number, 4) if info.pan_number else None,
             "phone_number": mask(info.phone_number, 4) if info.phone_number else None,
             "phone_number_2": mask(info.phone_number_2, 4) if info.phone_number_2 else None,

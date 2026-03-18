@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer, DateTime, CheckConstraint
+from sqlalchemy import Column, String, ForeignKey, Integer, DateTime, CheckConstraint, Index
 from sqlalchemy.orm import relationship
 from models.Base import Base
 
@@ -18,4 +18,6 @@ class Job(Base):
     # Adding a check constraint to enforce max value for failures
     __table_args__ = (
         CheckConstraint('failures >= 0 AND failures <= 10', name='check_failures_range'),
+        Index('idx_job_due_date', 'due_date'),
+        Index('idx_job_userid_status', 'user_id', 'status'),
     )

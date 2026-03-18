@@ -314,7 +314,7 @@ class Akkountant(Flask):
             ('/deleteSingleInvestment', 'GET', self.investmentEP.deleteSingleRecord),
             ('/fetchFOSummary', 'GET', self.investmentEP.fetchFOSummary),
             ('/fetchFOTrades', 'GET', self.investmentEP.fetchFOTrades),
-            ('/deleteAllInvestments', 'GET', self.investmentEP.deleteAllInvestments),
+            ('/deleteAllInvestments', 'DELETE', self.investmentEP.deleteAllInvestments),
             # Kite Connect API endpoints
             ('/fetchInvestmentEmails', 'GET', self.investmentEP.fetchInvestmentEmails),
             ('/fetchEmailBody', 'GET', self.investmentEP.fetchEmailBody),

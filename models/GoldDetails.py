@@ -8,7 +8,7 @@ class GoldDetails(Base):
     __tablename__ = 'goldDetails'
 
     buyID = Column(String(30), ForeignKey('depositSecurities.buyID', ondelete="CASCADE"), nullable=False, primary_key=True)
-    quantity = Column(DECIMAL(10, 2))
+    quantity = Column(DECIMAL(10, 2), nullable=False)
     goldType = Column(Enum('22', '24', '18', name='gold_type_enum'), nullable=False)
 
     buyIdRel = relationship('DepositSecurities', back_populates='goldDetails')

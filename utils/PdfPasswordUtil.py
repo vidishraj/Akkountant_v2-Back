@@ -87,7 +87,8 @@ def generate_password_candidates(personal_info, hint_tags=None):
     if hasattr(personal_info, 'first_name'):
         first_name = personal_info.first_name or ""
         last_name = personal_info.last_name or ""
-        dob = personal_info.date_of_birth or ""
+        dob_raw = personal_info.date_of_birth
+        dob = dob_raw.strftime("%d/%m/%Y") if hasattr(dob_raw, 'strftime') else (dob_raw or "")
         pan = personal_info.pan_number or ""
         phone = personal_info.phone_number or ""
         uan = personal_info.uan_number or ""

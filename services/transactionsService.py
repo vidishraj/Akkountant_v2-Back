@@ -25,9 +25,13 @@ class TransactionService(BaseService):
     def __init__(self):
         super().__init__()
 
-    def fetchTransactions(self, page: int, filters: dict, page_size: int = 100):
+    def fetchTransactions(self, page: int, filters: dict, user_id: str = None, page_size: int = 100):
         query = self.db.session.query(Transactions)
-        
+
+        # Filter by user
+        if user_id:
+            query = query.filter(Transactions.user == user_id)
+
         # Determine if we should apply the default Claude filter
         apply_claude_default = True
         if filters and 'processed_via' in filters:
@@ -63,7 +67,11 @@ class TransactionService(BaseService):
 
         # Get the total count before pagination by creating a new count query
         total_count_query = self.db.session.query(func.count(Transactions.referenceID))
-        
+
+        # Apply user filter to count query
+        if user_id:
+            total_count_query = total_count_query.filter(Transactions.user == user_id)
+
         # Apply the same processing method filter to count query
         if apply_claude_default:
             total_count_query = total_count_query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
@@ -97,7 +105,11 @@ class TransactionService(BaseService):
             func.sum(case((Transactions.amount < 0, Transactions.amount), else_=0)).label("credit_sum"),
             func.sum(case((Transactions.amount > 0, Transactions.amount), else_=0)).label("debit_sum"),
         )
-        
+
+        # Apply user filter to sum query
+        if user_id:
+            sum_query = sum_query.filter(Transactions.user == user_id)
+
         # Apply the same processing method filter to sum query
         if apply_claude_default:
             sum_query = sum_query.filter(Transactions.processed_via == ProcessingMethod.CLAUDE_CODE)
@@ -154,7 +166,7 @@ class TransactionService(BaseService):
         from enums.BanksEnum import BankEnums
         return [bank.value for bank in BankEnums]
 
-    def fetchTransactionDates(self, date_from: str, date_to: str):
+    def fetchTransactionDates(self, date_from: str, date_to: str, user_id: str = None):
         """
         Service to fetch transaction and statement dates within a given date range,
         plus statement period coverage for the calendar.
@@ -164,21 +176,28 @@ class TransactionService(BaseService):
         transaction_query = (
             self.db.session.query(Transactions.date)
             .filter(Transactions.date.between(date_from, date_to))
-            .distinct()
         )
+        if user_id:
+            transaction_query = transaction_query.filter(Transactions.user == user_id)
+        transaction_query = transaction_query.distinct()
 
         statement_query = (
             self.db.session.query(FileDetails.uploadDate)
             .filter(FileDetails.uploadDate.between(date_from, date_to))
             .filter(FileDetails.deleted == False)
-            .distinct()
         )
+        if user_id:
+            statement_query = statement_query.filter(FileDetails.user == user_id)
+        statement_query = statement_query.distinct()
 
         # Statement periods that overlap with the requested date range
         period_query = self.db.session.query(StatementPeriod).filter(
             StatementPeriod.period_start <= date_to,
             StatementPeriod.period_end >= date_from,
-        ).all()
+        )
+        if user_id:
+            period_query = period_query.filter(StatementPeriod.user == user_id)
+        period_query = period_query.all()
 
         transaction_dates = [t[0].strftime("%Y-%m-%d") for t in transaction_query]
         statement_dates = [s[0].strftime("%Y-%m-%d") for s in statement_query]
@@ -363,9 +382,12 @@ class TransactionService(BaseService):
             self.logger.warning(f"Duplicate file details entry error occurred: {e.__cause__}")
             self.db.session.rollback()
 
-    def deleteFileDetails(self, fileId):
+    def deleteFileDetails(self, fileId, user_id=None):
         # Find the row by ID and delete it
-        row = self.db.session.query(FileDetails).filter_by(fileID=fileId).first()
+        query = self.db.session.query(FileDetails).filter_by(fileID=fileId)
+        if user_id:
+            query = query.filter(FileDetails.user == user_id)
+        row = query.first()
         if row:
             if isinstance(self.db, dict):
                 with self.db.session() as session:
@@ -386,8 +408,12 @@ class TransactionService(BaseService):
             else:
                 self.db.session.commit()
 
-    def fetchFileDetails(self, page: int, filters: dict, page_size: int = 100):
+    def fetchFileDetails(self, page: int, filters: dict, user_id: str = None, page_size: int = 100):
         query = self.db.session.query(FileDetails).filter(FileDetails.deleted == False)
+
+        # Filter by user
+        if user_id:
+            query = query.filter(FileDetails.user == user_id)
 
         # Apply filters if they are provided
         if filters:
@@ -426,9 +452,12 @@ class TransactionService(BaseService):
             "page": page
         }
 
-    def updateTransaction(self, reference_id: int, updates: dict):
+    def updateTransaction(self, reference_id: int, updates: dict, user_id: str = None):
         # Fetch the transaction by referenceID
-        transaction = self.db.session.query(Transactions).filter_by(referenceID=reference_id).first()
+        query = self.db.session.query(Transactions).filter_by(referenceID=reference_id)
+        if user_id:
+            query = query.filter(Transactions.user == user_id)
+        transaction = query.first()
 
         # If transaction is not found, return an error message
         if not transaction:
@@ -511,9 +540,9 @@ class TransactionService(BaseService):
             with session.begin():  # Start an outer transaction
                 self.logger.info("Fetched drive token")
                 driveToken = self.fetchDriveTokenForUser(user_id)
-                self.deleteFileDetails(fileId)
+                self.deleteFileDetails(fileId, user_id=user_id)
                 self.logger.info("Deleted file details")
-                self.deleteTransactionsFromAFile(fileId)
+                self.deleteTransactionsFromAFile(fileId, user_id=user_id)
                 self.logger.info("Deleted transaction related to file")
                 self.driveService.deleteFile(fileId, user_id, driveToken)
                 self.logger.info("Deleted file on Google Drive")
@@ -527,8 +556,11 @@ class TransactionService(BaseService):
             raise Exception(e.__str__())  # Reraise the exception after logging
         return {"message": "File deleted successfully"}
 
-    def deleteTransactionsFromAFile(self, fileID):
-        result = self.db.session.query(Transactions).filter_by(fileID=fileID).delete(synchronize_session='fetch')
+    def deleteTransactionsFromAFile(self, fileID, user_id=None):
+        query = self.db.session.query(Transactions).filter_by(fileID=fileID)
+        if user_id:
+            query = query.filter(Transactions.user == user_id)
+        result = query.delete(synchronize_session='fetch')
         return result
 
     def renameFile(self, user_id: str, fileId: str, newName: str):
@@ -685,8 +717,16 @@ class TransactionService(BaseService):
     def downloadLocalStatement(self, userId, bank, filename):
         """Download a locally stored statement"""
         try:
-            file_path = os.path.join(os.getcwd(), "claude_statements", userId, bank, filename)
-            
+            # Sanitize to prevent path traversal
+            safe_bank = os.path.basename(bank)
+            safe_filename = os.path.basename(filename)
+            base_dir = os.path.join(os.getcwd(), "claude_statements", userId)
+            file_path = os.path.join(base_dir, safe_bank, safe_filename)
+
+            # Verify the resolved path is within the expected directory
+            if not os.path.realpath(file_path).startswith(os.path.realpath(base_dir)):
+                return {"error": "Invalid file path"}
+
             if not os.path.exists(file_path):
                 return {"error": "Statement not found"}
             
@@ -700,11 +740,19 @@ class TransactionService(BaseService):
     def deleteLocalStatement(self, userId, bank, filename):
         """Delete a locally stored statement"""
         try:
-            file_path = os.path.join(os.getcwd(), "claude_statements", userId, bank, filename)
-            
+            # Sanitize to prevent path traversal
+            safe_bank = os.path.basename(bank)
+            safe_filename = os.path.basename(filename)
+            base_dir = os.path.join(os.getcwd(), "claude_statements", userId)
+            file_path = os.path.join(base_dir, safe_bank, safe_filename)
+
+            # Verify the resolved path is within the expected directory
+            if not os.path.realpath(file_path).startswith(os.path.realpath(base_dir)):
+                return {"error": "Invalid file path"}
+
             if not os.path.exists(file_path):
                 return {"error": "Statement not found"}
-            
+
             os.remove(file_path)
             self.logger.info(f"Deleted local statement: {file_path}")
             
@@ -881,7 +929,7 @@ class TransactionService(BaseService):
             
             # Fetch legacy Google Drive statements
             if include_legacy:
-                legacy_files = self.fetchFileDetails(page=1, filters={"user": userId})
+                legacy_files = self.fetchFileDetails(page=1, filters={}, user_id=userId)
                 result["legacy_statements"] = [
                     {**{key: value for key, value in fd.__dict__.items() if key != '_sa_instance_state'}, 
                      "storage_type": "google_drive"}
