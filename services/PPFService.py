@@ -1,5 +1,6 @@
 import datetime
 from abc import ABC
+from decimal import Decimal
 
 from flask import jsonify
 
@@ -96,7 +97,7 @@ class PPFService(Base_EPG, ABC):
                             currentMonth += deposit.depositAmount
                     runningTotal += currentMonth
                 rate = self.JsonDownloadService.getRateForMonth(month, EPGEnum.PF.value)
-                interest = runningTotal * (rate / 1200)
+                interest = runningTotal * (Decimal(str(rate)) / Decimal('1200'))
                 netProfit += interest
                 runningInterest += interest
                 if month.endswith("03", len(month) - 2, len(month)):

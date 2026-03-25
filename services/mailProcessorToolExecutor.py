@@ -532,8 +532,8 @@ def _handle_save_attachment(args, user_id):
     save_dir = os.path.join(os.getcwd(), "attachments", user_id, category)
     os.makedirs(save_dir, exist_ok=True)
 
-    # Sanitize filename
-    safe_filename = filename.replace("/", "_").replace("\\", "_")
+    # Sanitize filename — strip path traversal and separators
+    safe_filename = filename.replace("..", "").replace("/", "_").replace("\\", "_")
     dest_path = os.path.join(save_dir, safe_filename)
 
     shutil.copy2(source_path, dest_path)

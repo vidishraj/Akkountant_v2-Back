@@ -113,7 +113,7 @@ class NPSParser(BaseParser, ABC):
                 if not math.isnan(row.iloc[i]):
                     return False
             return True
-        except:
+        except Exception:
             return False
 
     def readSecurityNamesTier1(self):

@@ -20,3 +20,8 @@ from models.investmentSnapshot import InvestmentSnapshot
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum
 from .customer_emails import CustomerEmail
+from .stockTrade import TradeAssociation
+from .user_files import UserFolder, UserFile
+from .jobEmails import JobEmail
+from .jobProcessedEmails import ProcessedEmail as JobProcessedEmail
+from .portfolioVisitors import PortfolioVisitor

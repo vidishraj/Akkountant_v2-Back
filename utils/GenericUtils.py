@@ -1,6 +1,5 @@
 import os
 import hashlib
-import shutil
 import uuid
 from decimal import Decimal, ROUND_DOWN
 
@@ -34,16 +33,6 @@ class GenericUtil:
         reference_id = hashlib.md5(combined_str.encode()).hexdigest()
 
         return reference_id
-
-    @staticmethod
-    def emptyTemp():
-        folderPath = os.getcwd() + "/tmp"
-        # Delete the folder and all its contents
-        shutil.rmtree(folderPath)
-        # Recreate the empty folder
-        os.makedirs(folderPath, exist_ok=True)
-
-        # This seems to be a faster approach then deleting the files in the folder? Not sure
 
     @staticmethod
     def getFileSize(filePath):

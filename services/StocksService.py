@@ -287,9 +287,9 @@ class StocksService(Base_MSN, ABC):
             self.logger.info("Transaction committed successfully.")
 
         except SQLAlchemyError as e:
-            session.rollback()  # Roll back the entire transaction if any error occurs
+            session.rollback()
             self.logger.error(f"Transactions failed. Rolled back. Error: {e}")
-            raise Exception(e.__str__())  # Reraise the exception after logging
+            raise
 
         self.logger.info("Finished processing file and inserting statements")
         return {"readFromStatement": {'buy': len(buyList), 'sold': len(sellList)},

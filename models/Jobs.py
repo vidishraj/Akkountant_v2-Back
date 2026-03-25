@@ -13,7 +13,7 @@ class Job(Base):
     due_date = Column(DateTime, nullable=False)
     # Updated failures column
     failures = Column(Integer, default=0, nullable=False)
-    user_id = Column(String(100), nullable=True)  # Can be null for global jobs
+    user_id = Column(String(100), ForeignKey('users.userID', ondelete='SET NULL'), nullable=True)
 
     # Adding a check constraint to enforce max value for failures
     __table_args__ = (

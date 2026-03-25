@@ -547,13 +547,13 @@ class TransactionService(BaseService):
                 self.driveService.deleteFile(fileId, user_id, driveToken)
                 self.logger.info("Deleted file on Google Drive")
         except SQLAlchemyError as e:
-            session.rollback()  # Roll back the entire transaction if any error occurs
+            session.rollback()
             self.logger.error(f"Error deleting file details. Error: {e}")
-            raise Exception(e.__str__())  # Reraise the exception after logging
+            raise
         except Exception as e:
-            session.rollback()  # Roll back the entire transaction if any error occurs
+            session.rollback()
             self.logger.error(f"Error deleting file. Error: {e}")
-            raise Exception(e.__str__())  # Reraise the exception after logging
+            raise
         return {"message": "File deleted successfully"}
 
     def deleteTransactionsFromAFile(self, fileID, user_id=None):
@@ -587,7 +587,7 @@ class TransactionService(BaseService):
                 if not serviceCheck:
                     return self.driveService.googleService.start_fresh_auth_flow(scopes)
                 return {"Message": "Successful"}
-            except:
+            except Exception:
                 return self.driveService.googleService.start_fresh_auth_flow(scopes)
         elif serviceType == ServiceTypeEnum.Gmail:
             scopes = self.gmailService.googleService.getGmailScope()
@@ -597,7 +597,7 @@ class TransactionService(BaseService):
                 if not serviceCheck:
                     return self.gmailService.googleService.start_fresh_auth_flow(scopes)
                 return {"Message": "Successful"}
-            except:
+            except Exception:
                 return self.gmailService.googleService.start_fresh_auth_flow(scopes)
         return {"Message": "Weird Failure"}
 

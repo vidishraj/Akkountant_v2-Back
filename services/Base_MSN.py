@@ -101,9 +101,11 @@ class Base_MSN:
         :return: List of dictionaries (JSON-like structure).
         """
         try:
+            # Ensure enum values are converted to their string value for DB comparison
+            type_value = investment_type.value if hasattr(investment_type, 'value') else investment_type
             active_securities = self.db.session.query(PurchasedSecurities).filter(
                 PurchasedSecurities.buyQuant > 0,
-                PurchasedSecurities.securityType == investment_type,
+                PurchasedSecurities.securityType == type_value,
                 PurchasedSecurities.userID == user_id  # Filter by userID
             ).all()
 
@@ -143,7 +145,8 @@ class Base_MSN:
 
             # Apply optional security type filter
             if service_type:
-                query = query.filter(PurchasedSecurities.securityType == service_type)
+                st_value = service_type.value if hasattr(service_type, 'value') else service_type
+                query = query.filter(PurchasedSecurities.securityType == st_value)
 
             # Execute and fetch the scalar result
             total_invested = query.scalar()
@@ -166,7 +169,8 @@ class Base_MSN:
             if user_id:
                 query = query.filter(PurchasedSecurities.userID == user_id)
             if service_type:
-                query = query.filter(PurchasedSecurities.securityType == service_type)
+                st_value = service_type.value if hasattr(service_type, 'value') else service_type
+                query = query.filter(PurchasedSecurities.securityType == st_value)
             investment_history = query.all()
 
             result_json = [
@@ -217,9 +221,10 @@ class Base_MSN:
             return None
 
     def getSecurityCount(self, userId, investment_type):
+        type_value = investment_type.value if hasattr(investment_type, 'value') else investment_type
         active_securities = self.db.session.query(PurchasedSecurities).filter(
             PurchasedSecurities.buyQuant > 0,
-            PurchasedSecurities.securityType == investment_type,
+            PurchasedSecurities.securityType == type_value,
             PurchasedSecurities.userID == userId  # Filter by userID
         ).all()
 
@@ -424,7 +429,7 @@ class Base_MSN:
                 .join(PurchasedSecurities, SecurityTransactions.buyId == PurchasedSecurities.buyID)
                 .filter(
                     SecurityTransactions.userID == user_id,
-                    SecurityTransactions.securityType == security_type
+                    SecurityTransactions.securityType == (security_type.value if hasattr(security_type, 'value') else security_type)
                 )
                 .order_by(SecurityTransactions.date.desc())  # Most recent transactions first
                 .all()
@@ -456,7 +461,7 @@ class Base_MSN:
                 self.db.session.query(SoldSecurities, PurchasedSecurities)
                 .join(PurchasedSecurities, SoldSecurities.buyID == PurchasedSecurities.buyID)
                 .filter(
-                    PurchasedSecurities.securityType == security_type,
+                    PurchasedSecurities.securityType == (security_type.value if hasattr(security_type, 'value') else security_type),
                     PurchasedSecurities.userID == user_id,
                     SoldSecurities.source_type == 'purchased'
                 )

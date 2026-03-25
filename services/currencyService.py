@@ -79,8 +79,8 @@ class CurrencyService:
             if not isinstance(cache, dict) or 'rates' not in cache:
                 self.logger.warning("Cache structure invalid, reinitializing")
                 self._write_empty_cache()
-        except:
-            self.logger.warning("Cache file corrupted, reinitializing") 
+        except Exception:
+            self.logger.warning("Cache file corrupted, reinitializing")
             self._write_empty_cache()
 
     def _read_cache_safely(self):

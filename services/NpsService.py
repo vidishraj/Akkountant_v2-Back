@@ -97,6 +97,7 @@ class NPSService(Base_MSN, ABC):
             # Insert into SoldSecurities
             new_sale = SoldSecurities(
                 buyID=purchase.buyID,
+                source_type='purchased',
                 date=date,
                 sellQuant=sell_data['sellQuant'],
                 sellPrice=sell_data['sellPrice'],

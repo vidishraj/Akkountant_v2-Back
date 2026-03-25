@@ -80,28 +80,6 @@ class EPFStatementParser(BaseParser, ABC):
                     
                     self.pending_contribution_row = None
                 
-                # NOTE: Interest handling commented out - application calculates interest automatically
-                # # Check if we have a pending interest from previous page
-                # if self.pending_interest_row is not None:
-                #     # Check if first row is a date that matches the pending interest
-                #     first_row = table.iloc[0] if len(table) > 0 else None
-                #     if first_row is not None and self.is_valid_date_format_ddmmyyyy(str(first_row.iloc[0]).strip()):
-                #         date = str(first_row.iloc[0]).strip()
-                #         
-                #         emp_interest = float(str(self.pending_interest_row.iloc[1]).replace(',', '').replace('NaN', '0')) if pd.notna(self.pending_interest_row.iloc[1]) else 0
-                #         employer_interest = float(str(self.pending_interest_row.iloc[2]).replace(',', '').replace('NaN', '0')) if pd.notna(self.pending_interest_row.iloc[2]) else 0
-                #         
-                #         if emp_interest > 0 or employer_interest > 0:
-                #             self._transactionList.append({
-                #                 'date': date,
-                #                 'description': f'Interest Updated upto {date}',
-                #                 'employee_interest': emp_interest,
-                #                 'employer_interest': employer_interest,
-                #                 'amount': emp_interest + employer_interest
-                #             })
-                #     
-                #     self.pending_interest_row = None
-                
                 for innerIndex, row in table.iterrows():
                     # Stop processing when we hit 'Grand Total'
                     if 'Grand Total' in str(row.iloc[0]):
@@ -243,28 +221,6 @@ class EPFStatementParser(BaseParser, ABC):
                             })
                     
                     self.pending_contribution_row = None
-                
-                # NOTE: Interest handling commented out - application calculates interest automatically
-                # # Check if we have a pending interest from previous page
-                # if self.pending_interest_row is not None:
-                #     # Check if first row is a date that matches the pending interest
-                #     first_row = table.iloc[0] if len(table) > 0 else None
-                #     if first_row is not None and self.is_valid_date_format_ddmmyyyy(str(first_row.iloc[0]).strip()):
-                #         date = str(first_row.iloc[0]).strip()
-                #         
-                #         emp_interest = float(str(self.pending_interest_row.iloc[1]).replace(',', '').replace('NaN', '0')) if pd.notna(self.pending_interest_row.iloc[1]) else 0
-                #         employer_interest = float(str(self.pending_interest_row.iloc[2]).replace(',', '').replace('NaN', '0')) if pd.notna(self.pending_interest_row.iloc[2]) else 0
-                #         
-                #         if emp_interest > 0 or employer_interest > 0:
-                #             self._transactionList.append({
-                #                 'date': date,
-                #                 'description': f'Interest Updated upto {date}',
-                #                 'employee_interest': emp_interest,
-                #                 'employer_interest': employer_interest,
-                #                 'amount': emp_interest + employer_interest
-                #             })
-                #     
-                #     self.pending_interest_row = None
                 
                 for innerIndex, row in table.iterrows():
                     # Look for contribution entries with month/year pattern (MMYYYY)

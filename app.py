@@ -24,7 +24,8 @@ from controllers.jobsEP import JobsController
 from controllers.agentEP import AgentController
 from controllers.customerEmailEP import CustomerEmailController
 from controllers.fileStorageEP import FileStorageController
-from temp.controllers.job_email_controller import JobEmailController
+from controllers.jobEmailEP import JobEmailController
+from controllers.portfolioVisitorEP import PortfolioVisitorController
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -39,9 +40,10 @@ from services.paymentService import PaymentService
 from services.customFieldService import CustomFieldService
 from services.customerEmailService import CustomerEmailService
 from services.fileStorageService import FileStorageService
-from temp.services.job_email_service import JobEmailService
+from services.jobEmailService import JobEmailService
 from services.agentService import AgentService
 from services.cronAgent import CronAgent
+from services.portfolioVisitorService import PortfolioVisitorService
 from services.mailProcessorService import MailProcessorService
 from services.reconciliationService import ReconciliationService
 from services.tasks.checkMailUnifiedTask import CheckMailUnifiedTask
@@ -198,6 +200,8 @@ class Akkountant(Flask):
             mail_processor=self.mailProcessor,
         )
         self.agentEP = AgentController(self.agentService)
+        self.portfolioVisitorService = PortfolioVisitorService()
+        self.portfolioVisitorEP = PortfolioVisitorController(self.portfolioVisitorService)
 
     def _setup_schedulers(self):
         """Set up background tasks: TaskScheduler (worker) + CronAgent (brain)."""
@@ -424,6 +428,12 @@ class Akkountant(Flask):
             ('/folders/<folderId>', 'DELETE', self.fileStorageEP.delete_folder),
         ]
 
+        # Portfolio visitor tracking endpoints
+        portfolioRoutes = [
+            ('/portfolio/visitors', 'GET', self.portfolioVisitorEP.get_visitors),
+            ('/portfolio/stats', 'GET', self.portfolioVisitorEP.get_stats),
+        ]
+
         # Agent chat endpoint
         agentRoutes = [
             ('/agent/chat', 'POST', self.agentEP.chat),
@@ -440,6 +450,7 @@ class Akkountant(Flask):
             *signatureRoutes,
             *jobsRoutes,
             *jobEmailRoutes,
+            *portfolioRoutes,
             *agentRoutes,
             *fileStorageRoutes,
         ]
