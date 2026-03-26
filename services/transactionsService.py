@@ -234,8 +234,10 @@ class TransactionService(BaseService):
                 
                 # For email-based transactions, get the Gmail message ID
                 gmail_message_id = None
-                if source_emails and i < len(source_emails) and source == TransactionTypeEnum.Email.value:
-                    gmail_message_id = source_emails[i].get('message_id')
+                if source_emails and source == TransactionTypeEnum.Email.value:
+                    # Use per-transaction email if available, otherwise fall back to first (batch from single email)
+                    email_entry = source_emails[i] if i < len(source_emails) else source_emails[0]
+                    gmail_message_id = email_entry.get('message_id')
                 
                 transaction_obj = Transactions(
                     referenceID=transaction['reference'],

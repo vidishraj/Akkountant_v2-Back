@@ -317,9 +317,10 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
             f"  TXN[{idx}] date={txn['date']} amt={txn['amount']} "
             f"desc={txn['description'][:100]}"
         )
+    source_emails = [{"message_id": gmail_id}] if gmail_id else None
     errors = transaction_service.insertTransactions(
         transactions, bank, user_id, [],
-        source, fileId=file_id,
+        source, fileId=file_id, source_emails=source_emails,
     )
 
     inserted = len(transactions) - errors
