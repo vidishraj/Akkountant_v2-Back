@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, ForeignKey, Enum, UniqueConstraint, Index
+from sqlalchemy import Column, String, DateTime, ForeignKey, Enum, UniqueConstraint, Index
 from models.Base import Base
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import DECIMAL as Decimal
@@ -14,7 +14,7 @@ class Transactions(Base):
     __tablename__ = 'transactions'
 
     referenceID = Column(String(64), primary_key=True, nullable=False)
-    date = Column(Date, nullable=False)
+    date = Column(DateTime, nullable=False)
     details = Column(String(500), nullable=False)
     amount = Column(Decimal(10, 2), nullable=False)
     tag = Column(String(100))

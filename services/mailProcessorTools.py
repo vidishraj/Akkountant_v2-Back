@@ -13,7 +13,7 @@ MAIL_PROCESSOR_TOOLS = [
             "properties": {
                 "date": {
                     "type": "string",
-                    "description": "Transaction date in DD/MM/YYYY or DD-MM-YYYY format"
+                    "description": "Transaction date and time. Include time if available in the email (e.g. DD/MM/YYYY HH:MM:SS or DD-MM-YYYY HH:MM). If only date is available, use DD/MM/YYYY or DD-MM-YYYY."
                 },
                 "description": {
                     "type": "string",
@@ -51,7 +51,7 @@ MAIL_PROCESSOR_TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "date": {"type": "string", "description": "DD/MM/YYYY or DD-MM-YYYY"},
+                            "date": {"type": "string", "description": "DD/MM/YYYY HH:MM:SS or DD-MM-YYYY HH:MM. If only date available, DD/MM/YYYY or DD-MM-YYYY."},
                             "description": {"type": "string"},
                             "amount": {"type": "number", "description": "Positive=debit, negative=credit"},
                             "bank": {"type": "string"},

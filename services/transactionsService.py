@@ -174,7 +174,7 @@ class TransactionService(BaseService):
         from models.statementPeriods import StatementPeriod
 
         transaction_query = (
-            self.db.session.query(Transactions.date)
+            self.db.session.query(func.date(Transactions.date).label('txn_date'))
             .filter(Transactions.date.between(date_from, date_to))
         )
         if user_id:
@@ -199,7 +199,7 @@ class TransactionService(BaseService):
             period_query = period_query.filter(StatementPeriod.user == user_id)
         period_query = period_query.all()
 
-        transaction_dates = [t[0].strftime("%Y-%m-%d") for t in transaction_query]
+        transaction_dates = [t[0].strftime("%Y-%m-%d") if hasattr(t[0], 'strftime') else str(t[0]) for t in transaction_query]
         statement_dates = [s[0].strftime("%Y-%m-%d") for s in statement_query]
         covered_periods = [{
             "bank": p.bank,

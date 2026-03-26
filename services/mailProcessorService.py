@@ -608,8 +608,16 @@ class MailProcessorService:
         # Build the email content for the prompt
         email_content = self._format_emails_for_prompt(emails)
 
+        # Build lookup map: gmail_id -> email metadata so the tool handler
+        # can auto-inject the authoritative timestamp and gmail_message_id
+        email_lookup = {}
+        for email in emails:
+            gid = email.get('gmail_id')
+            if gid:
+                email_lookup[gid] = email
+
         # Build MCP tools
-        sdk_tools = self._build_sdk_tools(user_id)
+        sdk_tools = self._build_sdk_tools(user_id, email_lookup=email_lookup)
         mcp_server = create_sdk_mcp_server(
             name=MCP_SERVER_NAME,
             tools=sdk_tools,
@@ -2014,7 +2022,7 @@ class MailProcessorService:
 
     # ── MCP tool building ──────────────────────────────────────────────
 
-    def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None):
+    def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None, email_lookup=None):
         """Build SdkMcpTool objects for the mail processor agent.
 
         Args:
@@ -2022,6 +2030,9 @@ class MailProcessorService:
                 so the agent doesn't try to read beyond its assigned chunk.
             insert_called: If provided, a dict with key "value" that gets set to
                 True when insert_batch_transactions is called.
+            email_lookup: If provided, a dict mapping gmail_id -> email metadata.
+                Used to auto-inject gmail_message_id and email timestamp into
+                insert_transaction calls instead of relying on Claude.
         """
         sdk_tools = []
 
@@ -2029,6 +2040,20 @@ class MailProcessorService:
             tool_name = tool_def["name"]
 
             async def handler(args, _tn=tool_name):
+                # Auto-inject email metadata for insert_transaction calls.
+                # Claude passes gmail_message_id from the email; we use it to
+                # look up the authoritative timestamp from the original email
+                # rather than trusting Claude's date extraction.
+                if _tn == "insert_transaction" and email_lookup:
+                    gmail_id = args.get("gmail_message_id")
+                    if gmail_id and gmail_id in email_lookup:
+                        email_meta = email_lookup[gmail_id]
+                        email_time = email_meta.get("time")
+                        if email_time:
+                            args["date"] = email_time
+                        # Ensure gmail_message_id is always set
+                        args["gmail_message_id"] = gmail_id
+
                 # Track insert_batch_transactions calls
                 if _tn == "insert_batch_transactions" and insert_called is not None:
                     insert_called["value"] = True

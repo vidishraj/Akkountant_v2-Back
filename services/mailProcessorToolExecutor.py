@@ -141,7 +141,46 @@ def execute_mail_tool(tool_name, tool_input, user_id,
 
 def _handle_insert_transaction(args, user_id, transaction_service):
     """Insert a single transaction from an email alert."""
+    from models.transactions import Transactions
+
     generic = GenericUtil()
+    bank = args.get("bank", "UNKNOWN")
+    source = args.get("source", "Email")
+
+    # Deduplicate email-sourced transactions: banks send multiple emails for the
+    # same transaction (debit alert + UPI confirmation + SI notice). Each email
+    # has different wording, producing different referenceIDs. Check if a
+    # transaction with the same date, amount, and bank already exists.
+    if source == "Email":
+        session = _get_db_session(transaction_service)
+        if session:
+            try:
+                parsed_date = transaction_service.dateTimeUtil.convert_to_sql_datetime(
+                    args["date"], bank
+                )
+                amount_val = round(float(args["amount"]), 2)
+                existing = session.query(Transactions).filter(
+                    Transactions.user == user_id,
+                    Transactions.date == parsed_date,
+                    Transactions.amount == amount_val,
+                    Transactions.bank == bank,
+                    Transactions.source == TransactionTypeEnum.Email.value,
+                ).first()
+                if existing:
+                    logger.info(
+                        f"Email dedup: skipping duplicate for {bank} on {parsed_date} "
+                        f"amount={amount_val} (existing ref={existing.referenceID}, "
+                        f"desc='{existing.details[:50]}')"
+                    )
+                    return {
+                        "result": "duplicate",
+                        "inserted": 0,
+                        "duplicates": 1,
+                        "message": f"Transaction already exists: {existing.details[:80]}",
+                    }
+            except Exception as e:
+                logger.warning(f"Email dedup check failed, proceeding with insert: {e}")
+
     ref_id = generic.generate_reference_id(
         args["date"], args["description"], args["amount"]
     )
@@ -153,8 +192,6 @@ def _handle_insert_transaction(args, user_id, transaction_service):
         "processed_via": "CLAUDE_CODE",
     }]
 
-    bank = args.get("bank", "UNKNOWN")
-    source = args.get("source", "Email")
     gmail_id = args.get("gmail_message_id")
 
     # Build source_emails list for gmail_message_id tracking
