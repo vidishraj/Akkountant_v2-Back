@@ -281,6 +281,7 @@ class Akkountant(Flask):
             ('/fetchOptedBanks', 'GET', self.transactionEP.fetchOptedBanks),
             ('/calendarTransactions', 'POST', self.transactionEP.fetchCalendarTransactions),
             ('/readEmails', 'GET', self.transactionEP.triggerEmailCheck),
+            ('/readEmails/status', 'GET', self.transactionEP.getEmailScanStatus),
             ('/readStatements', 'GET', self.transactionEP.triggerStatementCheck),
             ('/getFileDetails', 'POST', self.transactionEP.fetchFileDetails),
             ('/getGoogleStatus', 'GET', self.transactionEP.checkGoogleApiStatus),

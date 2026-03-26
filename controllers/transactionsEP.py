@@ -1,15 +1,21 @@
+import threading
+import uuid
 from datetime import datetime
 from enums.BanksEnum import BankEnums
 from enums.ServiceTypeEnum import ServiceTypeEnum
 from services.transactionsService import TransactionService
 from utils.logger import Logger
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 
 from flask import g
 
 
 class TransactionController:
     TransactionService: TransactionService
+
+    # In-memory scan progress tracker: scan_id -> progress dict
+    _scans = {}
+    _scans_lock = threading.Lock()
 
     def __init__(self, transactionService, mail_processor=None, reconciliation_service=None):
         self.TransactionService = transactionService
@@ -96,15 +102,84 @@ class TransactionController:
 
     @Logger.standardLogger
     def triggerEmailCheck(self):
-        """Legacy endpoint — now redirects to unified mail processing pipeline."""
+        """Trigger async email scan — returns scan_id immediately."""
         userId = request.headers.get("X-Firebase-ID")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
-        self.logger.info(f"Reading email for user {userId} via unified pipeline")
+        processing_mode = request.args.get('processing_mode', 'image')
+        self.logger.info(f"Triggering async email scan for user {userId} ({dateFrom} to {dateTo})")
+
         if not self.mail_processor:
             return jsonify({"error": "Mail processor not configured"}), 500
-        result = self.mail_processor.process_emails(userId, dateFrom, dateTo)
-        return jsonify({"Message": result}), 200
+
+        scan_id = str(uuid.uuid4())[:8]
+        progress = {
+            "status": "started",
+            "stage": "initializing",
+            "total_emails_fetched": 0,
+            "emails_classified": 0,
+            "text_emails_processed": 0,
+            "pdf_emails_processed": 0,
+            "text_emails_total": 0,
+            "pdf_emails_total": 0,
+            "pre_skipped": 0,
+            "errors": [],
+            "result": None,
+        }
+
+        with self._scans_lock:
+            self._scans[scan_id] = progress
+
+        flask_app = current_app._get_current_object()
+
+        def run_scan():
+            try:
+                with flask_app.app_context():
+                    g.db = flask_app.extensions.get("sqlalchemy")
+                    g.firebase_id = userId
+
+                    def on_progress(update):
+                        with self._scans_lock:
+                            self._scans[scan_id].update(update)
+
+                    result = self.mail_processor.process_emails(
+                        userId, dateFrom, dateTo, processing_mode,
+                        progress_callback=on_progress,
+                    )
+                    with self._scans_lock:
+                        self._scans[scan_id].update({
+                            "status": "completed",
+                            "stage": "done",
+                            "result": result,
+                        })
+            except Exception as e:
+                self.logger.error(f"Async scan {scan_id} failed: {e}", exc_info=True)
+                with self._scans_lock:
+                    self._scans[scan_id].update({
+                        "status": "failed",
+                        "stage": "error",
+                        "errors": [str(e)],
+                    })
+
+        thread = threading.Thread(target=run_scan, daemon=True)
+        thread.start()
+
+        return jsonify({"scan_id": scan_id, "status": "started"}), 202
+
+    @Logger.standardLogger
+    def getEmailScanStatus(self):
+        """GET /readEmails/status?scan_id=xxx — Poll scan progress."""
+        scan_id = request.args.get('scan_id')
+        if not scan_id:
+            return jsonify({"error": "scan_id is required"}), 400
+
+        with self._scans_lock:
+            progress = self._scans.get(scan_id)
+
+        if not progress:
+            return jsonify({"error": "Scan not found"}), 404
+
+        return jsonify(progress), 200
 
     @Logger.standardLogger
     def triggerStatementCheck(self):

@@ -224,11 +224,13 @@ class MailProcessorService:
             "processing_mode": processing_mode,
         }
 
-    def process_emails(self, user_id, date_from, date_to, processing_mode="image"):
+    def process_emails(self, user_id, date_from, date_to, processing_mode="image",
+                       progress_callback=None):
         """
         Main entry point. Fetches emails, filters, and processes.
         Returns a summary dict with counts of processed items.
         processing_mode: "image" (vision-based) or "text" (text extraction)
+        progress_callback: optional callable(dict) to report progress updates
         """
         summary = {
             "total_emails_fetched": 0,
@@ -238,8 +240,16 @@ class MailProcessorService:
             "errors": [],
         }
 
+        def report(update):
+            if progress_callback:
+                try:
+                    progress_callback(update)
+                except Exception:
+                    pass
+
         try:
             # 1. Fetch Gmail token
+            report({"stage": "fetching_emails", "status": "processing"})
             token = self.transaction_service.fetchGmailTokenForUser(user_id)
 
             # 2. Fetch all emails in range
@@ -247,6 +257,7 @@ class MailProcessorService:
             all_emails = list(gmail_svc.findAllEmailsInInterval(user_id, token, date_from, date_to))
             summary["total_emails_fetched"] = len(all_emails)
             self.logger.info(f"Fetched {len(all_emails)} emails for {date_from} to {date_to}")
+            report({"stage": "fetched_emails", "total_emails_fetched": len(all_emails)})
 
             # 2.5 Pre-filter: skip emails already processed (before classification)
             unprocessed = self._filter_already_processed(all_emails, user_id)
@@ -254,15 +265,18 @@ class MailProcessorService:
             if pre_skipped > 0:
                 self.logger.info(f"Pre-filter: skipped {pre_skipped} already-processed emails, {len(unprocessed)} remaining")
                 summary["pre_skipped"] = pre_skipped
+            report({"pre_skipped": pre_skipped})
 
             if not unprocessed:
                 self.logger.info("All emails already processed, nothing to classify")
                 return summary
 
             # 3. Classify remaining emails via Claude (Agent-1)
+            report({"stage": "classifying", "status": "processing"})
             financial_emails = self._classify_emails(unprocessed)
             summary["financial_emails"] = len(financial_emails)
             self.logger.info(f"Agent-1 classified {len(financial_emails)} financial emails")
+            report({"stage": "classified", "emails_classified": len(financial_emails)})
 
             # 3.1 Save classified emails to disk
             self._save_emails_to_disk(financial_emails, user_id, date_from, date_to)
@@ -274,16 +288,24 @@ class MailProcessorService:
             # 4. Separate emails with PDF attachments from text-only
             text_emails, pdf_emails = self._separate_emails(financial_emails, user_id, token)
             self.logger.info(f"Split: {len(text_emails)} text emails, {len(pdf_emails)} PDF emails")
+            report({
+                "stage": "processing_emails",
+                "text_emails_total": len(text_emails),
+                "pdf_emails_total": len(pdf_emails),
+            })
 
             # 5. Process text emails in batches
             if text_emails:
                 text_count = self._process_text_emails_batch(text_emails, user_id)
                 summary["text_emails_processed"] = text_count
+                report({"text_emails_processed": text_count})
 
             # 6. Process PDF emails individually
             if pdf_emails:
-                pdf_count = self._process_pdf_emails(pdf_emails, user_id, processing_mode)
+                pdf_count = self._process_pdf_emails(pdf_emails, user_id, processing_mode,
+                                                     progress_callback=progress_callback)
                 summary["pdf_emails_processed"] = pdf_count
+                report({"pdf_emails_processed": pdf_count})
 
         except Exception as e:
             self.logger.error(f"Mail processing pipeline error: {e}", exc_info=True)
@@ -700,14 +722,23 @@ class MailProcessorService:
 
     # ── PDF email processing ───────────────────────────────────────────
 
-    def _process_pdf_emails(self, emails, user_id, processing_mode="image"):
+    def _process_pdf_emails(self, emails, user_id, processing_mode="image",
+                            progress_callback=None):
         """Process emails with PDF attachments individually using Claude."""
         total_processed = 0
 
-        for email in emails:
+        for i, email in enumerate(emails):
             try:
                 self._process_single_pdf_email(email, user_id, processing_mode)
                 total_processed += 1
+                if progress_callback:
+                    try:
+                        progress_callback({
+                            "pdf_emails_processed": total_processed,
+                            "stage": f"processing_pdf ({total_processed}/{len(emails)})",
+                        })
+                    except Exception:
+                        pass
             except Exception as e:
                 self.logger.error(
                     f"Error processing PDF email {email.get('gmail_id', 'unknown')}: {e}",
