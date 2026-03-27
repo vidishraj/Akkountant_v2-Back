@@ -46,12 +46,14 @@ class PortfolioVisitorService:
         backfill_count = total - live_count
 
         # Unique visitors per day (last 30 days)
+        # Convert UTC visited_at to IST (+05:30) before grouping by date
+        ist_date = func.date(func.convert_tz(PortfolioVisitor.visited_at, '+00:00', '+05:30'))
         daily_query = session.query(
-            func.date(PortfolioVisitor.visited_at).label('day'),
+            ist_date.label('day'),
             func.count(distinct(PortfolioVisitor.ip)).label('unique_visitors'),
             func.count(PortfolioVisitor.id).label('total_visits'),
         ).group_by(
-            func.date(PortfolioVisitor.visited_at)
+            ist_date
         ).order_by(
             text('day DESC')
         ).limit(30).all()
