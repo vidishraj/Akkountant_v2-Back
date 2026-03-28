@@ -47,7 +47,8 @@ class PortfolioVisitorService:
 
         # Unique visitors per day (last 30 days)
         # Convert UTC visited_at to IST (+05:30) before grouping by date
-        ist_date = func.date(func.convert_tz(PortfolioVisitor.visited_at, '+00:00', '+05:30'))
+        # Use ADDTIME instead of CONVERT_TZ to avoid needing MySQL timezone tables
+        ist_date = func.date(func.addtime(PortfolioVisitor.visited_at, text("'05:30:00'")))
         daily_query = session.query(
             ist_date.label('day'),
             func.count(distinct(PortfolioVisitor.ip)).label('unique_visitors'),
