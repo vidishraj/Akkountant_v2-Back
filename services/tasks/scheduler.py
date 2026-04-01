@@ -50,6 +50,7 @@ class TaskScheduler:
             session.close()
 
     def _process_pending_and_overdue_jobs(self):
+        from utils.DateTimeUtil import clamp_to_allowed_window
         session = self.Session()
         try:
             self.logger.info("Processing pending and overdue jobs...")
@@ -57,7 +58,23 @@ class TaskScheduler:
                 Job.status.in_([JobStatus.OVERDUE.value])
             ).all()
 
+            # Deduplicate: only process one job per title (pick the oldest)
+            seen_titles = set()
+            deduplicated = []
+            duplicates = []
             for job in jobs_to_process:
+                if job.title in seen_titles:
+                    duplicates.append(job)
+                else:
+                    seen_titles.add(job.title)
+                    deduplicated.append(job)
+
+            # Mark duplicate overdue jobs as completed to prevent re-processing
+            for dup in duplicates:
+                dup.status = JobStatus.COMPLETED.value
+                dup.result = "Skipped (duplicate)"
+
+            for job in deduplicated:
                 self.logger.info(f"Processing job: {job.title} (ID: {job.id})")
 
                 task_class = self._get_task_class(job.title)
@@ -82,19 +99,27 @@ class TaskScheduler:
                     job.failures = 0
 
                 if interval and job.failures < 10:
-                    from utils.DateTimeUtil import clamp_to_allowed_window
-                    raw_due = datetime.now() + timedelta(minutes=interval)
-                    clamped_due = clamp_to_allowed_window(raw_due)
-                    new_job = Job(
-                        title=job.title,
-                        priority=job.priority,
-                        status=JobStatus.PENDING.value,
-                        due_date=clamped_due,
-                        user_id=job.user_id,
-                        failures=0 if status != JobStatus.FAILED.value else job.failures
-                    )
-                    session.add(new_job)
-                session.commit()
+                    # Only create next job if no Pending one already exists for this title
+                    existing_pending = session.query(Job).filter(
+                        Job.title == job.title,
+                        Job.status == JobStatus.PENDING.value
+                    ).first()
+                    if not existing_pending:
+                        raw_due = datetime.now() + timedelta(minutes=interval)
+                        clamped_due = clamp_to_allowed_window(raw_due)
+                        new_job = Job(
+                            title=job.title,
+                            priority=job.priority,
+                            status=JobStatus.PENDING.value,
+                            due_date=clamped_due,
+                            user_id=job.user_id,
+                            failures=0 if status != JobStatus.FAILED.value else job.failures
+                        )
+                        session.add(new_job)
+
+            session.commit()
+            if duplicates:
+                self.logger.info(f"Cleaned up {len(duplicates)} duplicate overdue jobs")
         except Exception as e:
             self.logger.error(f"Error processing jobs: {e}")
             session.rollback()
