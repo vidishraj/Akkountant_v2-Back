@@ -25,6 +25,28 @@ def seconds_until_allowed_window():
         target += datetime.timedelta(days=1)
     return (target - now_ist).total_seconds()
 
+
+def clamp_to_allowed_window(dt):
+    """Clamp a naive datetime so it falls within the 1-7AM IST window.
+    If the datetime already falls inside the window, return it unchanged.
+    Otherwise, move it forward to 1:00 AM IST on the appropriate day."""
+    ist_dt = dt.replace(tzinfo=None)  # treat as UTC-naive for comparison
+    # Convert to IST for hour check
+    ist_aware = dt.replace(tzinfo=ZoneInfo("UTC")) if dt.tzinfo is None else dt
+    ist_time = ist_aware.astimezone(IST)
+
+    if 1 <= ist_time.hour < 7:
+        return dt
+
+    # Move to next 1AM IST
+    target_ist = ist_time.replace(hour=1, minute=0, second=0, microsecond=0)
+    if ist_time.hour >= 7:
+        target_ist += datetime.timedelta(days=1)
+
+    # Convert back to naive UTC for storage
+    target_utc = target_ist.astimezone(ZoneInfo("UTC"))
+    return target_utc.replace(tzinfo=None)
+
 datetime_formats = [
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",

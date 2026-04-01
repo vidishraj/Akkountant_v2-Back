@@ -509,11 +509,12 @@ class InvestmentService(BaseService):
         ).first()
         if existing:
             return jsonify({"Error": f"Job '{jobId}' is already queued (status: {existing.status})"}), 409
+        from utils.DateTimeUtil import clamp_to_allowed_window
         newJob = Jobs.Job(
                 title=jobId,
                 status="Pending",
                 priority="High",
-                due_date=datetime.datetime.now(),
+                due_date=clamp_to_allowed_window(datetime.datetime.now()),
                 user_id=user_id,
                 result=None,
         )

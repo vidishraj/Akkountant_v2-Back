@@ -257,12 +257,13 @@ class Akkountant(Flask):
             if existing_job:
                 return False  # Job already exists
 
-            # Insert a new job
+            # Insert a new job, clamped to the 1-7AM IST window
+            from utils.DateTimeUtil import clamp_to_allowed_window
             new_job = models.Job(
                 title=title,
                 status=status,
                 priority=priority,
-                due_date=due_date,
+                due_date=clamp_to_allowed_window(due_date),
                 user_id=user_id,
                 result=None,
             )

@@ -82,11 +82,14 @@ class TaskScheduler:
                     job.failures = 0
 
                 if interval and job.failures < 10:
+                    from utils.DateTimeUtil import clamp_to_allowed_window
+                    raw_due = datetime.now() + timedelta(minutes=interval)
+                    clamped_due = clamp_to_allowed_window(raw_due)
                     new_job = Job(
                         title=job.title,
                         priority=job.priority,
                         status=JobStatus.PENDING.value,
-                        due_date=datetime.now() + timedelta(minutes=interval),
+                        due_date=clamped_due,
                         user_id=job.user_id,
                         failures=0 if status != JobStatus.FAILED.value else job.failures
                     )
