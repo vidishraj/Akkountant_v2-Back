@@ -204,19 +204,24 @@ class Akkountant(Flask):
         self.portfolioVisitorEP = PortfolioVisitorController(self.portfolioVisitorService)
 
     def _setup_schedulers(self):
-        """Set up background tasks: TaskScheduler (worker) + CronAgent (brain)."""
+        """Set up background daemon threads (CronAgent, mail, snapshots).
+        TaskScheduler is run separately via schedular.service.
+        Uses a file lock so only one gunicorn worker starts these threads."""
         if os.getenv('ENV') == 'LOCAL':
             self.logger.info("Skipping schedulers in LOCAL environment.")
             return
+
+        lock_path = '/tmp/akkountant_scheduler.lock'
+        try:
+            self._scheduler_lock_fd = open(lock_path, 'w')
+            import fcntl
+            fcntl.flock(self._scheduler_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
+            self.logger.info("Another worker owns the scheduler lock, skipping daemon threads.")
+            return
+
         with self.app_context():
-            db_url = os.getenv('DATABASE_URL')
-
-            # 1. Start TaskScheduler (processes queued jobs)
-            self.scheduler = TaskScheduler(db_url, flask_app=self)
-            self.scheduler.start_scheduler()
-            self.logger.info("TaskScheduler started.")
-
-            # 2. Start CronAgent (AI decides what to refresh)
+            # 1. Start CronAgent (AI decides what to refresh)
             self.cron_agent = CronAgent(
                 flask_app=self,
                 investment_service=self.investmentService,
@@ -225,7 +230,7 @@ class Akkountant(Flask):
             self.cron_agent.start()
             self.logger.info("CronAgent started (30-min interval).")
 
-            # 3. Start CheckMailUnifiedTask (AI email processing)
+            # 2. Start CheckMailUnifiedTask (AI email processing)
             self.mail_cron = CheckMailUnifiedTask(
                 flask_app=self,
                 mail_processor=self.mailProcessor,
@@ -234,7 +239,7 @@ class Akkountant(Flask):
             self.mail_cron.start()
             self.logger.info("CheckMailUnifiedTask started (1-hour interval).")
 
-            # 4. Start InvestmentSnapshotTask (daily at 11PM IST)
+            # 3. Start InvestmentSnapshotTask (daily at 11PM IST)
             from services.tasks.investmentSnapshotTask import InvestmentSnapshotTask
             self.snapshot_task = InvestmentSnapshotTask(
                 flask_app=self,
