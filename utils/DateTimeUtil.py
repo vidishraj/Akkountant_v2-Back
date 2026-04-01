@@ -1,7 +1,29 @@
 import datetime
+from zoneinfo import ZoneInfo
 
 from dateutil.relativedelta import relativedelta
 from enums.DateFormatEnum import DateStatementEnum
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def is_within_allowed_window():
+    """Check if current IST time is between 1:00 AM and 7:00 AM.
+    All Claude-consuming jobs must only run within this window."""
+    now_ist = datetime.datetime.now(IST)
+    return 1 <= now_ist.hour < 7
+
+
+def seconds_until_allowed_window():
+    """Return seconds until the next 1:00 AM IST window opens.
+    Returns 0 if already inside the window."""
+    now_ist = datetime.datetime.now(IST)
+    if 1 <= now_ist.hour < 7:
+        return 0
+    target = now_ist.replace(hour=1, minute=0, second=0, microsecond=0)
+    if now_ist.hour >= 7:
+        target += datetime.timedelta(days=1)
+    return (target - now_ist).total_seconds()
 
 datetime_formats = [
     "%Y-%m-%d %H:%M:%S",

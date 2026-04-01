@@ -136,11 +136,17 @@ class TaskScheduler:
                     self.logger.error(f"Error in overdue scheduler: {e}")
 
     def _run_job_processor(self):
+        from utils.DateTimeUtil import is_within_allowed_window, seconds_until_allowed_window
         with self.flask_app.app_context():
             while True:
                 try:
-                    self._process_pending_and_overdue_jobs()
-                    time.sleep(300)
+                    if is_within_allowed_window():
+                        self._process_pending_and_overdue_jobs()
+                        time.sleep(300)
+                    else:
+                        wait = seconds_until_allowed_window()
+                        self.logger.info(f"Outside 1-7AM IST window, sleeping {wait/3600:.1f}h")
+                        time.sleep(wait)
                 except Exception as e:
                     self.logger.error(f"Error in job processor: {e}")
 

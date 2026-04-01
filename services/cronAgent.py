@@ -90,11 +90,20 @@ class CronAgent:
 
     def _run_loop(self):
         """Wait 30 s for Flask to initialize, then run on interval."""
+        from utils.DateTimeUtil import is_within_allowed_window, seconds_until_allowed_window
+
         # Startup delay
         if self._stop_event.wait(timeout=30):
             return
 
         while not self._stop_event.is_set():
+            if not is_within_allowed_window():
+                wait = seconds_until_allowed_window()
+                self.logger.info(f"CronAgent: outside 1-7AM IST window, sleeping {wait/3600:.1f}h")
+                if self._stop_event.wait(timeout=wait):
+                    break
+                continue
+
             try:
                 self._run_once()
             except Exception as e:
