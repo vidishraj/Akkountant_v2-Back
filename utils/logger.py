@@ -1,7 +1,5 @@
 import logging
-import os
 from functools import wraps
-from logging.handlers import TimedRotatingFileHandler
 from flask import jsonify
 
 
@@ -22,27 +20,15 @@ class Logger:
         self._setup_handlers("")
 
     def _setup_handlers(self, log_dir: str):
-        """Set up file handlers for different log levels."""
-        # Creating console handler
+        """Set up handlers for logging."""
+        if self._logger.handlers:
+            return
+
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.DEBUG)
-
-        # Creating formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         console_handler.setFormatter(formatter)
         self._logger.addHandler(console_handler)
-
-        # File handler for pipeline debugging — captures all INFO+ logs
-        log_dir_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
-        if not os.path.exists(log_dir_path):
-            os.makedirs(log_dir_path)
-        file_handler = logging.FileHandler(
-            os.path.join(log_dir_path, 'pipeline_debug.log'),
-            mode='a',
-        )
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
-        self._logger.addHandler(file_handler)
 
     @staticmethod
     def standardLogger(func):
