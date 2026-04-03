@@ -18,7 +18,7 @@ try:
 except ImportError:
     Image = None
 
-ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
+ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'zip'}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 THUMBNAIL_SIZE = (200, 200)
 
