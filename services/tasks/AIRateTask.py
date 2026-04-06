@@ -43,7 +43,7 @@ class AIRateTask(BaseTask):
         options = ClaudeAgentOptions(
             model="sonnet",
             system_prompt=system_prompt,
-            max_turns=5,
+            max_turns=8,
             permission_mode="bypassPermissions",
         )
 
