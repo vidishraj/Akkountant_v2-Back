@@ -55,31 +55,15 @@ class SetPPFRate(AIRateTask):
 
     def run(self):
         try:
-            prompt = """Search the web for PPF (Public Provident Fund) interest rate history in India.
-Find when the rate changed and what it changed to, from 1999 onwards.
-
-Return a JSON object listing ONLY the rate change points (NOT monthly entries):
-
-{
-  "periods": [
-    {"from": "1999-04", "rate": 12.0},
-    {"from": "2000-04", "rate": 11.0},
-    {"from": "2001-04", "rate": 9.5},
-    {"from": "2002-04", "rate": 9.0},
-    {"from": "2003-04", "rate": 8.0},
-    ...continue with each rate change...
-    {"from": "2025-04", "rate": 7.1}
-  ]
-}
-
-Rules:
-- "from" is the month the new rate took effect, in "YYYY-MM" format
-- "rate" is a float (e.g. 7.1, not "7.1%")
-- Include every rate change from April 1999 to the current quarter
-- PPF rates are set by the Ministry of Finance, typically quarterly since 2016
-- Before 2016, rates changed annually or less frequently
-- Use official government/RBI sources
-- There should be roughly 20-40 rate change entries total"""
+            prompt = (
+                "Search the web for PPF (Public Provident Fund) interest rate history in India "
+                "from 1999 to present. Find each date when the rate changed and the new rate. "
+                "Return JSON with key \"periods\" containing an array of objects, each with "
+                "\"from\" (YYYY-MM format, the month the rate took effect) and \"rate\" (float, e.g. 7.1). "
+                "Only include rate change points, not monthly entries. "
+                "PPF rates changed annually before 2016, then quarterly. "
+                "There should be roughly 20-40 entries from 1999-04 to the current quarter."
+            )
 
             jsonData = self.fetch_rates_via_ai(prompt)
             if not jsonData or 'periods' not in jsonData or len(jsonData['periods']) == 0:
