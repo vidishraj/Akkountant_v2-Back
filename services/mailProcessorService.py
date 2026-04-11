@@ -787,14 +787,17 @@ class MailProcessorService:
                         pdf_path = unlocked_path
                         password = None  # PDF is now unlocked
                 self._run_pdf_analysis(pdf_path, email, user_id, password, processing_mode)
-            finally:
-                # Persist PDF to permanent storage before cleanup
+
+                # Only persist PDF after successful processing
                 try:
                     persist_path = self._persist_pdf(pdf_path, user_id, email, original_filename)
                     if persist_path:
                         self._update_processed_email_pdf(gmail_id, user_id, persist_path)
                 except Exception as e:
                     self.logger.warning(f"Failed to persist PDF for {gmail_id}: {e}")
+            except Exception as e:
+                self.logger.error(f"PDF analysis failed for {gmail_id}: {e}")
+            finally:
                 # Clean up temp files
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
