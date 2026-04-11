@@ -447,11 +447,11 @@ def _parse_page_range(page_range_str, total_pages):
     return [num] if 1 <= num <= total_pages else []
 
 
-# Max accumulated base64 bytes before stopping — stay well under 1MB SDK buffer.
-# SDK's JSON message buffer is 1,048,576 bytes; JSON envelope adds overhead.
-# With 1-page-per-chunk, a single page at 100 DPI is ~320KB — 600KB leaves
-# plenty of room for JSON envelope and prompt within the 1MB limit.
-_MAX_CONTENT_BYTES = 600_000
+# Max accumulated base64 bytes before stopping — stay under 1MB SDK buffer.
+# SDK's JSON message buffer is 1,048,576 bytes; JSON envelope adds ~50-100KB.
+# With 1-page-per-chunk at fixed 100 DPI, a single page is typically 200-500KB.
+_MAX_CONTENT_BYTES = 900_000
+_RENDER_DPI = 100
 
 
 def _handle_get_pdf_pages(args):
@@ -510,18 +510,10 @@ def _handle_get_pdf_pages(args):
         for pn in requested_pages:
             page = doc[pn - 1]
 
-            # Adaptive DPI: start at 100, fall back to 72 then 50 if page is too large
-            chosen_dpi = 100
-            for dpi in [100, 72, 50]:
-                pix = page.get_pixmap(dpi=dpi)
-                img_data = pix.tobytes("png")
-                b64_data = base64.standard_b64encode(img_data).decode("ascii")
-                chosen_dpi = dpi
-                if len(b64_data) <= _MAX_CONTENT_BYTES:
-                    break
-                logger.info(
-                    f"Page {pn} is {len(b64_data)} bytes at {dpi} DPI, trying lower"
-                )
+            # Fixed DPI rendering — never degrade quality
+            pix = page.get_pixmap(dpi=_RENDER_DPI)
+            img_data = pix.tobytes("png")
+            b64_data = base64.standard_b64encode(img_data).decode("ascii")
 
             # Check if adding this page would exceed the buffer
             if accumulated_bytes > 0 and accumulated_bytes + len(b64_data) > _MAX_CONTENT_BYTES:

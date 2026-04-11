@@ -1421,8 +1421,8 @@ class MailProcessorService:
                     self.logger.info(f"Skipping chunk {chunk_num}: pages {start}-{end}")
                     continue
 
-                # Abort after 2 consecutive chunk failures
-                if consecutive_failures >= 2:
+                # Abort after 5 consecutive chunk failures
+                if consecutive_failures >= 5:
                     failed_chunks.append([start, end])
                     self.logger.warning(
                         f"Skipping chunk {start}-{end} — "
