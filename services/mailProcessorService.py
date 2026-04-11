@@ -1301,6 +1301,34 @@ class MailProcessorService:
         )
         return date_count // 2
 
+    @staticmethod
+    def _pdf_has_usable_text(pdf_path, password=None, min_chars_per_page=100, sample_pages=3):
+        """Check if a PDF has extractable text on its content pages.
+        Samples up to sample_pages pages (skipping page 1 which may be a cover)
+        and checks if average text length exceeds min_chars_per_page."""
+        import fitz as _fitz
+        try:
+            doc = _fitz.open(pdf_path)
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            total = doc.page_count
+            if total == 0:
+                doc.close()
+                return False
+            # Sample pages: try first few content pages
+            pages_to_check = range(0, min(sample_pages, total))
+            total_chars = 0
+            checked = 0
+            for i in pages_to_check:
+                text = doc[i].get_text().strip()
+                total_chars += len(text)
+                checked += 1
+            doc.close()
+            avg = total_chars / max(checked, 1)
+            return avg >= min_chars_per_page
+        except Exception:
+            return False
+
     def _run_pdf_analysis(self, pdf_path, email, user_id, password=None,
                           processing_mode="image", only_chunks=None):
         """Run Claude on a single PDF file via MCP tools.
@@ -1322,6 +1350,11 @@ class MailProcessorService:
             doc.authenticate(password)
         total_pages = doc.page_count
         doc.close()
+
+        # Auto-detect: if PDF has extractable text, prefer text mode
+        if processing_mode == "image" and self._pdf_has_usable_text(pdf_path, password):
+            self.logger.info(f"PDF has usable text layer — auto-switching to text mode")
+            processing_mode = "text"
 
         gmail_id = email.get("gmail_id", "")
 
