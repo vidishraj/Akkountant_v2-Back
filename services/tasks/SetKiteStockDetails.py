@@ -53,33 +53,19 @@ class SetKiteStockDetails(BaseTask):
             
             jsonData = {'data': equity_instruments}
             
+            filePath = os.path.join(self.tmp_dir, 'StockDetails.json')
             try:
-                filePath = os.path.join(self.tmp_dir, 'StockDetails.json')
-                # delete file if it exists
-                try:
-                    os.remove(filePath)
-                except OSError:
-                    pass
-                self.save_json(jsonData, filePath)
+                os.remove(filePath)
+            except OSError:
+                pass
+            self.save_json(jsonData, filePath)
 
-                # get the latest rate file in assets
-                latestFile = self.jsonService.getLatestFile(self.jsonService.listType, self.jsonService.StockListPrefix)
+            ok, err = self.safe_replace_file(filePath, self.jsonService.StockListPrefix, self.jsonService.listType)
+            if not ok:
+                return err, "Failed", self.interval
 
-                latestFilePath = self.jsonService.getFilePath(self.jsonService.StockListPrefix,
-                                                              self.jsonService.listType)
-
-                fileMoved = self.move_file(filePath, latestFilePath)
-
-                if fileMoved:
-                    # delete old file
-                    self.jsonService.deleteFile(latestFile)
-                else:
-                    return 'Failed to move file', "Failed", self.interval
-                    
-                self.logger.info(f"Successfully processed {len(equity_instruments)} equity instruments from Kite")
-                return 'Completed successfully', "Completed", self.interval
-            except Exception as ex:
-                return ex.__str__(), "Failed", self.interval
+            self.logger.info(f"Successfully processed {len(equity_instruments)} equity instruments from Kite")
+            return 'Completed successfully', "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
 

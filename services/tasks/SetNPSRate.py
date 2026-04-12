@@ -28,30 +28,17 @@ class SetNPSRate(BaseTask):
             # Generate NPS rate data from Excel downloads
             jsonData = self.fetchNPSRatesFromExcel()
             
+            filePath = os.path.join(self.tmp_dir, 'NPSRATE.json')
             try:
-                filePath = os.path.join(self.tmp_dir, 'NPSRATE.json')
-                # delete file if it exists
-                try:
-                    os.remove(filePath)
-                except OSError:
-                    pass
-                self.save_json(jsonData, filePath)
+                os.remove(filePath)
+            except OSError:
+                pass
+            self.save_json(jsonData, filePath)
 
-                # get the latest rate file in assets
-                latestFile = self.jsonService.getLatestFile(self.jsonService.ratesType, self.jsonService.NpsRatePrefix)
-
-                latestFilePath = self.jsonService.getFilePath(self.jsonService.NpsRatePrefix, self.jsonService.ratesType)
-
-                fileMoved = self.move_file(filePath, latestFilePath)
-
-                if fileMoved:
-                    # delete old file
-                    self.jsonService.deleteFile(latestFile)
-                else:
-                    return 'Failed to move file', "Failed", self.interval
-                return 'Completed successfully', "Completed", self.interval
-            except Exception as ex:
-                return ex.__str__(), "Failed", self.interval
+            ok, err = self.safe_replace_file(filePath, self.jsonService.NpsRatePrefix, self.jsonService.ratesType)
+            if not ok:
+                return err, "Failed", self.interval
+            return 'Completed successfully', "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
 

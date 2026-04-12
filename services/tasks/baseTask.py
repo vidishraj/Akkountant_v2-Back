@@ -106,3 +106,21 @@ class BaseTask(ABC):
             return True
         except Exception:
             return False
+
+    def safe_replace_file(self, tmp_path, prefix, file_type):
+        """Move new file to assets and delete old only after new is confirmed on disk.
+        Returns (success: bool, error_message: str | None)."""
+        old_file = self.jsonService.getLatestFile(file_type, prefix)
+        new_path = self.jsonService.getFilePath(prefix, file_type)
+
+        if not self.move_file(tmp_path, new_path):
+            return False, 'Failed to move file'
+
+        # Verify new file is valid before removing old
+        if os.path.isfile(new_path) and os.path.getsize(new_path) > 0:
+            if old_file and os.path.isfile(old_file) and old_file != new_path:
+                try:
+                    os.remove(old_file)
+                except OSError:
+                    pass  # Old file stays — not critical
+        return True, None

@@ -67,17 +67,9 @@ class SetStockOldCodes(BaseTask):
                 pass
             self.save_json(final_map, tmp_path)
 
-            latest_file = self.jsonService.getLatestFile(
-                self.jsonService.listType, self.jsonService.StockOldDetails
-            )
-            new_path = self.jsonService.getFilePath(
-                self.jsonService.StockOldDetails, self.jsonService.listType
-            )
-
-            if self.move_file(tmp_path, new_path):
-                self.jsonService.deleteFile(latest_file)
-            else:
-                return "Failed to move file", "Failed", self.interval
+            ok, err = self.safe_replace_file(tmp_path, self.jsonService.StockOldDetails, self.jsonService.listType)
+            if not ok:
+                return err, "Failed", self.interval
 
             self.logger.info(f"Generated {len(final_map)} old→new symbol mappings from NSE")
             return "Completed successfully", "Completed", self.interval

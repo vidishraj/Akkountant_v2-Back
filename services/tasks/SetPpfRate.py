@@ -84,15 +84,9 @@ class SetPPFRate(AIRateTask):
                 pass
             self.save_json(output, filePath)
 
-            latestFile = self.jsonService.getLatestFile(self.jsonService.ratesType, self.jsonService.PPFRatePrefix)
-            latestFilePath = self.jsonService.getFilePath(self.jsonService.PPFRatePrefix,
-                                                          self.jsonService.ratesType)
-            fileMoved = self.move_file(filePath, latestFilePath)
-
-            if fileMoved:
-                self.jsonService.deleteFile(latestFile)
-            else:
-                return 'Failed to move file', "Failed", self.interval
+            ok, err = self.safe_replace_file(filePath, self.jsonService.PPFRatePrefix, self.jsonService.ratesType)
+            if not ok:
+                return err, "Failed", self.interval
             return 'Completed successfully', "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval

@@ -60,15 +60,9 @@ Rules:
                 pass
             self.save_json(jsonData, filePath)
 
-            latestFile = self.jsonService.getLatestFile(self.jsonService.ratesType, self.jsonService.EPFRatePrefix)
-            latestFilePath = self.jsonService.getFilePath(self.jsonService.EPFRatePrefix,
-                                                          self.jsonService.ratesType)
-            fileMoved = self.move_file(filePath, latestFilePath)
-
-            if fileMoved:
-                self.jsonService.deleteFile(latestFile)
-            else:
-                return 'Failed to move file', "Failed", self.interval
+            ok, err = self.safe_replace_file(filePath, self.jsonService.EPFRatePrefix, self.jsonService.ratesType)
+            if not ok:
+                return err, "Failed", self.interval
             return 'Completed successfully', "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
