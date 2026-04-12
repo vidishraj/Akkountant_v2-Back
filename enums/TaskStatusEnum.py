@@ -6,3 +6,4 @@ class JobStatus(Enum):
     COMPLETED = "Completed"
     OVERDUE = "Overdue"
     FAILED = "Failed"
+    RUNNING = "Running"

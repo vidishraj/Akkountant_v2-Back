@@ -1,12 +1,21 @@
+import threading
+import uuid
+from datetime import datetime
+
 from services.JobService import JobService
+from services.tasks.scheduler import get_task_class, TASK_MAPPING
 from utils.logger import Logger
-from flask import request, jsonify
+from flask import request, jsonify, g
+
 
 class JobsController:
-    
-    def __init__(self):
+    _running_jobs = {}
+    _running_jobs_lock = threading.Lock()
+
+    def __init__(self, flask_app=None):
         self.job_service = JobService()
         self.logger = Logger(__name__).get_logger()
+        self.flask_app = flask_app
     
     @Logger.standardLogger
     def get_jobs_summary(self):
@@ -239,3 +248,114 @@ class JobsController:
                 'status': 'error',
                 'message': f'Failed to cancel jobs: {str(e)}'
             }), 500
+
+    def run_job_now(self):
+        """Run a job immediately in a background thread, bypassing the time window."""
+        try:
+            data = request.get_json(force=True)
+            title = data.get('title') if data else None
+            if not title:
+                return jsonify({'status': 'error', 'message': 'title is required'}), 400
+
+            if title not in TASK_MAPPING:
+                return jsonify({'status': 'error', 'message': f'Unknown job: {title}'}), 400
+
+            # Concurrency guard: one run per title at a time
+            with self._running_jobs_lock:
+                for entry in self._running_jobs.values():
+                    if entry['title'] == title and entry['status'] == 'running':
+                        return jsonify({'status': 'error', 'message': f'{title} is already running'}), 409
+
+            user_id = g.get('firebase_id', 'manual')
+            job = self.job_service.create_running_job(title, user_id)
+            run_id = uuid.uuid4().hex[:8]
+
+            with self._running_jobs_lock:
+                # Purge old entries (> 30 min)
+                now = datetime.now()
+                stale = [k for k, v in self._running_jobs.items()
+                         if v['status'] != 'running' and (now - datetime.fromisoformat(v['started_at'])).total_seconds() > 1800]
+                for k in stale:
+                    del self._running_jobs[k]
+
+                self._running_jobs[run_id] = {
+                    'run_id': run_id,
+                    'job_id': job.id,
+                    'title': title,
+                    'status': 'running',
+                    'started_at': now.isoformat(),
+                    'completed_at': None,
+                    'duration_seconds': None,
+                    'result': None,
+                    'error': None,
+                }
+
+            thread = threading.Thread(
+                target=self._execute_task,
+                args=(run_id, job.id, title, self.flask_app, user_id),
+                daemon=True,
+            )
+            thread.start()
+
+            return jsonify({'run_id': run_id, 'job_id': job.id, 'status': 'running'}), 202
+
+        except Exception as e:
+            self.logger.error(f"Error in run_job_now: {str(e)}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+
+    def _execute_task(self, run_id, job_id, title, flask_app, user_id):
+        """Background thread: execute the task and update status."""
+        started = datetime.now()
+        try:
+            with flask_app.app_context():
+                g.firebase_id = user_id
+                g.db = flask_app.extensions.get("sqlalchemy")
+
+                task_class = get_task_class(title)
+                task_instance = task_class(title, "High")
+                result, status, _interval = task_instance.startTask()
+
+                duration = (datetime.now() - started).total_seconds()
+                final_status = status if status in ("Completed", "Failed") else "Completed"
+
+                with self._running_jobs_lock:
+                    self._running_jobs[run_id].update({
+                        'status': final_status,
+                        'result': result[:500] if result else None,
+                        'completed_at': datetime.now().isoformat(),
+                        'duration_seconds': round(duration, 1),
+                    })
+
+                self.job_service.update_job_result(job_id, result, final_status)
+                self.logger.info(f"Run {run_id} ({title}): {final_status} in {duration:.1f}s")
+
+        except Exception as e:
+            duration = (datetime.now() - started).total_seconds()
+            with self._running_jobs_lock:
+                self._running_jobs[run_id].update({
+                    'status': 'Failed',
+                    'error': str(e)[:500],
+                    'completed_at': datetime.now().isoformat(),
+                    'duration_seconds': round(duration, 1),
+                })
+            try:
+                with flask_app.app_context():
+                    g.db = flask_app.extensions.get("sqlalchemy")
+                    self.job_service.update_job_result(job_id, str(e)[:900], "Failed")
+            except Exception:
+                pass
+            self.logger.error(f"Run {run_id} ({title}) failed: {e}")
+
+    def get_run_status(self):
+        """Poll the status of a running job."""
+        run_id = request.args.get('run_id')
+        if not run_id:
+            return jsonify({'status': 'error', 'message': 'run_id is required'}), 400
+
+        with self._running_jobs_lock:
+            entry = self._running_jobs.get(run_id)
+
+        if not entry:
+            return jsonify({'status': 'error', 'message': 'Run not found'}), 404
+
+        return jsonify(entry), 200

@@ -22,6 +22,27 @@ from services.tasks.SetStockOldCodes import SetStockOldCodes
 from utils.logger import Logger
 
 
+TASK_MAPPING = {
+    "SetNPSRate": SetNPSRate,
+    "SetNPSDetails": SetNPSDetails,
+    "SetStocksDetails": SetKiteStockDetails,
+    "SetStocksOldDetails": SetStockOldCodes,
+    "SetMFRate": SetMFRate,
+    "SetMFDetails": SetMFDetails,
+    "SetGoldRate": SetIBJAGoldRate,
+    "SetPPFRate": SetPPFRate,
+    "SetEPFRate": SetEPFRate,
+    "CheckMail": CheckMailTask,
+    "CheckStatement": CheckStatementTask,
+    "InvestmentHistoryTask": InvestmentHistoryTask
+}
+
+
+def get_task_class(title):
+    """Get the task class for a given job title."""
+    return TASK_MAPPING.get(title)
+
+
 class TaskScheduler:
     def __init__(self, db_url, flask_app=None):
         self.logger = Logger(__name__).get_logger()
@@ -127,21 +148,7 @@ class TaskScheduler:
             session.close()
 
     def _get_task_class(self, title):
-        task_mapping = {
-            "SetNPSRate": SetNPSRate,
-            "SetNPSDetails": SetNPSDetails,
-            "SetStocksDetails": SetKiteStockDetails,
-            "SetStocksOldDetails": SetStockOldCodes,
-            "SetMFRate": SetMFRate,
-            "SetMFDetails": SetMFDetails,
-            "SetGoldRate": SetIBJAGoldRate,
-            "SetPPFRate": SetPPFRate,
-            "SetEPFRate": SetEPFRate,
-            "CheckMail": CheckMailTask,
-            "CheckStatement": CheckStatementTask,
-            "InvestmentHistoryTask": InvestmentHistoryTask
-        }
-        return task_mapping.get(title)
+        return get_task_class(title)
 
     def start_scheduler(self):
         with self.thread_locks:

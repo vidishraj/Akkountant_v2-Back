@@ -174,7 +174,7 @@ class Akkountant(Flask):
         self.customerEmailEP = CustomerEmailController(self.customerEmailService)
         self.fileStorageService = FileStorageService()
         self.fileStorageEP = FileStorageController(self.fileStorageService)
-        self.jobsEP = JobsController()
+        self.jobsEP = JobsController(flask_app=self)
         self.jobEmailService = JobEmailService()
         self.jobEmailEP = JobEmailController(self.jobEmailService)
         self.reconciliationService = ReconciliationService()
@@ -406,6 +406,8 @@ class Akkountant(Flask):
             ('/jobs/by-title-status', 'GET', self.jobsEP.get_jobs_by_title_status),
             ('/jobs/<job_id>/cancel', 'DELETE', self.jobsEP.cancel_job),
             ('/jobs/cancel-bulk', 'POST', self.jobsEP.cancel_jobs_bulk),
+            ('/jobs/run-now', 'POST', self.jobsEP.run_job_now),
+            ('/jobs/run-status', 'GET', self.jobsEP.get_run_status),
         ]
 
         # Temp Job Email management endpoints

@@ -272,3 +272,25 @@ class JobService(BaseService):
                 'status': 'error',
                 'message': f'Failed to cancel jobs: {str(e)}'
             }
+
+    def create_running_job(self, title, user_id):
+        """Create a job with Running status (bypasses time window)."""
+        job = Job(
+            title=title,
+            status=JobStatus.RUNNING.value,
+            priority="High",
+            due_date=datetime.now(),
+            user_id=user_id,
+            result=None,
+        )
+        self.db.session.add(job)
+        self.db.session.commit()
+        return job
+
+    def update_job_result(self, job_id, result, status):
+        """Update a job with execution result."""
+        job = self.db.session.query(Job).filter(Job.id == job_id).first()
+        if job:
+            job.result = result[:900] if result else None
+            job.status = status
+            self.db.session.commit()
