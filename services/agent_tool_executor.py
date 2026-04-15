@@ -275,10 +275,46 @@ def _execute_transaction_tool(tool_name, tool_input, user_id, service, mail_proc
         return {"error": f"Unknown transaction tool: {tool_name}"}
 
 
+_FREELANCE_REQUIRED_PARAMS = {
+    "create_invoice": ["data"],
+    "get_invoice_by_number": ["invoice_number"],
+    "update_invoice": ["invoice_number", "data"],
+    "delete_invoice": ["invoice_number"],
+    "create_customer": ["data"],
+    "update_customer": ["customer_id", "data"],
+    "delete_customer": ["customer_id"],
+    "get_earnings_by_date_range": ["start_date", "end_date"],
+}
+
+
 def _execute_freelance_tool(tool_name, tool_input, user_id,
                             invoice_service, customer_service, dashboard_service):
+    # Validate services
+    if invoice_service is None and tool_name in ("create_invoice", "get_invoices", "get_invoice_by_number", "update_invoice", "delete_invoice"):
+        return {"error": "Invoice service not available"}
+    if customer_service is None and tool_name in ("create_customer", "get_customers", "update_customer", "delete_customer"):
+        return {"error": "Customer service not available"}
+    if dashboard_service is None and tool_name in ("get_dashboard_analytics", "get_earnings_by_date_range"):
+        return {"error": "Dashboard service not available"}
+
+    # Validate required parameters
+    required = _FREELANCE_REQUIRED_PARAMS.get(tool_name, [])
+    missing = [k for k in required if k not in tool_input]
+    if missing:
+        return {"error": f"{tool_name} requires: {', '.join(missing)}"}
+
     if tool_name == "create_invoice":
-        return invoice_service.create_invoice(tool_input["data"])
+        data = tool_input["data"]
+        # Validate nested required fields
+        for section in ("from", "to"):
+            obj = data.get(section, {})
+            if not obj.get("name"):
+                return {"error": f"'{section}.name' is required for create_invoice"}
+            if not obj.get("address"):
+                return {"error": f"'{section}.address' is required for create_invoice"}
+        if not data.get("items") or len(data["items"]) == 0:
+            return {"error": "At least one item is required for create_invoice"}
+        return invoice_service.create_invoice(data)
 
     elif tool_name == "get_invoices":
         return invoice_service.get_invoices(
@@ -300,7 +336,14 @@ def _execute_freelance_tool(tool_name, tool_input, user_id,
         return invoice_service.delete_invoice(tool_input["invoice_number"])
 
     elif tool_name == "create_customer":
-        return customer_service.create_customer(tool_input["data"])
+        data = tool_input["data"]
+        if not data.get("name"):
+            return {"error": "Customer name is required"}
+        if not data.get("email"):
+            return {"error": "Customer email is required"}
+        if not data.get("address"):
+            return {"error": "Customer address is required"}
+        return customer_service.create_customer(data)
 
     elif tool_name == "get_customers":
         return customer_service.get_customers(
