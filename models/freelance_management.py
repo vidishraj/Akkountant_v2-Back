@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Text, DECIMAL, Integer, DateTime, Boolean, Enum, ForeignKey, JSON, Date, func
-from sqlalchemy.dialects.mysql import CHAR
+from sqlalchemy.dialects.mysql import CHAR, MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from .Base import Base
 import enum
@@ -177,7 +177,7 @@ class Signature(Base):
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
     name = Column(String(255), nullable=False)
-    signature_data = Column(Text, nullable=False)
+    signature_data = Column(MEDIUMTEXT, nullable=False)
     signature_type = Column(String(20), default='image')
     is_default = Column(Boolean, default=False)
     created_at = Column(DateTime, default=func.now())
