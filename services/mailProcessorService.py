@@ -1770,7 +1770,7 @@ class MailProcessorService:
         result = _handle_insert_batch_transactions(
             insert_args, user_id,
             self.transaction_service,
-            reconciliation_service=None,
+            reconciliation_service=self.reconciliation_service,
         )
         inserted = result.get("inserted", 0)
         duplicates = result.get("duplicates", 0)
