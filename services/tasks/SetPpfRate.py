@@ -65,9 +65,12 @@ class SetPPFRate(AIRateTask):
                 "There should be roughly 20-40 entries from 1999-04 to the current quarter."
             )
 
-            jsonData = self.fetch_rates_via_ai(prompt)
-            if not jsonData or 'periods' not in jsonData or len(jsonData['periods']) == 0:
-                return "Failed to get PPF Rates via AI", "Failed", self.interval
+            jsonData, ai_err = self.fetch_rates_via_ai(prompt)
+            if jsonData is None:
+                return f"Failed to get PPF Rates via AI: {ai_err}"[:800], "Failed", self.interval
+            if 'periods' not in jsonData or len(jsonData['periods']) == 0:
+                got_keys = list(jsonData.keys())[:10]
+                return f"PPF Rates AI response missing/empty 'periods'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
 
             # Expand rate change periods into monthly entries
             monthly_data = self._expand_periods_to_monthly(jsonData['periods'])

@@ -95,9 +95,12 @@ Calculation rules:
 - Date format: "DD-Mon-YY" (e.g. "16-Feb-26")
 - If today's rates aren't available yet (e.g. before market open), use the most recent available day's rates"""
 
-            jsonData = self.fetch_rates_via_ai(prompt)
-            if not jsonData or '24 Carat' not in jsonData:
-                return "Failed to get Gold Rates via AI", "Failed", self.interval
+            jsonData, ai_err = self.fetch_rates_via_ai(prompt)
+            if jsonData is None:
+                return f"Failed to get Gold Rates via AI: {ai_err}"[:800], "Failed", self.interval
+            if '24 Carat' not in jsonData:
+                got_keys = list(jsonData.keys())[:10]
+                return f"Gold Rates AI response missing '24 Carat'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
 
             filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
             try:

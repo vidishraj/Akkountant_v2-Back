@@ -124,14 +124,18 @@ class AgentService(BaseService):
             # Format conversation history as prompt text
             prompt_text = self._format_conversation(messages)
 
-            # Configure SDK options — no allowed_tools restriction so the agent
-            # can use built-in tools (WebSearch, Bash, etc.) alongside MCP tools
+            # allowed_tools is required: with permission_mode='bypassPermissions'
+            # and no list, built-in tools are silently unavailable and the agent
+            # returns zero TextBlocks. Bash is intentionally NOT included for
+            # user-facing chat — too broad under bypassPermissions. MCP tools
+            # registered via mcp_servers are always available.
             options = ClaudeAgentOptions(
                 system_prompt=config["system_prompt"],
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
                 max_turns=MAX_TURNS,
                 model="sonnet",
+                allowed_tools=["WebSearch", "WebFetch"],
             )
 
             # Run the query (blocking — collects all results then yields)
@@ -175,6 +179,12 @@ class AgentService(BaseService):
 
             # Yield final text
             full_text = "".join(text_parts)
+            if not full_text and not tool_events:
+                self.logger.warning(
+                    "Agent returned ResultMessage with zero TextBlocks "
+                    "(model=%s, max_turns=%s) — likely missing allowed_tools or model refused",
+                    options.model, MAX_TURNS,
+                )
             if full_text:
                 yield self._sse_event("text", {"content": full_text})
 
