@@ -334,10 +334,12 @@ class StocksService(Base_MSN, ABC):
         )
 
         self.logger.info(f"Querying AI for IPO allotment prices of {len(by_isin)} securities")
-        result = fetch_via_ai(prompt)
+        result, ai_err = fetch_via_ai(prompt)
 
         if not result or 'results' not in result:
-            self.logger.warning(f"AI returned no results for IPO price lookup: {result}")
+            self.logger.warning(
+                f"AI returned no results for IPO price lookup (err={ai_err!r}): {result}"
+            )
             return []
 
         synthetic_buys = []

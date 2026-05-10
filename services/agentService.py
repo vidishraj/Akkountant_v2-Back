@@ -6,11 +6,13 @@ Tool calls are handled via an in-process MCP server.
 
 import json
 import os
+import time
 import anyio
 from services.Base_Service import BaseService
 from services.agent_tools import get_agent_config
 from services.agent_tool_executor import execute_tool
 from utils.logger import Logger
+from utils.sdk_runner import emit_agent_run
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
@@ -124,22 +126,37 @@ class AgentService(BaseService):
             # Format conversation history as prompt text
             prompt_text = self._format_conversation(messages)
 
-            # Configure SDK options — no allowed_tools restriction so the agent
-            # can use built-in tools (WebSearch, Bash, etc.) alongside MCP tools
+            # allowed_tools is required: with permission_mode='bypassPermissions'
+            # and no list, built-in tools are silently unavailable and the agent
+            # returns zero TextBlocks. Bash is intentionally NOT included for
+            # user-facing chat — too broad under bypassPermissions. MCP tool
+            # names are listed explicitly (defensive: SDK's "MCP tools always
+            # available" contract is not relied on).
+            mcp_tool_names = [
+                f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in config["tools"]
+            ]
             options = ClaudeAgentOptions(
                 system_prompt=config["system_prompt"],
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
                 max_turns=MAX_TURNS,
                 model="sonnet",
+                allowed_tools=["WebSearch", "WebFetch"] + mcp_tool_names,
             )
 
-            # Run the query (blocking — collects all results then yields)
+            # Run the query (blocking — collects all results then yields).
+            # Streaming + tool_events make the run_query_collect wrapper
+            # awkward, so we drive the loop manually and emit the agent_run
+            # log line at the end via emit_agent_run.
             text_parts = []
             error_msg = None
+            error_class = None
+            turns = 0
+            tool_calls = 0
+            run_start = time.monotonic()
 
             async def run_query():
-                nonlocal error_msg
+                nonlocal error_msg, error_class, turns, tool_calls
 
                 # Use AsyncIterable prompt to avoid SDK bug where string prompts
                 # close stdin before MCP control responses can be written back.
@@ -153,17 +170,36 @@ class AgentService(BaseService):
 
                 async for message in query(prompt=make_prompt(), options=options):
                     if isinstance(message, AssistantMessage):
+                        turns += 1
                         if message.error:
                             error_msg = f"Claude error: {message.error}"
+                            error_class = "assistant_error"
                             return
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 text_parts.append(block.text)
+                            elif isinstance(block, ToolUseBlock):
+                                tool_calls += 1
                     elif isinstance(message, ResultMessage):
                         if message.is_error:
                             error_msg = message.result or "Query failed"
+                            error_class = "result_error"
 
-            anyio.run(run_query)
+            try:
+                anyio.run(run_query)
+            except Exception as e:
+                error_msg = f"SDK exception: {e}"
+                error_class = e.__class__.__name__
+
+            emit_agent_run(
+                agent=f"chat.{agent_type}",
+                model=options.model,
+                turns=turns,
+                tools_called=tool_calls,
+                latency_ms=int((time.monotonic() - run_start) * 1000),
+                status="error" if error_msg else "ok",
+                error_class=error_class,
+            )
 
             if error_msg:
                 yield self._sse_event("error", {"message": error_msg})
@@ -175,6 +211,12 @@ class AgentService(BaseService):
 
             # Yield final text
             full_text = "".join(text_parts)
+            if not full_text and not tool_events:
+                self.logger.warning(
+                    "Agent returned ResultMessage with zero TextBlocks "
+                    "(model=%s, max_turns=%s) — likely missing allowed_tools or model refused",
+                    options.model, MAX_TURNS,
+                )
             if full_text:
                 yield self._sse_event("text", {"content": full_text})
 

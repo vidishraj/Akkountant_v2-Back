@@ -7,16 +7,11 @@ import json
 import re
 
 import anyio
-from claude_agent_sdk import (
-    query,
-    ClaudeAgentOptions,
-    AssistantMessage,
-    ResultMessage,
-    TextBlock,
-)
+from claude_agent_sdk import ClaudeAgentOptions
 
 from services.tasks.baseTask import BaseTask
 from utils.logger import Logger
+from utils.sdk_runner import run_query_collect
 
 
 class AIRateTask(BaseTask):
@@ -27,11 +22,16 @@ class AIRateTask(BaseTask):
             super().__init__(title, priority)
             self.ai_logger = Logger(__name__).get_logger()
 
-    def fetch_rates_via_ai(self, prompt: str, timeout: int = 120) -> dict | None:
+    def fetch_rates_via_ai(self, prompt: str, timeout: int = 120,
+                           agent: str = "rate.unknown") -> tuple[dict | None, str]:
         """
-        Call Claude with built-in web search, return parsed JSON.
-        Uses claude_agent_sdk query() with bypassPermissions so the agent
-        can use WebSearch without user approval.
+        Call Claude with built-in WebSearch / WebFetch, return (parsed JSON, error detail).
+
+        Returns:
+            (jsonData, "") on success.
+            (None, detail) on any failure. `detail` is non-empty and short — caller
+            should embed it in the job result so failures are diagnosable from
+            jobs.result alone instead of journalctl.
         """
         system_prompt = (
             "You are a data extraction assistant. Your job is to search the web "
@@ -40,58 +40,54 @@ class AIRateTask(BaseTask):
             "Return raw JSON only."
         )
 
+        # allowed_tools is required: with permission_mode='bypassPermissions' and
+        # no allowed_tools, the agent silently returns zero TextBlocks because it
+        # cannot use any tools and the system prompt forbids non-JSON text.
         options = ClaudeAgentOptions(
             model="sonnet",
             system_prompt=system_prompt,
             max_turns=8,
             permission_mode="bypassPermissions",
+            allowed_tools=["WebSearch", "WebFetch"],
         )
 
-        text_parts = []
-        error_msg = None
+        async def make_prompt():
+            yield {
+                "type": "user",
+                "session_id": "",
+                "message": {
+                    "role": "user",
+                    "content": prompt,
+                },
+                "parent_tool_use_id": None,
+            }
 
         async def run_query():
-            nonlocal error_msg
-
-            async def make_prompt():
-                yield {
-                    "type": "user",
-                    "session_id": "",
-                    "message": {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                    "parent_tool_use_id": None,
-                }
-
-            async for message in query(prompt=make_prompt(), options=options):
-                if isinstance(message, AssistantMessage):
-                    if message.error:
-                        error_msg = f"Claude error: {message.error}"
-                        return
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            text_parts.append(block.text)
-                elif isinstance(message, ResultMessage):
-                    if message.is_error:
-                        error_msg = message.result or "Query failed"
+            return await run_query_collect(
+                agent=agent, options=options, prompt=make_prompt(),
+            )
 
         try:
-            anyio.run(run_query)
+            result = anyio.run(run_query)
         except Exception as e:
+            detail = f"SDK exception: {e}"
             self.ai_logger.error(f"AI rate fetch failed: {e}")
-            return None
+            return None, detail
 
-        if error_msg:
-            self.ai_logger.error(f"AI rate fetch error: {error_msg}")
-            return None
+        if result.error:
+            self.ai_logger.error(f"AI rate fetch error: {result.error}")
+            return None, f"Provider error: {result.error}"
 
-        raw_response = "".join(text_parts).strip()
+        raw_response = result.text.strip()
         if not raw_response:
             self.ai_logger.error("AI returned empty response")
-            return None
+            return None, "Empty response (no TextBlocks — likely missing allowed_tools or model refused)"
 
-        return self._extract_json(raw_response)
+        parsed = self._extract_json(raw_response)
+        if parsed is None:
+            head = raw_response[:300].replace("\n", " ")
+            return None, f"JSON extract failed. Response head: {head}"
+        return parsed, ""
 
     def _extract_json(self, text: str) -> dict | None:
         """Extract a JSON object from AI response text."""

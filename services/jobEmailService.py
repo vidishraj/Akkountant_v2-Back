@@ -10,7 +10,8 @@ from models.googleTokens import UserToken
 from enums.ServiceTypeEnum import ServiceTypeEnum
 from utils.logger import Logger
 from sqlalchemy import and_
-from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
+from claude_agent_sdk import ClaudeAgentOptions
+from utils.sdk_runner import run_query_collect
 
 
 class JobEmailService(BaseService):
@@ -219,7 +220,9 @@ For MY job applications: extract company, job_title, status (applied/interview/o
         try:
             # Configure Claude options for batch job email analysis
             options = ClaudeAgentOptions(
+                model="haiku",
                 max_turns=1,
+                permission_mode="bypassPermissions",
                 system_prompt="""You are a precise email classifier that ONLY identifies emails about job applications I have personally submitted.
 
 STRICT CRITERIA - Mark as job-related ONLY if:
@@ -240,26 +243,20 @@ Be extremely conservative. When in doubt, mark as false.
 Return ONLY valid JSON without explanations."""
             )
             
-            # Collect response text using async pattern
-            output_text = ""
-            
             async def get_claude_response():
-                nonlocal output_text
-                async for message in query(prompt=prompt, options=options):
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                output_text += block.text
-                                self.logger.debug(f"Received Claude text block: {len(block.text)} characters")
-            
-            # Run async query in sync context
-            anyio.run(get_claude_response)
-            
-            if not output_text:
+                return await run_query_collect(
+                    agent="jobs.classify", options=options, prompt=prompt,
+                )
+
+            result = anyio.run(get_claude_response)
+
+            if result.error:
+                raise Exception(f"Claude error: {result.error}")
+            if not result.text:
                 raise Exception("Claude returned empty response")
-            
-            self.logger.debug(f"Claude response length: {len(output_text)}")
-            return output_text
+
+            self.logger.debug(f"Claude response length: {len(result.text)}")
+            return result.text
             
         except Exception as e:
             self.logger.error(f"Error calling Claude API: {str(e)}")

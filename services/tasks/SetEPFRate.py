@@ -49,9 +49,12 @@ Rules:
 - Include ALL months from April 2014 through the current month
 - Use the most recent official EPFO rate for the current financial year"""
 
-            jsonData = self.fetch_rates_via_ai(prompt)
-            if not jsonData or 'data' not in jsonData or len(jsonData['data']) == 0:
-                return "Failed to get EPF Rates via AI", "Failed", self.interval
+            jsonData, ai_err = self.fetch_rates_via_ai(prompt, agent="rate.epf")
+            if jsonData is None:
+                return f"Failed to get EPF Rates via AI: {ai_err}"[:800], "Failed", self.interval
+            if 'data' not in jsonData or len(jsonData['data']) == 0:
+                got_keys = list(jsonData.keys())[:10]
+                return f"EPF Rates AI response missing/empty 'data'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
 
             filePath = os.path.join(self.tmp_dir, 'EPFRate.json')
             try:
