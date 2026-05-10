@@ -49,7 +49,7 @@ Rules:
 - Include ALL months from April 2014 through the current month
 - Use the most recent official EPFO rate for the current financial year"""
 
-            jsonData, ai_err = self.fetch_rates_via_ai(prompt)
+            jsonData, ai_err = self.fetch_rates_via_ai(prompt, agent="rate.epf")
             if jsonData is None:
                 return f"Failed to get EPF Rates via AI: {ai_err}"[:800], "Failed", self.interval
             if 'data' not in jsonData or len(jsonData['data']) == 0:

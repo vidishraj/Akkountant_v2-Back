@@ -95,7 +95,7 @@ Calculation rules:
 - Date format: "DD-Mon-YY" (e.g. "16-Feb-26")
 - If today's rates aren't available yet (e.g. before market open), use the most recent available day's rates"""
 
-            jsonData, ai_err = self.fetch_rates_via_ai(prompt)
+            jsonData, ai_err = self.fetch_rates_via_ai(prompt, agent="rate.gold")
             if jsonData is None:
                 return f"Failed to get Gold Rates via AI: {ai_err}"[:800], "Failed", self.interval
             if '24 Carat' not in jsonData:

@@ -7,13 +7,10 @@ import json
 import re
 
 import anyio
-from claude_agent_sdk import (
-    query,
-    ClaudeAgentOptions,
-    AssistantMessage,
-    TextBlock,
-)
+from claude_agent_sdk import ClaudeAgentOptions
+
 from utils.logger import Logger
+from utils.sdk_runner import run_query_collect
 
 _logger = Logger(__name__).get_logger()
 
@@ -21,7 +18,12 @@ _logger = Logger(__name__).get_logger()
 def fetch_via_ai(prompt: str, system: str = None) -> tuple[dict | None, str]:
     """
     Call Claude with built-in web search to fetch structured data.
-    Returns (parsed JSON dict or None, error_detail string).
+
+    Returns:
+        (parsed_json, "") on success.
+        (None, detail) on any failure. `detail` is non-empty and short —
+        callers should embed it in their log path / job result so failures
+        are diagnosable without grepping journalctl.
     """
     if system is None:
         system = (
@@ -30,9 +32,10 @@ def fetch_via_ai(prompt: str, system: str = None) -> tuple[dict | None, str]:
             "Respond with ONLY a valid JSON object — no markdown, no explanation."
         )
 
-    # allowed_tools is required: with permission_mode='bypassPermissions' and a
-    # tool-implying system prompt, missing allowed_tools makes built-in tools
-    # silently unavailable and the SDK returns zero TextBlocks (April outage shape).
+    # allowed_tools is required: with permission_mode='bypassPermissions' and
+    # no allowed_tools, the agent silently returns zero TextBlocks because it
+    # cannot use any tools and the system prompt forbids non-JSON text.
+    # Mirrors the AIRateTask fix in f15ef18.
     options = ClaudeAgentOptions(
         model="sonnet",
         system_prompt=system,
@@ -41,50 +44,39 @@ def fetch_via_ai(prompt: str, system: str = None) -> tuple[dict | None, str]:
         allowed_tools=["WebSearch", "WebFetch"],
     )
 
-    text_parts = []
-    error_msg = None
+    async def make_prompt():
+        yield {
+            "type": "user",
+            "session_id": "",
+            "message": {"role": "user", "content": prompt},
+            "parent_tool_use_id": None,
+        }
 
     async def run():
-        nonlocal error_msg
-
-        async def make_prompt():
-            yield {
-                "type": "user",
-                "session_id": "",
-                "message": {"role": "user", "content": prompt},
-                "parent_tool_use_id": None,
-            }
-
-        async for message in query(prompt=make_prompt(), options=options):
-            if isinstance(message, AssistantMessage):
-                if message.error:
-                    error_msg = str(message.error)
-                    return
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
+        return await run_query_collect(
+            agent="stocks.ipo", options=options, prompt=make_prompt(),
+        )
 
     try:
-        anyio.run(run)
+        result = anyio.run(run)
     except Exception as e:
-        detail = f"fetch_via_ai exception: {e}"
-        _logger.error(detail)
+        detail = f"SDK exception: {e}"
+        _logger.error(f"fetch_via_ai failed: {e}")
         return None, detail
 
-    if error_msg:
-        detail = f"fetch_via_ai assistant error: {error_msg}"
-        _logger.error(detail)
-        return None, detail
+    if result.error:
+        _logger.error(f"fetch_via_ai error: {result.error}")
+        return None, f"Provider error: {result.error}"
 
-    raw = "".join(text_parts).strip()
+    raw = result.text.strip()
     if not raw:
-        detail = "fetch_via_ai: empty response"
-        _logger.warning(detail)
-        return None, detail
+        _logger.warning("fetch_via_ai: empty response")
+        return None, "Empty response (no TextBlocks — likely missing allowed_tools or model refused)"
 
     parsed = _extract_json(raw)
     if parsed is None:
-        return None, "fetch_via_ai: could not extract JSON from response"
+        head = raw[:300].replace("\n", " ")
+        return None, f"JSON extract failed. Response head: {head}"
     return parsed, ""
 
 

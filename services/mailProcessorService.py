@@ -19,13 +19,9 @@ import fitz  # PyMuPDF
 from flask import g
 
 from claude_agent_sdk import (
-    query,
     ClaudeAgentOptions,
     SdkMcpTool,
     create_sdk_mcp_server,
-    AssistantMessage,
-    ResultMessage,
-    TextBlock,
 )
 
 from services.mailProcessorTools import (
@@ -36,6 +32,7 @@ from services.mailProcessorTools import (
 from services.mailProcessorToolExecutor import execute_mail_tool
 from utils.PdfPasswordUtil import generate_password_candidates, try_unlock_pdf, extract_password_hint
 from utils.logger import Logger
+from utils.sdk_runner import run_query_collect
 
 MCP_SERVER_NAME = "mail_processor_tools"
 SAVED_EMAILS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_emails")
@@ -396,46 +393,44 @@ class MailProcessorService:
             f"{email_text}"
         )
 
-        text_parts = []
-        error_msg = None
+        async def make_prompt():
+            yield {
+                "type": "user",
+                "session_id": "",
+                "message": {"role": "user", "content": prompt_text},
+                "parent_tool_use_id": None,
+            }
 
-        async def run_query():
-            nonlocal error_msg
-
-            async def make_prompt():
-                yield {
-                    "type": "user",
-                    "session_id": "",
-                    "message": {"role": "user", "content": prompt_text},
-                    "parent_tool_use_id": None,
-                }
-
-            async for message in query(prompt=make_prompt(), options=options):
-                if isinstance(message, AssistantMessage):
-                    if message.error:
-                        error_msg = f"Classification error: {message.error}"
-                        return
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            text_parts.append(block.text)
+        result_box = {"result": None, "timeout": False}
 
         async def run_with_timeout():
             import asyncio
             try:
-                await asyncio.wait_for(run_query(), timeout=120)
+                result_box["result"] = await asyncio.wait_for(
+                    run_query_collect(
+                        agent="mail.classify", options=options, prompt=make_prompt(),
+                    ),
+                    timeout=120,
+                )
             except asyncio.TimeoutError:
-                nonlocal error_msg
-                error_msg = "Classification error: rate_limit"
+                result_box["timeout"] = True
 
         anyio.run(run_with_timeout)
 
-        if error_msg:
-            self.logger.error(error_msg)
-            if "rate_limit" in error_msg:
-                raise RuntimeError(error_msg)
+        if result_box["timeout"]:
+            err = "Classification error: rate_limit"
+            self.logger.error(err)
+            raise RuntimeError(err)
+
+        result = result_box["result"]
+        if result.error:
+            err = f"Classification error: {result.error}"
+            self.logger.error(err)
+            if "rate_limit" in err:
+                raise RuntimeError(err)
             return []
 
-        raw = "".join(text_parts).strip()
+        raw = result.text.strip()
         if not raw:
             self.logger.warning("Classification returned empty response")
             return []
@@ -645,15 +640,13 @@ class MailProcessorService:
             tools=sdk_tools,
         )
 
-        # MCP tool names listed explicitly so the agent doesn't depend on the
-        # SDK's "MCP tools always available regardless of allowed_tools" contract
-        # (deep-study §7.2). Defensive against future SDK behaviour shifts.
         options = ClaudeAgentOptions(
             model="haiku",
             system_prompt=TEXT_EMAIL_SYSTEM_PROMPT,
             max_turns=MAX_TURNS,
             mcp_servers={MCP_SERVER_NAME: mcp_server},
             permission_mode="bypassPermissions",
+            # MCP tool names listed explicitly (defensive — see doc §7.2)
             allowed_tools=[
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in MAIL_PROCESSOR_TOOLS
             ],
@@ -665,50 +658,44 @@ class MailProcessorService:
             f"{email_content}"
         )
 
-        text_parts = []
-        error_msg = None
-        tool_calls_count = [0]
+        async def make_prompt():
+            yield {
+                "type": "user",
+                "session_id": "",
+                "message": {"role": "user", "content": prompt_text},
+                "parent_tool_use_id": None,
+            }
 
-        async def run_query():
-            nonlocal error_msg
-
-            async def make_prompt():
-                yield {
-                    "type": "user",
-                    "session_id": "",
-                    "message": {"role": "user", "content": prompt_text},
-                    "parent_tool_use_id": None,
-                }
-
-            async for message in query(prompt=make_prompt(), options=options):
-                if isinstance(message, AssistantMessage):
-                    if message.error:
-                        error_msg = f"Claude error: {message.error}"
-                        return
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            text_parts.append(block.text)
-                elif isinstance(message, ResultMessage):
-                    if message.is_error:
-                        error_msg = message.result or "Query failed"
+        result_box = {"result": None, "timeout": False}
 
         async def run_with_timeout():
             import asyncio
             try:
-                await asyncio.wait_for(run_query(), timeout=300)
+                result_box["result"] = await asyncio.wait_for(
+                    run_query_collect(
+                        agent="mail.text_extract", options=options, prompt=make_prompt(),
+                    ),
+                    timeout=300,
+                )
             except asyncio.TimeoutError:
-                nonlocal error_msg
-                error_msg = "Claude error: rate_limit"
+                result_box["timeout"] = True
 
         anyio.run(run_with_timeout)
 
-        if error_msg:
-            self.logger.error(f"Text batch processing error: {error_msg}")
-            if "rate_limit" in error_msg:
-                raise RuntimeError(error_msg)
+        if result_box["timeout"]:
+            err = "Claude error: rate_limit"
+            self.logger.error(f"Text batch processing error: {err}")
+            raise RuntimeError(err)
+
+        result = result_box["result"]
+        if result.error:
+            err = f"Claude error: {result.error}"
+            self.logger.error(f"Text batch processing error: {err}")
+            if "rate_limit" in err:
+                raise RuntimeError(err)
             return 0
 
-        summary = "".join(text_parts).strip()
+        summary = result.text.strip()
         self.logger.info(f"Text batch complete: {summary[:200]}...")
         return len(emails)
 
@@ -1690,35 +1677,18 @@ class MailProcessorService:
             f"mode=text (structured output), bank={detected_bank}"
         )
 
-        # Send query via query() — one-shot, structured output
-        structured_data = None
-        fallback_text = ""  # Capture AssistantMessage text as fallback
-        error_msg = None
-        try:
-            async for message in query(prompt=prompt_text, options=options):
-                self.logger.debug(
-                    f"Chunk {page_start}-{page_end} message type: {type(message).__name__}"
-                )
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            fallback_text += block.text
-                elif isinstance(message, ResultMessage):
-                    self.logger.info(
-                        f"Chunk {page_start}-{page_end} ResultMessage: "
-                        f"subtype={message.subtype}, is_error={message.is_error}, "
-                        f"has_structured_output={message.structured_output is not None}"
-                    )
-                    if message.is_error:
-                        error_msg = message.result or "Query failed"
-                    elif message.structured_output is not None:
-                        structured_data = message.structured_output
-                        self.logger.info(
-                            f"Chunk {page_start}-{page_end} got structured_output "
-                            f"with {len(structured_data.get('transactions', []))} transactions"
-                        )
-        except Exception as e:
-            error_msg = f"Query exception: {e}"
+        # Send query via run_query_collect — one-shot, structured output
+        run_result = await run_query_collect(
+            agent="pdf.text", options=options, prompt=prompt_text,
+        )
+        structured_data = run_result.structured_output
+        fallback_text = run_result.text
+        error_msg = run_result.error
+        self.logger.info(
+            f"Chunk {page_start}-{page_end} run: "
+            f"has_structured_output={structured_data is not None}, "
+            f"text_chars={len(fallback_text)}, error={bool(error_msg)}"
+        )
 
         if error_msg:
             self.logger.error(
@@ -1953,17 +1923,13 @@ class MailProcessorService:
                     "parent_tool_use_id": None,
                 }
 
-            async for message in query(prompt=make_prompt(), options=options):
-                if isinstance(message, AssistantMessage):
-                    if message.error:
-                        error_msg = f"Claude error: {message.error}"
-                        return
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            text_parts.append(block.text)
-                elif isinstance(message, ResultMessage):
-                    if message.is_error:
-                        error_msg = message.result or "Query failed"
+            res = await run_query_collect(
+                agent="pdf.image", options=options, prompt=make_prompt(),
+            )
+            if res.text:
+                text_parts.append(res.text)
+            if res.error:
+                error_msg = f"Claude error: {res.error}"
 
         import asyncio
         try:
@@ -2075,17 +2041,15 @@ class MailProcessorService:
             "duplicates": insert_called.get("duplicates", 0),
         }
 
-    # ── MCP tool building ──────────────────────────────────────────────
+    # ── PDF chunk options ─────────────────────────────────────────────
 
     @staticmethod
     def _make_pdf_chunk_options(system_prompt, mcp_server):
-        """Build the ClaudeAgentOptions used for PDF image-mode chunk processing.
+        """Build the ClaudeAgentOptions used for PDF chunk processing.
 
-        The same option shape is used by the initial run, the post-stream-error
-        retry, and the follow-up-after-no-tool-call retry. Centralising avoids
-        the previous 3-way drift risk. MCP tool names are listed explicitly in
-        allowed_tools (deep-study §7.2 — defensive vs the implicit "MCP tools
-        always available" SDK contract).
+        Three sites used to construct this identically (initial run, stream-
+        error retry, no-tool-call follow-up). Shared here so a fix in one
+        place propagates to all three.
         """
         return ClaudeAgentOptions(
             model="sonnet",
@@ -2093,10 +2057,13 @@ class MailProcessorService:
             max_turns=MAX_TURNS,
             mcp_servers={MCP_SERVER_NAME: mcp_server},
             permission_mode="bypassPermissions",
+            # MCP tool names listed explicitly (defensive — see doc §7.2)
             allowed_tools=[
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in MAIL_PROCESSOR_TOOLS
             ],
         )
+
+    # ── MCP tool building ──────────────────────────────────────────────
 
     def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None, email_lookup=None):
         """Build SdkMcpTool objects for the mail processor agent.

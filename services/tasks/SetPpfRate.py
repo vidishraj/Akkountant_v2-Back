@@ -65,7 +65,7 @@ class SetPPFRate(AIRateTask):
                 "There should be roughly 20-40 entries from 1999-04 to the current quarter."
             )
 
-            jsonData, ai_err = self.fetch_rates_via_ai(prompt)
+            jsonData, ai_err = self.fetch_rates_via_ai(prompt, agent="rate.ppf")
             if jsonData is None:
                 return f"Failed to get PPF Rates via AI: {ai_err}"[:800], "Failed", self.interval
             if 'periods' not in jsonData or len(jsonData['periods']) == 0:

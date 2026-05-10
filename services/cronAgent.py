@@ -13,16 +13,13 @@ import anyio
 from flask import Response, g
 
 from claude_agent_sdk import (
-    query,
     ClaudeAgentOptions,
     SdkMcpTool,
     create_sdk_mcp_server,
-    AssistantMessage,
-    ResultMessage,
-    TextBlock,
 )
 from collections import deque
 from utils.logger import Logger
+from utils.sdk_runner import run_query_collect
 
 MCP_SERVER_NAME = "cron-agent-tools"
 MAX_HISTORY = 5  # Keep last 5 cycle summaries for context
@@ -142,49 +139,34 @@ class CronAgent:
                 max_turns=10,
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
-                # MCP tool names listed explicitly (defensive — see deep-study §7.2)
+                # MCP tool names listed explicitly (defensive — see doc §7.2)
                 allowed_tools=[
                     f"mcp__{MCP_SERVER_NAME}__{t.name}" for t in sdk_tools
                 ],
             )
 
             prompt_text = self._build_prompt_with_history()
-            text_parts = []
-            error_msg = None
+
+            async def make_prompt():
+                yield {
+                    "type": "user",
+                    "session_id": "",
+                    "message": {"role": "user", "content": prompt_text},
+                    "parent_tool_use_id": None,
+                }
 
             async def run_query():
-                nonlocal error_msg
+                return await run_query_collect(
+                    agent="cron", options=options, prompt=make_prompt(),
+                )
 
-                async def make_prompt():
-                    yield {
-                        "type": "user",
-                        "session_id": "",
-                        "message": {
-                            "role": "user",
-                            "content": prompt_text,
-                        },
-                        "parent_tool_use_id": None,
-                    }
+            result = anyio.run(run_query)
 
-                async for message in query(prompt=make_prompt(), options=options):
-                    if isinstance(message, AssistantMessage):
-                        if message.error:
-                            error_msg = f"Claude error: {message.error}"
-                            return
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                text_parts.append(block.text)
-                    elif isinstance(message, ResultMessage):
-                        if message.is_error:
-                            error_msg = message.result or "Query failed"
-
-            anyio.run(run_query)
-
-            if error_msg:
-                self.logger.error(f"CronAgent query error: {error_msg}")
-                self._history.append(f"[ERROR] {error_msg}")
+            if result.error:
+                self.logger.error(f"CronAgent query error: {result.error}")
+                self._history.append(f"[ERROR] {result.error}")
             else:
-                summary = "".join(text_parts).strip()
+                summary = result.text.strip()
                 self.logger.info(f"CronAgent cycle complete:\n{summary}")
                 self._history.append(summary)
 
