@@ -1804,13 +1804,7 @@ class MailProcessorService:
 
         system_prompt = PDF_SYSTEM_PROMPT
 
-        options = ClaudeAgentOptions(
-            model="sonnet",
-            system_prompt=system_prompt,
-            max_turns=MAX_TURNS,
-            mcp_servers={MCP_SERVER_NAME: mcp_server},
-            permission_mode="bypassPermissions",
-        )
+        options = self._make_pdf_chunk_options(system_prompt, mcp_server)
 
         # Detect bank and get format rules for dynamic injection
         from services.bankFormatRules import get_bank_from_sender, get_format_rules
@@ -2000,13 +1994,7 @@ class MailProcessorService:
                 mcp_server = create_sdk_mcp_server(
                     name=MCP_SERVER_NAME, tools=sdk_tools,
                 )
-                options = ClaudeAgentOptions(
-                    model="sonnet",
-                    system_prompt=system_prompt,
-                    max_turns=MAX_TURNS,
-                    mcp_servers={MCP_SERVER_NAME: mcp_server},
-                    permission_mode="bypassPermissions",
-                )
+                options = self._make_pdf_chunk_options(system_prompt, mcp_server)
                 error_msg = None
                 text_parts.clear()
 
@@ -2032,13 +2020,7 @@ class MailProcessorService:
                 mcp_server = create_sdk_mcp_server(
                     name=MCP_SERVER_NAME, tools=sdk_tools,
                 )
-                options = ClaudeAgentOptions(
-                    model="sonnet",
-                    system_prompt=system_prompt,
-                    max_turns=MAX_TURNS,
-                    mcp_servers={MCP_SERVER_NAME: mcp_server},
-                    permission_mode="bypassPermissions",
-                )
+                options = self._make_pdf_chunk_options(system_prompt, mcp_server)
 
                 file_id_hint = ""
                 if preset_file_id:
@@ -2088,6 +2070,22 @@ class MailProcessorService:
         }
 
     # ── MCP tool building ──────────────────────────────────────────────
+
+    @staticmethod
+    def _make_pdf_chunk_options(system_prompt, mcp_server):
+        """Build the ClaudeAgentOptions used for PDF image-mode chunk processing.
+
+        The same option shape is used by the initial run, the post-stream-error
+        retry, and the follow-up-after-no-tool-call retry. Centralising avoids
+        the previous 3-way drift risk.
+        """
+        return ClaudeAgentOptions(
+            model="sonnet",
+            system_prompt=system_prompt,
+            max_turns=MAX_TURNS,
+            mcp_servers={MCP_SERVER_NAME: mcp_server},
+            permission_mode="bypassPermissions",
+        )
 
     def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None, email_lookup=None):
         """Build SdkMcpTool objects for the mail processor agent.
