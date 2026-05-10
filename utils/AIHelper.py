@@ -18,10 +18,10 @@ from utils.logger import Logger
 _logger = Logger(__name__).get_logger()
 
 
-def fetch_via_ai(prompt: str, system: str = None) -> dict | None:
+def fetch_via_ai(prompt: str, system: str = None) -> tuple[dict | None, str]:
     """
     Call Claude with built-in web search to fetch structured data.
-    Returns parsed JSON dict or None on failure.
+    Returns (parsed JSON dict or None, error_detail string).
     """
     if system is None:
         system = (
@@ -30,11 +30,15 @@ def fetch_via_ai(prompt: str, system: str = None) -> dict | None:
             "Respond with ONLY a valid JSON object — no markdown, no explanation."
         )
 
+    # allowed_tools is required: with permission_mode='bypassPermissions' and a
+    # tool-implying system prompt, missing allowed_tools makes built-in tools
+    # silently unavailable and the SDK returns zero TextBlocks (April outage shape).
     options = ClaudeAgentOptions(
         model="sonnet",
         system_prompt=system,
         max_turns=6,
         permission_mode="bypassPermissions",
+        allowed_tools=["WebSearch", "WebFetch"],
     )
 
     text_parts = []
@@ -63,19 +67,25 @@ def fetch_via_ai(prompt: str, system: str = None) -> dict | None:
     try:
         anyio.run(run)
     except Exception as e:
-        _logger.error(f"fetch_via_ai failed: {e}")
-        return None
+        detail = f"fetch_via_ai exception: {e}"
+        _logger.error(detail)
+        return None, detail
 
     if error_msg:
-        _logger.error(f"fetch_via_ai error: {error_msg}")
-        return None
+        detail = f"fetch_via_ai assistant error: {error_msg}"
+        _logger.error(detail)
+        return None, detail
 
     raw = "".join(text_parts).strip()
     if not raw:
-        _logger.warning("fetch_via_ai: empty response")
-        return None
+        detail = "fetch_via_ai: empty response"
+        _logger.warning(detail)
+        return None, detail
 
-    return _extract_json(raw)
+    parsed = _extract_json(raw)
+    if parsed is None:
+        return None, "fetch_via_ai: could not extract JSON from response"
+    return parsed, ""
 
 
 def _extract_json(text: str) -> dict | None:
