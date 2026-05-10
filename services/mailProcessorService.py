@@ -645,12 +645,18 @@ class MailProcessorService:
             tools=sdk_tools,
         )
 
+        # MCP tool names listed explicitly so the agent doesn't depend on the
+        # SDK's "MCP tools always available regardless of allowed_tools" contract
+        # (deep-study §7.2). Defensive against future SDK behaviour shifts.
         options = ClaudeAgentOptions(
             model="haiku",
             system_prompt=TEXT_EMAIL_SYSTEM_PROMPT,
             max_turns=MAX_TURNS,
             mcp_servers={MCP_SERVER_NAME: mcp_server},
             permission_mode="bypassPermissions",
+            allowed_tools=[
+                f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in MAIL_PROCESSOR_TOOLS
+            ],
         )
 
         prompt_text = (
@@ -2077,7 +2083,9 @@ class MailProcessorService:
 
         The same option shape is used by the initial run, the post-stream-error
         retry, and the follow-up-after-no-tool-call retry. Centralising avoids
-        the previous 3-way drift risk.
+        the previous 3-way drift risk. MCP tool names are listed explicitly in
+        allowed_tools (deep-study §7.2 — defensive vs the implicit "MCP tools
+        always available" SDK contract).
         """
         return ClaudeAgentOptions(
             model="sonnet",
@@ -2085,6 +2093,9 @@ class MailProcessorService:
             max_turns=MAX_TURNS,
             mcp_servers={MCP_SERVER_NAME: mcp_server},
             permission_mode="bypassPermissions",
+            allowed_tools=[
+                f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in MAIL_PROCESSOR_TOOLS
+            ],
         )
 
     def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None, email_lookup=None):

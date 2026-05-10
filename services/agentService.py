@@ -127,15 +127,19 @@ class AgentService(BaseService):
             # allowed_tools is required: with permission_mode='bypassPermissions'
             # and no list, built-in tools are silently unavailable and the agent
             # returns zero TextBlocks. Bash is intentionally NOT included for
-            # user-facing chat — too broad under bypassPermissions. MCP tools
-            # registered via mcp_servers are always available.
+            # user-facing chat — too broad under bypassPermissions. MCP tool
+            # names are listed explicitly (defensive: SDK's "MCP tools always
+            # available" contract is not relied on — deep-study §7.2).
+            mcp_tool_names = [
+                f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in config["tools"]
+            ]
             options = ClaudeAgentOptions(
                 system_prompt=config["system_prompt"],
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
                 max_turns=MAX_TURNS,
                 model="sonnet",
-                allowed_tools=["WebSearch", "WebFetch"],
+                allowed_tools=["WebSearch", "WebFetch"] + mcp_tool_names,
             )
 
             # Run the query (blocking — collects all results then yields)

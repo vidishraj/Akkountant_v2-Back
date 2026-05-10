@@ -142,6 +142,10 @@ class CronAgent:
                 max_turns=10,
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
+                # MCP tool names listed explicitly (defensive — see deep-study §7.2)
+                allowed_tools=[
+                    f"mcp__{MCP_SERVER_NAME}__{t.name}" for t in sdk_tools
+                ],
             )
 
             prompt_text = self._build_prompt_with_history()
