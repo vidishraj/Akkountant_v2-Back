@@ -110,38 +110,7 @@ class EPFService(Base_EPG, ABC):
                     'amount': amount,
                     'interest': interest,
                 })
-            
-            # Generate transactions for months after last deposit
-            if len(deposits) > 0:
-                lastEmployee = float(deposits[-1].depositAmount)
-                lastEmployer = float(deposits[-1].employerAmount) if deposits[-1].employerAmount is not None else float(deposits[-1].depositAmount)
-                lastDeposit = lastEmployee + lastEmployer
-                lastDescription = deposits[-1].depositDescription
-                lastMonth = transactions[-1]['date']
-                for month in self.dateTimeUtil.iterate_months(deposits[-1].date.__str__()):
-                    if month != lastMonth:
-                        date = month
-                        description = lastDescription
-                        amount = lastDeposit
-                        totalContributions += amount
 
-                        rate = self.JsonDownloadService.getRateForMonth(date, EPGEnum.EPF.value)
-                        interest = running * (rate / 1200)
-                        runningInterest += interest
-                        
-                        running += amount
-                        
-                        if date.endswith("03", len(date) - 2, len(date)):
-                            running += runningInterest
-                            runningInterest = 0
-                            
-                        transactions.append({
-                            'date': date,
-                            'description': f"GENERATED ROW {description}",
-                            'amount': amount,
-                            'interest': interest,
-                        })
-            
             # Calculate final values
             finalBalance = running + runningInterest  # Current total value
             netProfit = finalBalance - totalContributions  # Interest earned
