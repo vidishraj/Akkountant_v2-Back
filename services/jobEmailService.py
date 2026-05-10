@@ -217,9 +217,14 @@ For MY job applications: extract company, job_title, status (applied/interview/o
     def _call_claude_api(self, prompt):
         """Call Claude API using claude_agent_sdk"""
         try:
-            # Configure Claude options for batch job email analysis
+            # Configure Claude options for batch job email analysis.
+            # model="haiku": this is a classifier — sonnet is overkill (deep-study §7.1).
+            # permission_mode="bypassPermissions": style consistency with other call
+            # sites; no-op today since no tools are configured.
             options = ClaudeAgentOptions(
+                model="haiku",
                 max_turns=1,
+                permission_mode="bypassPermissions",
                 system_prompt="""You are a precise email classifier that ONLY identifies emails about job applications I have personally submitted.
 
 STRICT CRITERIA - Mark as job-related ONLY if:
