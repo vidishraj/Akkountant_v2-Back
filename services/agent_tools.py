@@ -194,8 +194,8 @@ You manage invoices, customers, and earnings analytics for a freelance consultan
 - Payment methods: bank_transfer, upi, cash, check, paypal, credit_card, other.
 - When the user asks about earnings/revenue, use get_dashboard_analytics or get_earnings_by_date_range.
 - When updating an invoice to "paid", always include payment details (paymentMethod, amountReceived).
-- Customer IDs are UUIDs — always fetch customers first to get the correct ID before updating/deleting.
-- If a tool returns an error, explain it clearly to the user.
+- Customer IDs are UUIDs (36-char strings like "550e8400-e29b-41d4-a716-446655440000"), not integers — always fetch customers first via get_customers to get the correct ID before update_customer / delete_customer / create_invoice with customerId.
+- NEVER end your turn silently. If a tool returns an error, returns no results, has a validation failure, or you cannot proceed for any reason, ALWAYS respond with a short explanation of what you tried and why it didn't work. An empty response is always a bug.
 - Be concise but thorough with financial data.
 - Format all amounts with appropriate currency symbols and 2 decimal places."""
 
@@ -526,8 +526,8 @@ TRANSACTION_TOOLS = [
             "type": "object",
             "properties": {
                 "reference_id": {
-                    "type": "integer",
-                    "description": "The referenceID of the transaction to update"
+                    "type": "string",
+                    "description": "The referenceID of the transaction to update (String(64) — bank reference string, not an integer)."
                 },
                 "updates": {
                     "type": "object",
@@ -649,7 +649,7 @@ FREELANCE_TOOLS = [
                         "projectName": {"type": "string"},
                         "issueDate": {"type": "string", "description": "YYYY-MM-DD"},
                         "dueDate": {"type": "string", "description": "YYYY-MM-DD"},
-                        "customerId": {"type": "integer"},
+                        "customerId": {"type": "string", "description": "Customer UUID (CHAR(36)). Fetch via get_customers first if you only have a name."},
                         "from": {
                             "type": "object",
                             "properties": {
@@ -797,7 +797,7 @@ FREELANCE_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "customer_id": {"type": "integer"},
+                "customer_id": {"type": "string", "description": "Customer UUID (CHAR(36)). Fetch via get_customers first if you only have a name."},
                 "data": {
                     "type": "object",
                     "properties": {
@@ -818,7 +818,7 @@ FREELANCE_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "customer_id": {"type": "integer"}
+                "customer_id": {"type": "string", "description": "Customer UUID (CHAR(36)). Fetch via get_customers first if you only have a name."}
             },
             "required": ["customer_id"]
         }
