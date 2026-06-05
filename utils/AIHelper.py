@@ -26,10 +26,19 @@ def fetch_via_ai(prompt: str, system: str = None) -> tuple[dict | None, str]:
         are diagnosable without grepping journalctl.
     """
     if system is None:
+        # Failure-shape note: the previous gag ("ONLY a valid JSON object — no
+        # markdown, no explanation") matched the SetGoldRate empty-TextBlocks
+        # shape (turns=0 tools_called=0 latency_ms~4s status=ok) — sonnet has
+        # no permitted way to narrate its search plan, so it returns nothing
+        # at all. Softer prompt permits narration; _extract_json downstream is
+        # permissive (raw JSON, markdown-fenced, or first-{ to last-} block).
         system = (
-            "You are a financial data assistant. "
-            "Use web search to find the requested data. "
-            "Respond with ONLY a valid JSON object — no markdown, no explanation."
+            "You are a financial data assistant. Use web search to find the "
+            "requested data. You may briefly describe what you are looking "
+            "for as you work. Your final response MUST contain a JSON object "
+            "— as the entire response, or wrapped in ```json ... ``` markdown "
+            "fences, or as a single recognisable {...} block in your reply. "
+            "The JSON is extracted programmatically downstream."
         )
 
     # allowed_tools is required: with permission_mode='bypassPermissions' and

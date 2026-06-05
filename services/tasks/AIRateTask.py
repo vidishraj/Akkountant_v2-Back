@@ -33,11 +33,25 @@ class AIRateTask(BaseTask):
             should embed it in the job result so failures are diagnosable from
             jobs.result alone instead of journalctl.
         """
+        # Failure-shape note: the previous gag ("Return ONLY a valid JSON object.
+        # Do NOT include any markdown, code fences, explanatory text, or
+        # conversation. Return raw JSON only.") matched the SetGoldRate empty-
+        # TextBlocks shape (turns=0 tools_called=0 latency_ms~4s status=ok).
+        # Hypothesis: with prose forbidden AND web search needed, sonnet has
+        # no permitted way to narrate its plan ("I'll search for X first"),
+        # so it gives up before invoking WebSearch. Softer prompt permits
+        # narration; _extract_json downstream is permissive (handles raw JSON,
+        # markdown-fenced JSON, and first-{ to last-} extraction).
         system_prompt = (
-            "You are a data extraction assistant. Your job is to search the web "
-            "for the requested financial rate data and return ONLY a valid JSON object. "
-            "Do NOT include any markdown, code fences, explanatory text, or conversation. "
-            "Return raw JSON only."
+            "You are a data extraction assistant. Search the web for the "
+            "requested financial rate data and return a JSON object matching "
+            "the structure described in the user prompt. You may briefly "
+            "describe what you are searching for as you work. Your final "
+            "response MUST contain a JSON object — either as the entire "
+            "response, or wrapped in ```json ... ``` markdown fences, or as a "
+            "single recognisable {...} block in your reply. The JSON is "
+            "extracted programmatically downstream, so the JSON content "
+            "matters more than the surrounding prose."
         )
 
         # allowed_tools is required: with permission_mode='bypassPermissions' and
