@@ -132,6 +132,16 @@ class AgentService(BaseService):
             # user-facing chat — too broad under bypassPermissions. MCP tool
             # names are listed explicitly (defensive: SDK's "MCP tools always
             # available" contract is not relied on).
+            #
+            # WebSearch + WebFetch were previously listed defensively after the
+            # April outage, but the three chat personas operate exclusively on
+            # the Overseer's own data via MCP — they have no web-data need. The
+            # combination of sonnet + WebSearch + WebFetch + tool-implying
+            # system prompts was producing the empty-TextBlocks failure (see
+            # SetGoldRate parity, Overseer-confirmed empty `done` SSE event).
+            # Dropping them restores chat replies. Rate fetchers that genuinely
+            # need WebSearch/WebFetch (rate.gold, rate.epf, rate.ppf,
+            # stocks.ipo) get a separate fix in Family B.
             mcp_tool_names = [
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in config["tools"]
             ]
@@ -141,7 +151,7 @@ class AgentService(BaseService):
                 permission_mode="bypassPermissions",
                 max_turns=MAX_TURNS,
                 model="sonnet",
-                allowed_tools=["WebSearch", "WebFetch"] + mcp_tool_names,
+                allowed_tools=mcp_tool_names,
             )
 
             # Run the query (blocking — collects all results then yields).
