@@ -1,118 +1,113 @@
 """
-Standalone AI helper for calling Claude with web search.
-No imports from services/ to avoid circular dependencies.
+Standalone AI helper for fetching IPO allotment prices for Indian stocks.
+
+v2 architecture (post-hq-wisp-bommx): fetch a known IPO listing page via
+`requests`, then ask sonnet to extract per-stock data using `output_format`
+JSON schema. Replaces v1's SDK-driven `WebSearch` + `WebFetch` shape, which
+shared the same empty-TextBlocks failure mode as the rate fetchers
+(`turns=0 tools_called=0`).
+
+The caller (`services.StocksService._lookup_ipo_prices`) passes a `prompt`
+listing the symbols/ISINs it wants prices for. We pass that list through to
+sonnet as the `extra_context`, alongside the fetched IPO listing page body,
+and ask sonnet to look up each entry.
+
+Refs: hq-wisp-bommx (Family B v2 architecture directive).
 """
 
-import json
-import re
-
-import anyio
-from claude_agent_sdk import ClaudeAgentOptions
+from __future__ import annotations  # PEP 604 (`dict | None`) on 3.9 worktree env
 
 from utils.logger import Logger
-from utils.sdk_runner import run_query_collect
+from utils.web_extract import fetch_and_extract
 
 _logger = Logger(__name__).get_logger()
 
 
+# Upstream URL for Indian IPO list with allotment prices. chittorgarh.com
+# maintains a comprehensive table of mainboard IPOs with issue prices,
+# listing dates, and listing-day gains, going back ~15 years. It's the
+# most-cited source in Indian equity reporting and rarely changes URL
+# structure.
+_IPO_URL = "https://www.chittorgarh.com/report/mainboard-ipo-list-in-india/82/"
+
+
+_IPO_SYSTEM_PROMPT = """You are a data extraction assistant. You will receive
+the HTML of an Indian IPO listing page that contains a table of mainboard
+IPOs with allotment / issue prices and listing dates.
+
+The user message will include a list of stocks (symbol + ISIN + first sell
+date) the caller needs IPO allotment data for. For each requested stock,
+find the matching row in the IPO list and return its allotment price and
+date.
+
+Rules:
+- `allotment_price` = the price at which retail investors received shares
+  in the IPO (issue price). If the stock was received via a corporate
+  action (demerger, bonus, etc.) rather than an IPO and you cannot find an
+  issue price on the page, use the listing-day price if available, else
+  skip that stock.
+- `allotment_date` = IPO allotment date or listing date in YYYY-MM-DD
+  format.
+- `source` = a short note like "IPO 2021-03-15" or "demerger from XYZ".
+- Match stocks by ISIN preferentially; symbol as a secondary signal.
+- If you cannot find a stock in the page text, omit it from `results`
+  (do not invent values).
+- Return only stocks you found. Empty `results` is a valid output if
+  none of the requested stocks are on the page."""
+
+
+_IPO_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "isin": {"type": "string"},
+                    "allotment_price": {"type": "number"},
+                    "allotment_date": {"type": "string"},
+                    "source": {"type": "string"},
+                },
+                "required": ["isin", "allotment_price", "allotment_date"],
+            },
+        }
+    },
+    "required": ["results"],
+}
+
+
 def fetch_via_ai(prompt: str, system: str = None) -> tuple[dict | None, str]:
     """
-    Call Claude with built-in web search to fetch structured data.
+    Fetch IPO allotment data for the stocks listed in `prompt`.
+
+    Args:
+        prompt: Caller-provided context listing the requested stocks
+            (symbols, ISINs, first sell dates). Passed verbatim to sonnet as
+            extra context alongside the fetched IPO page body.
+        system: Optional override of the extraction system prompt. Defaults
+            to the IPO-specific prompt above. Mostly here for backwards
+            compatibility with the v1 signature; new call sites should not
+            pass this.
 
     Returns:
-        (parsed_json, "") on success.
-        (None, detail) on any failure. `detail` is non-empty and short —
-        callers should embed it in their log path / job result so failures
-        are diagnosable without grepping journalctl.
+        (parsed_dict, "") on success — schema-validated, shape
+        `{"results": [{"symbol", "isin", "allotment_price", ...}, ...]}`.
+        (None, detail) on any failure — fetch error, sonnet error, or
+        structured-output missing.
     """
-    if system is None:
-        # Failure-shape note: the previous gag ("ONLY a valid JSON object — no
-        # markdown, no explanation") matched the SetGoldRate empty-TextBlocks
-        # shape (turns=0 tools_called=0 latency_ms~4s status=ok) — sonnet has
-        # no permitted way to narrate its search plan, so it returns nothing
-        # at all. Softer prompt permits narration; _extract_json downstream is
-        # permissive (raw JSON, markdown-fenced, or first-{ to last-} block).
-        system = (
-            "You are a financial data assistant. Use web search to find the "
-            "requested data. You may briefly describe what you are looking "
-            "for as you work. Your final response MUST contain a JSON object "
-            "— as the entire response, or wrapped in ```json ... ``` markdown "
-            "fences, or as a single recognisable {...} block in your reply. "
-            "The JSON is extracted programmatically downstream."
-        )
+    system_prompt = system or _IPO_SYSTEM_PROMPT
 
-    # allowed_tools is required: with permission_mode='bypassPermissions' and
-    # no allowed_tools, the agent silently returns zero TextBlocks because it
-    # cannot use any tools and the system prompt forbids non-JSON text.
-    # Mirrors the AIRateTask fix in f15ef18.
-    options = ClaudeAgentOptions(
-        model="sonnet",
-        system_prompt=system,
-        max_turns=6,
-        permission_mode="bypassPermissions",
-        allowed_tools=["WebSearch", "WebFetch"],
+    result, err = fetch_and_extract(
+        url=_IPO_URL,
+        system_prompt=system_prompt,
+        schema=_IPO_SCHEMA,
+        agent="stocks.ipo",
+        extra_context=prompt,
     )
 
-    async def make_prompt():
-        yield {
-            "type": "user",
-            "session_id": "",
-            "message": {"role": "user", "content": prompt},
-            "parent_tool_use_id": None,
-        }
-
-    async def run():
-        return await run_query_collect(
-            agent="stocks.ipo", options=options, prompt=make_prompt(),
-        )
-
-    try:
-        result = anyio.run(run)
-    except Exception as e:
-        detail = f"SDK exception: {e}"
-        _logger.error(f"fetch_via_ai failed: {e}")
-        return None, detail
-
-    if result.error:
-        _logger.error(f"fetch_via_ai error: {result.error}")
-        return None, f"Provider error: {result.error}"
-
-    raw = result.text.strip()
-    if not raw:
-        _logger.warning("fetch_via_ai: empty response")
-        return None, "Empty response (no TextBlocks — likely missing allowed_tools or model refused)"
-
-    parsed = _extract_json(raw)
-    if parsed is None:
-        head = raw[:300].replace("\n", " ")
-        return None, f"JSON extract failed. Response head: {head}"
-    return parsed, ""
-
-
-def _extract_json(text: str) -> dict | None:
-    """Extract a JSON object from text that may contain markdown fences or prose."""
-    # Try direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try inside ```json ... ```
-    fence = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-    if fence:
-        try:
-            return json.loads(fence.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    # Try first { to last }
-    first = text.find('{')
-    last = text.rfind('}')
-    if first != -1 and last > first:
-        try:
-            return json.loads(text[first:last + 1])
-        except json.JSONDecodeError:
-            pass
-
-    _logger.warning(f"fetch_via_ai: could not extract JSON: {text[:300]}")
-    return None
+    if err:
+        _logger.error(f"stocks.ipo fetch_and_extract failed: {err}")
+        return None, err
+    return result, ""

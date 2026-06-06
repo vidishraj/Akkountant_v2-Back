@@ -19,6 +19,8 @@ Two entry points:
   call this once at the end.
 """
 
+from __future__ import annotations  # PEP 604 (`dict | None`) on 3.9 worktree env
+
 import time
 from dataclasses import dataclass
 

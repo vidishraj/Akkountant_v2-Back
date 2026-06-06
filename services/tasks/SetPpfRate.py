@@ -5,6 +5,51 @@ from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
 
+# PPF historical interest rates. Wikipedia's "Public Provident Fund (India)"
+# page maintains a rate history table that's updated within days of any
+# rate change. PPF rates changed annually before 2016 then quarterly after
+# the rate-reset framework took effect.
+PPF_URL = "https://en.wikipedia.org/wiki/Public_Provident_Fund_(India)"
+
+PPF_SYSTEM_PROMPT = """You are a data extraction assistant. You will receive
+the HTML of a Wikipedia page with a table of historical PPF (Public Provident
+Fund) interest rates in India from 1999 through the present.
+
+Extract each date when the PPF rate changed, plus the new rate. Return only
+the rate-change points (not monthly entries).
+
+Output format for each entry:
+- "from" is in "YYYY-MM" format — the first month the rate took effect
+- "rate" is a float (e.g. 7.1)
+
+PPF rate cadence:
+- Annual changes before 2016 (~one entry per fiscal year)
+- Quarterly changes from 2016 onwards (~four entries per year, in
+  Apr/Jul/Oct/Jan)
+
+You should produce roughly 20-40 entries from 1999-04 through the current
+quarter."""
+
+
+PPF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "periods": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string"},
+                    "rate": {"type": "number"},
+                },
+                "required": ["from", "rate"],
+            },
+        }
+    },
+    "required": ["periods"],
+}
+
+
 class SetPPFRate(AIRateTask):
     _instance = None
 
@@ -23,7 +68,11 @@ class SetPPFRate(AIRateTask):
 
     @staticmethod
     def _expand_periods_to_monthly(periods):
-        """Expand rate change periods into monthly entries."""
+        """Expand rate change periods into monthly entries.
+
+        Pure data transform; lifted from v1 unchanged so the on-disk
+        PPFRate.json contract (consumed by the read path) stays identical.
+        """
         data = []
         now = datetime.now()
         current_ym = f"{now.year}-{now.month:02d}"
@@ -55,22 +104,17 @@ class SetPPFRate(AIRateTask):
 
     def run(self):
         try:
-            prompt = (
-                "Search the web for PPF (Public Provident Fund) interest rate history in India "
-                "from 1999 to present. Find each date when the rate changed and the new rate. "
-                "Return JSON with key \"periods\" containing an array of objects, each with "
-                "\"from\" (YYYY-MM format, the month the rate took effect) and \"rate\" (float, e.g. 7.1). "
-                "Only include rate change points, not monthly entries. "
-                "PPF rates changed annually before 2016, then quarterly. "
-                "There should be roughly 20-40 entries from 1999-04 to the current quarter."
+            jsonData, ai_err = self.fetch_rates_via_ai(
+                url=PPF_URL,
+                system_prompt=PPF_SYSTEM_PROMPT,
+                schema=PPF_SCHEMA,
+                agent="rate.ppf",
             )
-
-            jsonData, ai_err = self.fetch_rates_via_ai(prompt, agent="rate.ppf")
             if jsonData is None:
-                return f"Failed to get PPF Rates via AI: {ai_err}"[:800], "Failed", self.interval
+                return f"Failed to get PPF Rates: {ai_err}"[:800], "Failed", self.interval
             if 'periods' not in jsonData or len(jsonData['periods']) == 0:
                 got_keys = list(jsonData.keys())[:10]
-                return f"PPF Rates AI response missing/empty 'periods'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+                return f"PPF Rates response missing/empty 'periods'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
 
             # Expand rate change periods into monthly entries
             monthly_data = self._expand_periods_to_monthly(jsonData['periods'])

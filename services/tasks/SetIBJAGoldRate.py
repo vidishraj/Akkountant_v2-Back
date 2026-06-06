@@ -4,6 +4,68 @@ from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
 
+# Upstream URL for IBJA daily gold/silver rates.
+# IBJA publishes the rate table at this page; sonnet extracts the AM/PM
+# prices per purity from the HTML.
+GOLD_URL = "https://ibjarates.com/"
+
+GOLD_SYSTEM_PROMPT = """You are a data extraction assistant. You will receive
+the HTML of the IBJA (India Bullion and Jewellers Association) daily rate page.
+Extract today's gold (purities 999, 995, 916, 750, 585) and silver (999) AM
+and PM prices.
+
+Gold prices on the page are per 10 grams. Silver is per 1 kg.
+
+For each purity, compute:
+- avg_price = round((am_price + pm_price) / 2)
+- avg_with_gst = int(avg_price * 1.03)  # 3% GST, truncated
+
+Top-level "24 Carat", "22 Carat", "18 Carat" are the avg_with_gst values for
+gold 999, 916, and 750 respectively.
+
+If today's rates are not available yet (e.g. before market open), use the
+most recent available day's rates and use that day's date in ibja_data.date.
+
+Return ALL prices as integers in INR. Date format: "DD-Mon-YY" (e.g. "16-Feb-26")."""
+
+
+# JSON schema for output_format. Strict enough to validate that prices came
+# through as integers and the date is present, while letting the model fill in
+# zero-or-missing purities gracefully.
+GOLD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "24 Carat": {"type": "integer"},
+        "22 Carat": {"type": "integer"},
+        "18 Carat": {"type": "integer"},
+        "ibja_data": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string"},
+                "gold": {
+                    "type": "object",
+                    "properties": {
+                        "999": {"type": "object"},
+                        "995": {"type": "object"},
+                        "916": {"type": "object"},
+                        "750": {"type": "object"},
+                        "585": {"type": "object"},
+                    },
+                },
+                "silver": {
+                    "type": "object",
+                    "properties": {"999": {"type": "object"}},
+                },
+                "currency": {"type": "string"},
+                "source": {"type": "string"},
+            },
+            "required": ["date", "gold", "currency", "source"],
+        },
+    },
+    "required": ["24 Carat", "22 Carat", "18 Carat", "ibja_data"],
+}
+
+
 class SetIBJAGoldRate(AIRateTask):
     _instance = None
 
@@ -22,85 +84,17 @@ class SetIBJAGoldRate(AIRateTask):
 
     def run(self):
         try:
-            prompt = """Search the web for today's IBJA (India Bullion and Jewellers Association) gold and silver rates.
-Look for the latest daily opening and closing rates from ibjarates.com or other reliable Indian bullion rate sources.
-
-I need rates for these gold purities (per 10 grams) and silver (per 1 kg):
-- Gold 999 (24 Carat) - AM and PM prices
-- Gold 995 - AM and PM prices
-- Gold 916 (22 Carat) - AM and PM prices
-- Gold 750 (18 Carat) - AM and PM prices
-- Gold 585 - AM and PM prices
-- Silver 999 - AM and PM prices per kg
-
-Return a JSON object with this EXACT structure (all prices in INR as integers):
-
-{
-  "24 Carat": <gold_999_avg_with_3pct_gst>,
-  "22 Carat": <gold_916_avg_with_3pct_gst>,
-  "18 Carat": <gold_750_avg_with_3pct_gst>,
-  "ibja_data": {
-    "date": "<DD-Mon-YY>",
-    "gold": {
-      "999": {
-        "am_price_10g": <int>,
-        "pm_price_10g": <int>,
-        "avg_price_10g": <int>,
-        "avg_with_gst": <int>
-      },
-      "995": {
-        "am_price_10g": <int>,
-        "pm_price_10g": <int>,
-        "avg_price_10g": <int>,
-        "avg_with_gst": <int>
-      },
-      "916": {
-        "am_price_10g": <int>,
-        "pm_price_10g": <int>,
-        "avg_price_10g": <int>,
-        "avg_with_gst": <int>
-      },
-      "750": {
-        "am_price_10g": <int>,
-        "pm_price_10g": <int>,
-        "avg_price_10g": <int>,
-        "avg_with_gst": <int>
-      },
-      "585": {
-        "am_price_10g": <int>,
-        "pm_price_10g": <int>,
-        "avg_price_10g": <int>,
-        "avg_with_gst": <int>
-      }
-    },
-    "silver": {
-      "999": {
-        "am_price_1kg": <int>,
-        "pm_price_1kg": <int>,
-        "avg_price_1kg": <int>,
-        "avg_with_gst": <int>
-      }
-    },
-    "currency": "INR",
-    "source": "IBJA"
-  }
-}
-
-Calculation rules:
-- avg_price = (am_price + pm_price) / 2 (integer division)
-- avg_with_gst = avg_price * 1.03 (truncated to integer)
-- "24 Carat" = gold 999 avg_with_gst
-- "22 Carat" = gold 916 avg_with_gst
-- "18 Carat" = gold 750 avg_with_gst
-- Date format: "DD-Mon-YY" (e.g. "16-Feb-26")
-- If today's rates aren't available yet (e.g. before market open), use the most recent available day's rates"""
-
-            jsonData, ai_err = self.fetch_rates_via_ai(prompt, agent="rate.gold")
+            jsonData, ai_err = self.fetch_rates_via_ai(
+                url=GOLD_URL,
+                system_prompt=GOLD_SYSTEM_PROMPT,
+                schema=GOLD_SCHEMA,
+                agent="rate.gold",
+            )
             if jsonData is None:
-                return f"Failed to get Gold Rates via AI: {ai_err}"[:800], "Failed", self.interval
+                return f"Failed to get Gold Rates: {ai_err}"[:800], "Failed", self.interval
             if '24 Carat' not in jsonData:
                 got_keys = list(jsonData.keys())[:10]
-                return f"Gold Rates AI response missing '24 Carat'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+                return f"Gold Rates response missing '24 Carat'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
 
             filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
             try:
