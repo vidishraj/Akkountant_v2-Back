@@ -1008,5 +1008,116 @@ biggest cost lever — all in roughly a week of focused work.
 
 ---
 
-*End of study. Output: `docs/agent-deep-study-2026-05.md` in this repo.
-Hand-off to Commit Agent follows.*
+## 9. Post-firefighting addendum (2026-06-06)
+
+Roughly a month after the study landed, a cascade of P0 fires forced several
+recommendations to ship as emergency patches rather than scheduled migrations.
+This section reconciles the recommendation table against deployed code.
+
+### 9.1 What forced the fires
+
+**R1** (the on-fire AIHelper finding) had not been picked up yet when, in early
+June, the same empty-TextBlocks shape surfaced *again* in three more places:
+the user-facing chat agent (`agentService.py`), the rate fetchers
+(`AIRateTask` → Gold/EPF/PPF), and stocks.ipo. The infra forensics confirmed
+the failure shape was identical to the April outage: `agent_run agent=X
+model=sonnet turns=0 tools_called=0 status=ok` — sonnet + WebSearch + WebFetch
++ tool-implying system prompts producing zero TextBlocks under
+`bypassPermissions`.
+
+This re-validated the doc's central thesis (the §7.2 matrix correctly flagged
+all four sites) but elevated the priority of R1, R9, R10 from "scheduled" to
+"P0 patch this week."
+
+### 9.2 Recommendation status
+
+| ID | Original status | Shipped? | Branch / commit | Notes |
+|---|---|---|---|---|
+| R1 | trivial, high impact | ✅ **superseded** | `bf5d649`, `880a442` | Original recommendation was "add `allowed_tools=[WebSearch,WebFetch]`." **Family B v2** went further: replaced the SDK web-fetch entirely with `requests.get` + sonnet `output_format` JSON-schema extraction (see §2.3 pattern). R1's fix would have plastered over the symptom; the v2 rewrite cures the class. |
+| R2 | trivial, medium | ⏳ pending | – | The three identical `ClaudeAgentOptions` blocks in §2.4 are unchanged. |
+| R3 | trivial, low | ⏳ pending | – | `jobEmailService.py:221` still uses default model. |
+| R4 | trivial, medium | 🟡 partial | `2d102f2` | `agentService.py` got an explicit MCP-only `allowed_tools` list as part of Family A (dropped WebSearch + WebFetch from chat at the same time — they were never needed). Other MCP sites (§2.2, §2.4, §3.3) still rely on the SDK's "MCP tools always allowed" contract. |
+| R5 | trivial, high (obs) | ✅ **done** | (pre-cascade) | `utils/sdk_runner.py::emit_agent_run` shipped before the cascade. The structured `agent_run` log line is what made the cascade *diagnosable* — without it, the infra forensics couldn't have distinguished "model returned empty" from "model crashed" from "rate limited." R5 was the single highest-leverage shipped recommendation. |
+| R6 | structural, high | ⏳ pending | – | No 15-minute health probe cron yet. Infra has the `agent_run` log shape to build it on (R5 → R6 unblocked). |
+| R7 | structural, high | ⏳ pending | – | Agent-1 classifier still uses opus + regex-extracted JSON. Cost + drift exposure remain. |
+| R8 | structural, medium | ⏳ pending | – | Same shape as R7 for jobs classifier. |
+| R9 | structural, medium | ✅ **done** | `880a442` | **Family B v2** rewrote `AIRateTask` and its three subclasses to use `requests.get` + sonnet `output_format` JSON-schema. New shared helper at `utils/web_extract.py::fetch_and_extract`. Per-task schemas live as module constants in `SetIBJAGoldRate.py`, `SetEPFRate.py`, `SetPpfRate.py`. |
+| R10 | structural, medium | ✅ **done** | `880a442` | `AIHelper.py::fetch_via_ai` now delegates to `fetch_and_extract`. Caller signature in `StocksService.py:337` is unchanged for backwards compatibility, but the SDK web-search shape is gone. |
+| R11 | structural, high | ⏳ pending | – | No `Stop` hook on §2.2. |
+| R12 | structural, medium | ⏳ pending | – | Coverage check not replicated in image mode. Lead has flagged this as a follow-up bead. |
+| R13 | structural, high | ⏳ pending | – | Tuple-return pattern (`dict\|None, str`) is now standardized across `AIRateTask.fetch_rates_via_ai`, `fetch_and_extract`, and `AIHelper.fetch_via_ai` — but only across the v2 rewrites. Other call sites still use ad-hoc shapes. Lead filing as a follow-up. |
+| R14 | structural, high (cost) | ⏳ pending | – | No prompt caching anywhere. |
+| R15 | structural, medium | ⏳ pending | – | Cron agent unchanged. |
+| R16 | ambitious, high (UX) | ⏳ pending | – | Chat agent still uses flat-history string prompt; no `ClaudeSDKClient` + `resume`. |
+| R17 | ambitious, high | 🤔 partially obviated | – | Real-time-rate MCP tool was the "deterministic data" idea. **Family B v2** sidesteps the LLM-fetches-web problem by pinning the URL and using sonnet only for extraction — but the upstream URL is still a single point of failure (e.g. ibjarates.com going down or restructuring its page). R17 remains valuable as a defense-in-depth layer; not obsolete. |
+| R18 | ambitious, high | ⏳ pending | – | No labelled classification fixtures. |
+| R19 | ambitious, high | ⏳ pending | – | No per-persona chat eval. |
+| R20 | ambitious, medium | 🟡 partial | `880a442` | `web_extract.py` records `Source URL: <url>` in the user message handed to sonnet, so the model could in principle cite it — but no enforcement. The structured `agent_run` log line records the agent label which maps 1:1 to URL, so source provenance is recoverable from log + code-read. |
+
+### 9.3 New issues surfaced during the cascade (not in original R-table)
+
+| ID | Issue | Status |
+|---|---|---|
+| **R21** | **Freelance UUID schemas vs DB types.** `FREELANCE_TOOLS` declared `customerId` / `customer_id` as integer but `customers.customerId` is `CHAR(36)` UUID and `transactions.referenceID` is `String(64)`. The model would call the tool with an integer-shaped value, get a schema-validation tool-error back, and stop without surfacing the error to the user. | ✅ done at `bf5d649` |
+| **R22** | **"Don't go silent on tool error" rule** in `FREELANCE_SYSTEM_PROMPT`. The prompt previously instructed the agent to keep the conversation flowing without a corresponding "if a tool errors, narrate the error to the user" rule. Failures became user-invisible. | ✅ done at `bf5d649` |
+| **R23** | **EPF copy-paste bug in `InvestmentHistoryTask.py:58/60/61`** — surfaced during EPF audit, unrelated to the SDK class. | ⏳ Lead filing separately |
+| **R24** | **`iterate_months` end-date handling** is fragile — the helper that drives monthly rate expansion (used by PPF, EPF, NPS) computes month boundaries in a way that mishandles the trailing partial month. | ⏳ Lead filing separately |
+| **R25** | **BSE/NSE fallback for `stocks.ipo`.** The chittorgarh table doesn't include very-recent IPOs (last ~2 weeks). When the orphan-sell reconciliation hits a fresh IPO, the lookup returns empty. Family B v2 explicitly scoped this out. | ⏳ post-deploy follow-up bead |
+| **R26** | **`from __future__ import annotations`** is now required on every module using PEP 604 union syntax (`dict \| None`) because the worktree dev environment is Python 3.9 while prod is 3.11. Family B v2 added the future-import to four files; should be a project-wide lint rule. | 🟡 partial — applied to v2 files only |
+
+### 9.4 What the cascade taught us about the SDK-feature-gap class
+
+The April outage, the freelance chat hang, the rate-fetcher silence, and the
+stocks.ipo failure all share one shape: **`bypassPermissions` + tool-implying
+system prompt + missing or wrong `allowed_tools` for built-in web tools →
+zero TextBlocks, `agent_run … status=ok turns=0 tools_called=0`.**
+
+`status=ok` is the dangerous part. The SDK's `ResultMessage.is_error` is
+false when the model declines to act — by the SDK's contract this is a
+successful empty response. There is no way to distinguish "the agent
+correctly determined there was nothing to do" from "the agent silently
+refused to attempt the work" at the log layer alone.
+
+**Two patterns mitigate this class:**
+
+1. **`output_format` json_schema** forces structured output. If the model
+   produces zero structured output, the SDK fails the query rather than
+   returning success-with-empty. This is what makes §2.3 (PDF text mode)
+   the only fully-defended SDK site in the codebase.
+
+2. **Replace SDK web tools with `requests.get` + sonnet extraction.** The
+   SDK's WebSearch / WebFetch are convenient but failure-prone under the
+   conditions catalogued above. Family B v2 demonstrates that for a known
+   target URL, a `requests.get` outside the SDK + sonnet `output_format`
+   inside the SDK is a cleaner architecture: HTTP errors are HTTP errors,
+   extraction errors are extraction errors, and the two failure modes
+   don't blur into a single "empty success."
+
+R5's `agent_run` log line is what made these patterns *visible* — without
+the structured per-invocation log, the cascade would have remained
+invisible for weeks (as the April outage did, for four days).
+
+### 9.5 Updated ship-order recommendation
+
+The original recommended five (R1, R5, R6, R7, R14): R1, R5, R9, R10 are
+shipped. **The next five to ship, in order:**
+
+1. **R6** (15-min Claude-CLI health probe with mail-on-fail) — the cascade
+   would have been caught within 15 minutes instead of multi-day. Blocked
+   on nothing; uses the existing `agent_run` log shape from R5.
+2. **R4** (explicit `allowed_tools` MCP names everywhere) — defense in depth
+   against future SDK contract drift. Trivial mechanical change.
+3. **R7** (Agent-1 → `output_format` + haiku) — biggest single cost+reliability
+   win, and mirrors the v2 pattern proven by Family B v2.
+4. **R12** (text-mode coverage check in image mode) — closes the largest
+   silent-failure gap in the PDF pipeline.
+5. **R14** (prompt caching on the four large static system prompts) —
+   highest cost lever; pays back inside a day.
+
+Items R26 and R23/R24 are mechanical follow-ups Lead is filing separately;
+they're not in this ship order but should not be skipped.
+
+---
+
+*End of study + addendum. Original output: `docs/agent-deep-study-2026-05.md`.
+Addendum dated 2026-06-06 reflects deployment state at commit `880a442`.*
