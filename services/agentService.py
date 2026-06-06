@@ -4,6 +4,7 @@ Uses claude_agent_sdk to route queries through Claude Code CLI (no API key neede
 Tool calls are handled via an in-process MCP server.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -145,6 +146,49 @@ class AgentService(BaseService):
             mcp_tool_names = [
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in config["tools"]
             ]
+
+            # v3.2 instrumentation (hq-wisp-0kdnk): log the SDK call-boundary
+            # signature so infra can verify which build is running and what
+            # actually went to sonnet. Specifically:
+            # - sys_prompt_sha / tools_json_sha: change when source changes,
+            #   so infra can confirm post-vN build is running (gunicorn
+            #   worker bytecode cache concern)
+            # - has_get_invoices_rule: explicit Fix-2b marker (literal
+            #   substring check in the live system_prompt)
+            # - from_required / to_required: explicit Fix-2a markers from
+            #   the create_invoice tool schema actually in the tool list
+            # - messages_count + total_prompt_len: detect stuck history
+            # NOTE: user message content is NOT logged (PII). Length only.
+            sys_prompt = config["system_prompt"]
+            sys_prompt_sha = hashlib.sha256(sys_prompt.encode()).hexdigest()[:12]
+            tools_json = json.dumps(config["tools"], sort_keys=True, default=str)
+            tools_json_sha = hashlib.sha256(tools_json.encode()).hexdigest()[:12]
+            has_get_invoices_rule = "get_invoices(page=1, limit=1)" in sys_prompt
+            ci_tool = next(
+                (t for t in config["tools"] if t["name"] == "create_invoice"),
+                None,
+            )
+            ci_from_required = []
+            ci_to_required = []
+            if ci_tool:
+                try:
+                    ci_data_props = ci_tool["input_schema"]["properties"]["data"]["properties"]
+                    ci_from_required = ci_data_props["from"].get("required", [])
+                    ci_to_required = ci_data_props["to"].get("required", [])
+                except (KeyError, TypeError):
+                    pass
+            self.logger.info(
+                "chat_request agent=chat.%s model=sonnet max_turns=%d "
+                "perm=bypassPermissions sys_prompt_len=%d sys_prompt_sha=%s "
+                "tools_count=%d tools_json_sha=%s has_get_invoices_rule=%s "
+                "ci_from_required=%s ci_to_required=%s "
+                "messages_count=%d total_prompt_len=%d",
+                agent_type, MAX_TURNS, len(sys_prompt), sys_prompt_sha,
+                len(mcp_tool_names), tools_json_sha, has_get_invoices_rule,
+                ci_from_required, ci_to_required,
+                len(messages), len(prompt_text),
+            )
+
             options = ClaudeAgentOptions(
                 system_prompt=config["system_prompt"],
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
@@ -238,6 +282,14 @@ class AgentService(BaseService):
                 full_text = (
                     "I hit an internal issue and couldn't reply. Please "
                     "rephrase or click 'New Chat' to reset."
+                )
+                # v3.2 marker (hq-wisp-0kdnk): explicit log line so infra
+                # can grep sentinel-emitted instead of inferring from
+                # response body size (41B vs 169B).
+                self.logger.info(
+                    "stopgap_sentinel_emitted agent=chat.%s "
+                    "reason=zero_textblocks_no_tools",
+                    agent_type,
                 )
             if full_text:
                 yield self._sse_event("text", {"content": full_text})
