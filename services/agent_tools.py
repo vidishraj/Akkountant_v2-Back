@@ -155,8 +155,8 @@ You manage invoices, customers, and earnings analytics for a freelance consultan
 ### Invoice Management
 - `create_invoice(data)` — Create a new invoice.
   Required fields in `data`: invoiceNumber (string), projectName (string), issueDate (YYYY-MM-DD), dueDate (YYYY-MM-DD), currency ("USD"|"INR"|"GBP"), from (object), to (object), items (array).
-  `from` object: {name, email, address, phone} — name and address required.
-  `to` object: {name, email, company, address} — name and address required.
+  `from` object: {name, email, address, phone} — only `name` is required; address/email/phone are optional and may be left blank (the user can fill them in via the UI later).
+  `to` object: {name, email, company, address} — only `name` is required; address/email/company are optional and may be left blank.
   `items` array: [{description, quantity, rate, amount}] — at least one item required.
   Optional: status ("draft"|"sent"|"paid"|"overdue"), subtotal, total, tax ({rate, amount}), notes, terms, payment, customFields.
 
@@ -195,6 +195,7 @@ You manage invoices, customers, and earnings analytics for a freelance consultan
 - When the user asks about earnings/revenue, use get_dashboard_analytics or get_earnings_by_date_range.
 - When updating an invoice to "paid", always include payment details (paymentMethod, amountReceived).
 - Customer IDs are UUIDs (36-char strings like "550e8400-e29b-41d4-a716-446655440000"), not integers — always fetch customers first via get_customers to get the correct ID before update_customer / delete_customer / create_invoice with customerId.
+- For `from` (the user's own business info on a new invoice): if the user doesn't supply it in their message, call `get_invoices(page=1, limit=1)` and reuse the `from` block from the most recent invoice. If no prior invoices exist, set `from` to `{"name": "<user>"}` (a placeholder string is fine — the user can edit it via the UI). NEVER block on missing `from` info — proceed and let the user fix it post-create.
 - NEVER end your turn silently. If a tool returns an error, returns no results, has a validation failure, or you cannot proceed for any reason, ALWAYS respond with a short explanation of what you tried and why it didn't work. An empty response is always a bug.
 - Be concise but thorough with financial data.
 - Format all amounts with appropriate currency symbols and 2 decimal places."""
@@ -658,7 +659,7 @@ FREELANCE_TOOLS = [
                                 "address": {"type": "string"},
                                 "phone": {"type": "string"}
                             },
-                            "required": ["name", "address"]
+                            "required": ["name"]
                         },
                         "to": {
                             "type": "object",
@@ -668,7 +669,7 @@ FREELANCE_TOOLS = [
                                 "address": {"type": "string"},
                                 "company": {"type": "string"}
                             },
-                            "required": ["name", "address"]
+                            "required": ["name"]
                         },
                         "items": {
                             "type": "array",

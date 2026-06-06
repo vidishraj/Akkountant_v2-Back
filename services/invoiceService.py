@@ -40,13 +40,17 @@ class InvoiceService(BaseService):
                 project_name=invoice_data['projectName'],
                 issue_date=datetime.strptime(invoice_data['issueDate'], '%Y-%m-%d').date(),
                 due_date=datetime.strptime(invoice_data['dueDate'], '%Y-%m-%d').date(),
-                from_name=from_data['name'],
-                from_email=from_data.get('email', ''),  # Optional
-                from_address=from_data['address'],
+                from_name=from_data.get('name', ''),
+                from_email=from_data.get('email', ''),
+                # v3 hotfix (hq-wisp-wf8kb): address optional — agent may
+                # omit if unknown rather than silent-refuse the whole call.
+                # Overseer confirmed blank from_address is acceptable; user
+                # can fill in via UI post-create.
+                from_address=from_data.get('address', ''),
                 from_phone=from_data.get('phone'),
-                to_name=to_data['name'],
+                to_name=to_data.get('name', ''),
                 to_email=to_data.get('email', ''),
-                to_address=to_data['address'],
+                to_address=to_data.get('address', ''),
                 to_company=to_data.get('company'),
                 subtotal=float(invoice_data.get('subtotal', 0)),
                 tax_rate=float(tax_data.get('rate', 0)),

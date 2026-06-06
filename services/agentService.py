@@ -227,6 +227,18 @@ class AgentService(BaseService):
                     "(model=%s, max_turns=%s) — likely missing allowed_tools or model refused",
                     options.model, MAX_TURNS,
                 )
+                # Sticky-poison stopgap (v3): if we send nothing, the
+                # frontend persists an empty assistant turn into
+                # conversation history. sonnet then treats that empty
+                # turn as a refusal signal and continues to silent-refuse
+                # ALL subsequent turns (proven by "Hello?" failing after
+                # a single create_invoice trigger — see hq-wisp-wf8kb).
+                # A sentinel string breaks the loop AND surfaces the
+                # failure to the user instead of black-holing it.
+                full_text = (
+                    "I hit an internal issue and couldn't reply. Please "
+                    "rephrase or click 'New Chat' to reset."
+                )
             if full_text:
                 yield self._sse_event("text", {"content": full_text})
 
