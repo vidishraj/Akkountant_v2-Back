@@ -196,12 +196,13 @@ class AgentService(BaseService):
                 max_turns=MAX_TURNS,
                 model="sonnet",
                 allowed_tools=mcp_tool_names,
-                # Wire stderr capture so cross-family diagnosis (hq-wisp-l2jfz,
-                # hq-wisp-ezveu) can correlate request_id + resolved model_id
-                # with the turns=0 status=ok shape. run_query_collect wires
-                # this automatically, but chat drives the query loop directly
-                # so we set it here.
+                # Stderr capture for cross-family diagnosis (hq-wisp-l2jfz,
+                # hq-wisp-wzagg). v3.4: extra_args adds --debug-to-stderr so
+                # CLI emits resolved model_id + request_id even on fast-fail
+                # paths where the stderr buffer might otherwise be empty by
+                # the time the SDK reaps the subprocess.
                 stderr=_make_sdk_stderr_logger(f"chat.{agent_type}"),
+                extra_args={"debug-to-stderr": None},
             )
 
             # Run the query (blocking — collects all results then yields).

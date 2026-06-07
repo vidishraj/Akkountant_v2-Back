@@ -26,7 +26,7 @@ import requests
 from claude_agent_sdk import ClaudeAgentOptions
 
 from utils.logger import Logger
-from utils.sdk_runner import run_query_collect
+from utils.sdk_runner import run_query_collect, _make_sdk_stderr_logger
 
 _logger = Logger(__name__).get_logger()
 
@@ -100,12 +100,20 @@ def fetch_and_extract(
         )
 
     # ── 2. Ask the LLM to extract structured JSON via output_format ──
+    # v3.4 (hq-wisp-wzagg): stderr callback wired DIRECTLY in constructor
+    # (not late-mutated by run_query_collect) because v3.3's late-mutate
+    # didn't fire — the SDK reads options at transport-create time and may
+    # not see post-construction mutations under all paths. extra_args adds
+    # the CLI's --debug-to-stderr flag for verbose stderr emission so
+    # request_id + resolved model_id are surfaced even on fast-fail exits.
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
         max_turns=3,  # Allow retries for structured output validation
         permission_mode="bypassPermissions",
         output_format={"type": "json_schema", "schema": schema},
+        stderr=_make_sdk_stderr_logger(agent),
+        extra_args={"debug-to-stderr": None},
     )
 
     parts = []

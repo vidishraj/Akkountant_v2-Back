@@ -6,6 +6,7 @@ and inserts into the database via MCP tools.
 Uses claude_agent_sdk following the same pattern as AgentService and CronAgent.
 """
 
+import hashlib
 import json
 import os
 import base64
@@ -1672,9 +1673,16 @@ class MailProcessorService:
             f"ONLY extract transactions that appear in the text. Do NOT invent any.\n"
         )
 
+        # Health probe (hq-wisp-wzagg): mailProcessor SDK call diagnostic so
+        # we can independently confirm this codepath is alive while
+        # chat.* and rate.* are misbehaving. Captures model + sys_prompt sha
+        # for cross-correlation with the agent_run log line.
+        _sp_text = options.system_prompt or ""
+        _sp_sha_text = hashlib.sha256(_sp_text.encode()).hexdigest()[:12]
         self.logger.info(
             f"Chunk {page_start}-{page_end} prompt size: {len(prompt_text)} chars, "
-            f"mode=text (structured output), bank={detected_bank}"
+            f"mode=text (structured output), bank={detected_bank}, "
+            f"model={options.model} sys_prompt_sha={_sp_sha_text}"
         )
 
         # Send query via run_query_collect — one-shot, structured output
@@ -1904,9 +1912,14 @@ class MailProcessorService:
                 f"Do NOT just describe the transactions in text — you must call the tool.\n"
             )
 
+        # Health probe (hq-wisp-wzagg): mirrors text-mode site at ~L1675
+        # for cross-mode comparison.
+        _sp_img = options.system_prompt or ""
+        _sp_sha_img = hashlib.sha256(_sp_img.encode()).hexdigest()[:12]
         self.logger.info(
             f"Chunk {page_start}-{page_end} prompt size: {len(prompt_text)} chars, "
-            f"mode={processing_mode}, bank={detected_bank}"
+            f"mode={processing_mode}, bank={detected_bank}, "
+            f"model={options.model} sys_prompt_sha={_sp_sha_img}"
         )
 
         text_parts = []

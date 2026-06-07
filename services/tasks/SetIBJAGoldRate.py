@@ -84,15 +84,19 @@ class SetIBJAGoldRate(AIRateTask):
 
     def run(self):
         try:
-            # Haiku probe (hq-wisp-ezveu): distinguishes sonnet-alias-flip from
-            # account-wide failure. rate.ppf intentionally stays on sonnet as
-            # the control. Revert once verdict is in.
+            # Pinned-sonnet probe (hq-wisp-wzagg): haiku probe came back with
+            # exit=1 (off-matrix — separate failure mode). Pivot: try a pinned
+            # sonnet version string instead of the bare "sonnet" alias to
+            # isolate alias-flip from a deeper sonnet-side issue. rate.ppf
+            # intentionally stays on bare "sonnet" alias as the control.
+            # Pin matches SDK docstring example (claude_agent_sdk/client.py:254).
+            # Revert once verdict is in.
             jsonData, ai_err = self.fetch_rates_via_ai(
                 url=GOLD_URL,
                 system_prompt=GOLD_SYSTEM_PROMPT,
                 schema=GOLD_SCHEMA,
                 agent="rate.gold",
-                model="haiku",
+                model="claude-sonnet-4-5",
             )
             if jsonData is None:
                 return f"Failed to get Gold Rates: {ai_err}"[:800], "Failed", self.interval
