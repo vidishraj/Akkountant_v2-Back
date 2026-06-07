@@ -30,6 +30,7 @@ class AIRateTask(BaseTask):
     def fetch_rates_via_ai(
         self, *, url: str, system_prompt: str, schema: dict, agent: str,
         extra_context: str = "", headers: dict | None = None,
+        model: str = "sonnet",
     ) -> tuple[dict | None, str]:
         """
         v2 entry point: fetch `url`, extract `schema`-shaped JSON.
@@ -39,6 +40,10 @@ class AIRateTask(BaseTask):
             (None, detail) on failure. `detail` is short and embeddable in
             the job result so failures are diagnosable from jobs.result alone
             instead of journalctl.
+
+        `model` is forwarded to fetch_and_extract / ClaudeAgentOptions. Default
+        "sonnet" preserves existing behavior; subclasses may override for diag
+        probes (hq-wisp-ezveu — rate.gold runs on "haiku" as control).
         """
         result, err = fetch_and_extract(
             url=url,
@@ -47,6 +52,7 @@ class AIRateTask(BaseTask):
             agent=agent,
             extra_context=extra_context,
             headers=headers,
+            model=model,
         )
         if err:
             self.ai_logger.error(f"{agent} fetch_and_extract failed: {err}")

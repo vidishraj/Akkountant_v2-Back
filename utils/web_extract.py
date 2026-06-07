@@ -51,6 +51,7 @@ def fetch_and_extract(
     headers: dict | None = None,
     timeout: int = 30,
     max_chars: int = 200_000,
+    model: str = "sonnet",
 ) -> tuple[dict | None, str]:
     """
     GET `url`, then ask sonnet to extract `schema`-shaped JSON from the body.
@@ -69,6 +70,10 @@ def fetch_and_extract(
             handing it to sonnet (prevents IPC bloat on huge pages). The
             extraction agent gets a note in the user message if truncation
             happened, so it can flag low-confidence answers.
+        model: SDK model alias or pinned model_id. Defaults to "sonnet" for
+            backward compatibility. Per-call override exists for diag /
+            probe scenarios (hq-wisp-ezveu: rate.gold runs on "haiku" to
+            distinguish sonnet-alias-flip from account-wide failure).
 
     Returns:
         (parsed_dict, "") on success — schema-validated.
@@ -94,9 +99,9 @@ def fetch_and_extract(
             f"{agent}: truncated upstream response {original_len} → {max_chars} chars"
         )
 
-    # ── 2. Ask sonnet to extract structured JSON via output_format ───
+    # ── 2. Ask the LLM to extract structured JSON via output_format ──
     options = ClaudeAgentOptions(
-        model="sonnet",
+        model=model,
         system_prompt=system_prompt,
         max_turns=3,  # Allow retries for structured output validation
         permission_mode="bypassPermissions",

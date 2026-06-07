@@ -13,7 +13,7 @@ from services.Base_Service import BaseService
 from services.agent_tools import get_agent_config
 from services.agent_tool_executor import execute_tool
 from utils.logger import Logger
-from utils.sdk_runner import emit_agent_run
+from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
@@ -196,6 +196,12 @@ class AgentService(BaseService):
                 max_turns=MAX_TURNS,
                 model="sonnet",
                 allowed_tools=mcp_tool_names,
+                # Wire stderr capture so cross-family diagnosis (hq-wisp-l2jfz,
+                # hq-wisp-ezveu) can correlate request_id + resolved model_id
+                # with the turns=0 status=ok shape. run_query_collect wires
+                # this automatically, but chat drives the query loop directly
+                # so we set it here.
+                stderr=_make_sdk_stderr_logger(f"chat.{agent_type}"),
             )
 
             # Run the query (blocking — collects all results then yields).

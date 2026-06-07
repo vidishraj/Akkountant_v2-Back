@@ -36,6 +36,27 @@ from utils.logger import Logger
 _logger = Logger("agent_run").get_logger()
 
 
+def _make_sdk_stderr_logger(agent):
+    """Return a callback that logs CLI subprocess stderr as `sdk_stderr` lines.
+
+    The bundled Claude Code CLI emits anthropic request_id, resolved model_id,
+    HTTP status and warnings on stderr. Without this callback the SDK
+    silently discards those lines (types.py:746). Wiring this in is pure
+    observability — no behavior change — and unblocks cross-family
+    root-cause diagnosis when chat.* and rate.* fail with identical
+    `turns=0 tools_called=0 status=ok` shapes (see hq-wisp-l2jfz, ezveu).
+
+    Lines are trimmed to 500 chars to bound journal volume.
+    """
+    def cb(line):
+        try:
+            _logger.info(f"sdk_stderr agent={agent} line={line[:500]}")
+        except Exception:
+            # Never let observability take down the call site.
+            pass
+    return cb
+
+
 def emit_agent_run(*, agent, model, turns, tools_called, latency_ms,
                    status, error_class=None):
     """Emit one structured `agent_run` log line.
@@ -80,6 +101,13 @@ async def run_query_collect(*, agent, options, prompt):
     structured_output = None
     error_msg = None
     error_class = None
+
+    # Auto-wire stderr capture if the caller didn't supply one. This covers
+    # every run_query_collect call site (rate.*, mailProcessor extract paths,
+    # any future single-shot SDK use) without requiring per-site changes.
+    # Skip if the caller already set a callback (don't clobber custom routing).
+    if getattr(options, "stderr", None) is None:
+        options.stderr = _make_sdk_stderr_logger(agent)
 
     try:
         async for message in sdk_query(prompt=prompt, options=options):

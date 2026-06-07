@@ -84,11 +84,15 @@ class SetIBJAGoldRate(AIRateTask):
 
     def run(self):
         try:
+            # Haiku probe (hq-wisp-ezveu): distinguishes sonnet-alias-flip from
+            # account-wide failure. rate.ppf intentionally stays on sonnet as
+            # the control. Revert once verdict is in.
             jsonData, ai_err = self.fetch_rates_via_ai(
                 url=GOLD_URL,
                 system_prompt=GOLD_SYSTEM_PROMPT,
                 schema=GOLD_SCHEMA,
                 agent="rate.gold",
+                model="haiku",
             )
             if jsonData is None:
                 return f"Failed to get Gold Rates: {ai_err}"[:800], "Failed", self.interval
