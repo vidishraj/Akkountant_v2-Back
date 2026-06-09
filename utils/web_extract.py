@@ -106,12 +106,19 @@ def fetch_and_extract(
     # not see post-construction mutations under all paths. extra_args adds
     # the CLI's --debug-to-stderr flag for verbose stderr emission so
     # request_id + resolved model_id are surfaced even on fast-fail exits.
+    #
+    # v5 (hq-wisp-a0byf): allowed_tools=[] locks the model to the
+    # structured_output path only. Without it, sonnet has occasionally
+    # wandered into Grep/Read/etc. on larger HTML payloads (rate.epf
+    # symptom post-v4: tools_called>0, structured_output=None). The HTML
+    # is already in the user message; no tool is ever the right answer.
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
         max_turns=3,  # Allow retries for structured output validation
         permission_mode="bypassPermissions",
         output_format={"type": "json_schema", "schema": schema},
+        allowed_tools=[],
         stderr=_make_sdk_stderr_logger(agent),
         extra_args={"debug-to-stderr": None},
     )
@@ -151,10 +158,20 @@ def fetch_and_extract(
     if result.error:
         return None, f"Sonnet extraction error: {result.error}"
     if result.structured_output is None:
-        # Output_format is supposed to force structured output. If it's
-        # missing, that's a model-level regression worth surfacing
-        # specifically (not just "empty response") so the job result lets
-        # the future archaeologist tell this apart from a fetch failure.
+        # Output_format is supposed to force structured output. v5 splits
+        # this error into two arms so future-you can tell them apart:
+        #   - tools_called>0 → model wandered into a tool instead of
+        #     emitting structured_output. Pre-v5 this happened when
+        #     allowed_tools wasn't locked (rate.epf post-v4 symptom).
+        #   - tools_called==0 → model fast-failed without trying — usually
+        #     an API-level 400 (e.g. invalid property keys, the v4 root
+        #     cause) where the CLI subprocess exited before the model
+        #     could respond.
+        if result.tool_calls > 0:
+            return None, (
+                f"Sonnet wandered into tools (called={result.tool_calls}) "
+                "instead of structured_output"
+            )
         return None, "Sonnet returned no structured_output (output_format ignored)"
 
     return result.structured_output, ""

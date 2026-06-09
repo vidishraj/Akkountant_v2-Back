@@ -119,26 +119,30 @@ class _FakeResponse:
             raise self._raise_exc
 
 
-def _make_fake_sdk_result(structured_output=None, error=None):
+def _make_fake_sdk_result(structured_output=None, error=None, tool_calls=0):
     """Build an object shaped like utils.sdk_runner.SdkRunResult."""
     obj = MagicMock()
     obj.structured_output = structured_output
     obj.error = error
     obj.text = ""
-    obj.tool_calls = 0
+    obj.tool_calls = tool_calls
     obj.turns = 1 if structured_output is not None else 0
     obj.latency_ms = 100
     obj.error_class = None
     return obj
 
 
-def _patch_sdk(structured_output=None, error=None):
+def _patch_sdk(structured_output=None, error=None, tool_calls=0):
     """
     Return a context manager that patches `run_query_collect` so the SDK is
     never actually invoked. The patched coroutine returns the canned
     SdkRunResult fake.
     """
-    fake = _make_fake_sdk_result(structured_output=structured_output, error=error)
+    fake = _make_fake_sdk_result(
+        structured_output=structured_output,
+        error=error,
+        tool_calls=tool_calls,
+    )
 
     async def _fake_run_query_collect(*, agent, options, prompt):
         # Drain the async generator so it doesn't leak (matches real SDK call shape)
@@ -231,7 +235,55 @@ def test_web_extract():
             result is None and "Sonnet extraction error" in (err or ""),
             f"got result={result!r} err={err!r}")
 
-    # 6. Truncation: response > max_chars is clipped (no crash)
+    # 6a. v5 (hq-wisp-a0byf): tools-wander branch — model called a tool
+    # but emitted no structured_output. Error string must differentiate
+    # this from the fast-fail "no structured_output" case so the future
+    # archaeologist can tell the two failure modes apart in journal logs.
+    fake_resp = _FakeResponse(text="hello")
+    with patch("utils.web_extract.requests.get", return_value=fake_resp), \
+         _patch_sdk(structured_output=None, tool_calls=2):
+        result, err = web_extract.fetch_and_extract(
+            url="https://example.com",
+            system_prompt="x",
+            schema={"type": "object"},
+            agent="test.tools_wander",
+        )
+    _record("tools-wander returns differentiated error",
+            result is None and "wandered into tools" in (err or "")
+            and "called=2" in (err or ""),
+            f"got result={result!r} err={err!r}")
+
+    # 6b. v5: allowed_tools=[] is wired into the SDK options. Capture the
+    # constructed ClaudeAgentOptions and assert the lock is present —
+    # without this, the model is free to wander into Grep/Read/etc. on
+    # large HTML payloads (rate.epf post-v4 symptom).
+    fake_resp = _FakeResponse(text="hello")
+    captured_options = {}
+
+    async def _capture_options(*, agent, options, prompt):
+        captured_options["options"] = options
+        # Drain the async generator
+        try:
+            agen = prompt()
+            async for _ in agen:
+                pass
+        except TypeError:
+            pass
+        return _make_fake_sdk_result(structured_output={"ok": True})
+
+    with patch("utils.web_extract.requests.get", return_value=fake_resp), \
+         patch("utils.web_extract.run_query_collect", new=_capture_options):
+        web_extract.fetch_and_extract(
+            url="https://example.com",
+            system_prompt="x",
+            schema={"type": "object"},
+            agent="test.allowed_tools",
+        )
+    _record("allowed_tools=[] locks model to structured_output only",
+            getattr(captured_options.get("options"), "allowed_tools", None) == [],
+            f"got allowed_tools={getattr(captured_options.get('options'), 'allowed_tools', '<missing>')!r}")
+
+    # 7. Truncation: response > max_chars is clipped (no crash)
     big_body = "x" * 250_000
     fake_resp = _FakeResponse(text=big_body)
     with patch("utils.web_extract.requests.get", return_value=fake_resp), \

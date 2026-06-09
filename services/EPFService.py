@@ -92,7 +92,19 @@ class EPFService(Base_EPG, ABC):
                 # Calculate interest for this month (except for first deposit)
                 interest = 0
                 if index != 0:
-                    rate = self.JsonDownloadService.getRateForMonth(dateString, EPGEnum.EPF.value)
+                    # v5 (hq-wisp-a0byf, bead ak-4tu): defensive wrap so
+                    # missing EPF rate file degrades to zero-interest rows
+                    # instead of bombing the whole dashboard with a 500.
+                    # The rate fetcher has historically been the most
+                    # fragile piece in this stack.
+                    try:
+                        rate = self.JsonDownloadService.getRateForMonth(dateString, EPGEnum.EPF.value)
+                    except FileNotFoundError:
+                        self.logger.warning(
+                            f"EPF rate file missing for {dateString}; "
+                            "treating rate as 0 — fetcher likely broken"
+                        )
+                        rate = 0
                     interest = running * (rate / 1200)
                     runningInterest += interest
                 

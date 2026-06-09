@@ -26,7 +26,11 @@ Output format:
 - Include entries from April 2014 through the most recent month covered by
   the latest declared rate
 - If the page only declares the rate for FY YYYY-YY+1 (not partial year),
-  fill all 12 months with that rate"""
+  fill all 12 months with that rate
+
+IMPORTANT: Do not use any tools to search or filter the page content. The
+entire relevant HTML is already provided in the user message below. Read it
+directly and emit the structured output."""
 
 
 # v4 (hq-wisp-il849): the per-entry key "Interest Rate" contains a space

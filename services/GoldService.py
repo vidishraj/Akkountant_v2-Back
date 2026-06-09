@@ -68,7 +68,19 @@ class GoldService(Base_EPG, ABC):
                 and_(GoldDetails.buyID == deposit.buyID)).first()
             goldType = goldDetails.goldType
             quantity = goldDetails.quantity
-            rate = self.JsonDownloadService.getGoldRate(f"{goldType} Carat")
+            # v5 (hq-wisp-a0byf, bead ak-4tu): wrap to stop dashboard 500s
+            # when the Gold rate file is missing (real prod symptom — the
+            # rate fetcher's been broken for ~48d on this account before
+            # v4). On FNF, treat the rate as 0 so the row still renders
+            # with zero profit instead of bombing the whole endpoint.
+            try:
+                rate = self.JsonDownloadService.getGoldRate(f"{goldType} Carat")
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"Gold rate file missing for {goldType} Carat; "
+                    "treating rate as 0 — fetcher likely broken"
+                )
+                rate = 0
             profit = quantity * Decimal(rate / 100)
             netProfit += profit
             net += deposit.depositAmount + Decimal(profit)

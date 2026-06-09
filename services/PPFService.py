@@ -96,7 +96,17 @@ class PPFService(Base_EPG, ABC):
                         else:
                             currentMonth += deposit.depositAmount
                     runningTotal += currentMonth
-                rate = self.JsonDownloadService.getRateForMonth(month, EPGEnum.PF.value)
+                # v5 (hq-wisp-a0byf, bead ak-4tu): defensive wrap so a
+                # missing PPF rate file degrades to zero-interest rows
+                # instead of bombing the whole dashboard with a 500.
+                try:
+                    rate = self.JsonDownloadService.getRateForMonth(month, EPGEnum.PF.value)
+                except FileNotFoundError:
+                    self.logger.warning(
+                        f"PPF rate file missing for {month}; "
+                        "treating rate as 0 — fetcher likely broken"
+                    )
+                    rate = 0
                 interest = runningTotal * (Decimal(str(rate)) / Decimal('1200'))
                 netProfit += interest
                 runningInterest += interest
@@ -113,8 +123,18 @@ class PPFService(Base_EPG, ABC):
                 })
             return transactions, netProfit, runningTotal, runningInterest
         except Exception as ex:
-            self.logger.error(f"Error while calculating transaction table for PF {ex}")
-            return [], 0, 0, 0
+            # v5 (hq-wisp-a0byf, bead ak-bdo): pre-v5 returned [],0,0,0
+            # on ANY exception — silent failure that masqueraded as
+            # success and made bugs invisible (the dashboard happily
+            # rendered ₹0 PPF with no error indicator). Re-raise so the
+            # caller sees the failure. FileNotFoundError on the rate
+            # file is already handled defensively above with rate=0;
+            # anything that reaches here is genuinely unexpected.
+            self.logger.error(
+                f"Error while calculating transaction table for PF {ex}",
+                exc_info=True,
+            )
+            raise
 
     def fetchComplete(self, userId):
         # Fetch all the deposits

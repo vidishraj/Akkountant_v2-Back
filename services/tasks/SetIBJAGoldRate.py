@@ -26,7 +26,11 @@ gold 999, 916, and 750 respectively.
 If today's rates are not available yet (e.g. before market open), use the
 most recent available day's rates and use that day's date in ibja_data.date.
 
-Return ALL prices as integers in INR. Date format: "DD-Mon-YY" (e.g. "16-Feb-26")."""
+Return ALL prices as integers in INR. Date format: "DD-Mon-YY" (e.g. "16-Feb-26").
+
+IMPORTANT: Do not use any tools to search or filter the page content. The
+entire relevant HTML is already provided in the user message below. Read it
+directly and emit the structured output."""
 
 
 # JSON schema for output_format. Strict enough to validate that prices came

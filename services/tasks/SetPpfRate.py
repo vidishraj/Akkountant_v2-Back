@@ -28,7 +28,11 @@ PPF rate cadence:
   Apr/Jul/Oct/Jan)
 
 You should produce roughly 20-40 entries from 1999-04 through the current
-quarter."""
+quarter.
+
+IMPORTANT: Do not use any tools to search or filter the page content. The
+entire relevant HTML is already provided in the user message below. Read it
+directly and emit the structured output."""
 
 
 PPF_SCHEMA = {
