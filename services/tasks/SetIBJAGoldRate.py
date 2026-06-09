@@ -20,7 +20,7 @@ For each purity, compute:
 - avg_price = round((am_price + pm_price) / 2)
 - avg_with_gst = int(avg_price * 1.03)  # 3% GST, truncated
 
-Top-level "24 Carat", "22 Carat", "18 Carat" are the avg_with_gst values for
+Top-level "carat_24", "carat_22", "carat_18" are the avg_with_gst values for
 gold 999, 916, and 750 respectively.
 
 If today's rates are not available yet (e.g. before market open), use the
@@ -32,12 +32,20 @@ Return ALL prices as integers in INR. Date format: "DD-Mon-YY" (e.g. "16-Feb-26"
 # JSON schema for output_format. Strict enough to validate that prices came
 # through as integers and the date is present, while letting the model fill in
 # zero-or-missing purities gracefully.
+#
+# v4 (hq-wisp-il849): top-level keys MUST satisfy the Anthropic API regex
+# `^[a-zA-Z0-9_.-]{1,64}$` — display keys "24 Carat" / "22 Carat" / "18 Carat"
+# contain spaces and 400 the request as
+# `tools.N.custom.input_schema.properties: invalid property key`.
+# Schema uses compliant snake_case keys (`carat_24` etc.); they are re-mapped
+# to display form before persisting (frontend reads GoldRate.json with the
+# original "24 Carat" keys — that on-disk contract is unchanged).
 GOLD_SCHEMA = {
     "type": "object",
     "properties": {
-        "24 Carat": {"type": "integer"},
-        "22 Carat": {"type": "integer"},
-        "18 Carat": {"type": "integer"},
+        "carat_24": {"type": "integer"},
+        "carat_22": {"type": "integer"},
+        "carat_18": {"type": "integer"},
         "ibja_data": {
             "type": "object",
             "properties": {
@@ -62,8 +70,17 @@ GOLD_SCHEMA = {
             "required": ["date", "gold", "currency", "source"],
         },
     },
-    "required": ["24 Carat", "22 Carat", "18 Carat", "ibja_data"],
+    "required": ["carat_24", "carat_22", "carat_18", "ibja_data"],
 }
+
+
+# LLM-schema key → on-disk display key. Pairs in the order the persisted JSON
+# should list them so the frontend renders 24 → 22 → 18 in stable order.
+_GOLD_DISPLAY_KEYS = [
+    ("carat_24", "24 Carat"),
+    ("carat_22", "22 Carat"),
+    ("carat_18", "18 Carat"),
+]
 
 
 class SetIBJAGoldRate(AIRateTask):
@@ -84,25 +101,33 @@ class SetIBJAGoldRate(AIRateTask):
 
     def run(self):
         try:
-            # Pinned-sonnet probe (hq-wisp-wzagg): haiku probe came back with
-            # exit=1 (off-matrix — separate failure mode). Pivot: try a pinned
-            # sonnet version string instead of the bare "sonnet" alias to
-            # isolate alias-flip from a deeper sonnet-side issue. rate.ppf
-            # intentionally stays on bare "sonnet" alias as the control.
-            # Pin matches SDK docstring example (claude_agent_sdk/client.py:254).
-            # Revert once verdict is in.
+            # v4 (hq-wisp-il849): reverted from the pinned-sonnet diag probe
+            # back to the default bare "sonnet" alias. The pinned probe was a
+            # diagnostic to isolate alias-flip from a deeper sonnet issue;
+            # actual root cause turned out to be the invalid property keys
+            # in GOLD_SCHEMA (see schema comment above), not the model
+            # string. Bare alias = no per-call override = `fetch_and_extract`
+            # default ("sonnet").
             jsonData, ai_err = self.fetch_rates_via_ai(
                 url=GOLD_URL,
                 system_prompt=GOLD_SYSTEM_PROMPT,
                 schema=GOLD_SCHEMA,
                 agent="rate.gold",
-                model="claude-sonnet-4-5",
             )
             if jsonData is None:
                 return f"Failed to get Gold Rates: {ai_err}"[:800], "Failed", self.interval
-            if '24 Carat' not in jsonData:
+            if 'carat_24' not in jsonData:
                 got_keys = list(jsonData.keys())[:10]
-                return f"Gold Rates response missing '24 Carat'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+                return f"Gold Rates response missing 'carat_24'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+
+            # Re-map LLM-schema-compliant keys → on-disk display keys. The
+            # frontend reads GoldRate.json with the historical "24 Carat" /
+            # "22 Carat" / "18 Carat" top-level keys (see
+            # JsonDownloadService.getGoldRate, GoldService consumers); that
+            # on-disk contract is unchanged by v4.
+            for k_schema, k_display in _GOLD_DISPLAY_KEYS:
+                if k_schema in jsonData:
+                    jsonData[k_display] = jsonData.pop(k_schema)
 
             filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
             try:

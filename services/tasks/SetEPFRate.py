@@ -21,7 +21,7 @@ April through March (inclusive) of the next year.
 
 Output format:
 - "Year" is in "YYYY-MM" format
-- "Interest Rate" is a float (e.g. 8.25, not "8.25%")
+- "interest_rate" is a float (e.g. 8.25, not "8.25%")
 - Each financial year's rate applies to all 12 months from April to next March
 - Include entries from April 2014 through the most recent month covered by
   the latest declared rate
@@ -29,6 +29,12 @@ Output format:
   fill all 12 months with that rate"""
 
 
+# v4 (hq-wisp-il849): the per-entry key "Interest Rate" contains a space
+# and violates the Anthropic API regex `^[a-zA-Z0-9_.-]{1,64}$`, which 400s
+# the request as `tools.N.custom.input_schema.properties: invalid property
+# key`. Schema uses compliant snake_case (`interest_rate`); entries are
+# re-mapped back to "Interest Rate" before persisting (EPFRate.json on-disk
+# contract is unchanged — frontend reads with the original key).
 EPF_SCHEMA = {
     "type": "object",
     "properties": {
@@ -38,9 +44,9 @@ EPF_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "Year": {"type": "string"},
-                    "Interest Rate": {"type": "number"},
+                    "interest_rate": {"type": "number"},
                 },
-                "required": ["Year", "Interest Rate"],
+                "required": ["Year", "interest_rate"],
             },
         }
     },
@@ -77,6 +83,14 @@ class SetEPFRate(AIRateTask):
             if 'data' not in jsonData or len(jsonData['data']) == 0:
                 got_keys = list(jsonData.keys())[:10]
                 return f"EPF Rates response missing/empty 'data'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+
+            # Re-map LLM-schema key "interest_rate" → on-disk display key
+            # "Interest Rate". The on-disk EPFRate.json contract is
+            # unchanged; only the API-boundary schema uses the compliant
+            # snake_case form to satisfy the Anthropic property-key regex.
+            for entry in jsonData['data']:
+                if 'interest_rate' in entry:
+                    entry['Interest Rate'] = entry.pop('interest_rate')
 
             filePath = os.path.join(self.tmp_dir, 'EPFRate.json')
             try:

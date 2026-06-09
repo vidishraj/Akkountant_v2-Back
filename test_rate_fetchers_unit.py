@@ -264,15 +264,33 @@ def test_gold_fetcher():
             and gold_mod.GOLD_URL.startswith("https://")
             and "ibja" in gold_mod.GOLD_URL.lower(),
             f"got GOLD_URL={gold_mod.GOLD_URL!r}")
-    _record("GOLD_SCHEMA requires the 24/22/18 Carat top-level keys",
+    # v4: schema keys are API-compliant snake_case (`carat_NN`); the on-disk
+    # display keys ("24 Carat" etc.) are produced by SetIBJAGoldRate.run via
+    # _GOLD_DISPLAY_KEYS re-map. Schema-side assertion verifies the keys are
+    # regex-valid (no spaces); the re-map is a separate assertion.
+    import re as _re
+    _api_key_re = _re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+    _record("GOLD_SCHEMA requires the carat_24/22/18 top-level keys",
             isinstance(gold_mod.GOLD_SCHEMA, dict)
             and set(gold_mod.GOLD_SCHEMA.get("required", []))
-                >= {"24 Carat", "22 Carat", "18 Carat", "ibja_data"},
+                >= {"carat_24", "carat_22", "carat_18", "ibja_data"},
             f"got required={gold_mod.GOLD_SCHEMA.get('required')!r}")
     _record("GOLD_SCHEMA declares integer types for Carat values",
-            gold_mod.GOLD_SCHEMA["properties"]["24 Carat"]["type"] == "integer"
-            and gold_mod.GOLD_SCHEMA["properties"]["22 Carat"]["type"] == "integer",
+            gold_mod.GOLD_SCHEMA["properties"]["carat_24"]["type"] == "integer"
+            and gold_mod.GOLD_SCHEMA["properties"]["carat_22"]["type"] == "integer",
             "Carat fields should be integer per IBJA convention")
+    _record("GOLD_SCHEMA top-level keys satisfy Anthropic property-key regex",
+            all(_api_key_re.match(k) for k in gold_mod.GOLD_SCHEMA["properties"]),
+            f"v4 regression guard — bad keys: "
+            f"{[k for k in gold_mod.GOLD_SCHEMA['properties'] if not _api_key_re.match(k)]}")
+    _record("_GOLD_DISPLAY_KEYS maps schema keys → display form for on-disk JSON",
+            gold_mod._GOLD_DISPLAY_KEYS == [
+                ("carat_24", "24 Carat"),
+                ("carat_22", "22 Carat"),
+                ("carat_18", "18 Carat"),
+            ],
+            "frontend reads GoldRate.json with the historical display keys; "
+            "the re-map must preserve that on-disk contract")
     _record("GOLD_SYSTEM_PROMPT mentions IBJA + carat purities",
             "IBJA" in gold_mod.GOLD_SYSTEM_PROMPT
             and "999" in gold_mod.GOLD_SYSTEM_PROMPT
@@ -297,10 +315,13 @@ def test_epf_fetcher():
             isinstance(epf_mod.EPF_SCHEMA, dict)
             and "data" in epf_mod.EPF_SCHEMA.get("required", []),
             f"got required={epf_mod.EPF_SCHEMA.get('required')!r}")
-    _record("EPF_SCHEMA items have Year + Interest Rate shape",
+    # v4: schema items use compliant `interest_rate` (snake_case); the on-disk
+    # "Interest Rate" key is restored by SetEPFRate.run's per-entry re-map.
+    _record("EPF_SCHEMA items have Year + interest_rate shape (API-compliant)",
             epf_mod.EPF_SCHEMA["properties"]["data"]["items"]["required"]
-                == ["Year", "Interest Rate"],
-            "data items must match the on-disk EPFRate.json contract")
+                == ["Year", "interest_rate"],
+            "data items must satisfy the Anthropic property-key regex; "
+            "SetEPFRate.run re-maps to the on-disk EPFRate.json key before saving")
     _record("EPF_SYSTEM_PROMPT specifies YYYY-MM format + April-March FY expansion",
             "YYYY-MM" in epf_mod.EPF_SYSTEM_PROMPT
             and "April" in epf_mod.EPF_SYSTEM_PROMPT
