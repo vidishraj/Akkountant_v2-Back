@@ -358,10 +358,14 @@ def test_epf_fetcher():
 
     from services.tasks import SetEPFRate as epf_mod
 
-    _record("EPF_URL is an https Wikipedia URL",
+    # v6 (hq-wisp-3andt): pivoted off Wikipedia (source went dry — rate
+    # history table no longer on the EPFO page) to cleartax tax blog.
+    # Assertion checks the cleartax host pin; if we ever pivot again the
+    # test name+message also flag the test as needing an update.
+    _record("EPF_URL pins to cleartax (v6 pivot — Wikipedia went dry)",
             isinstance(epf_mod.EPF_URL, str)
             and epf_mod.EPF_URL.startswith("https://")
-            and "wikipedia" in epf_mod.EPF_URL.lower(),
+            and "cleartax.in" in epf_mod.EPF_URL.lower(),
             f"got EPF_URL={epf_mod.EPF_URL!r}")
     _record("EPF_SCHEMA requires top-level `data` array",
             isinstance(epf_mod.EPF_SCHEMA, dict)

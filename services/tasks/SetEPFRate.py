@@ -4,15 +4,39 @@ from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
 
-# EPF historical interest rates. The Wikipedia page has a stable table going
-# back to FY 1952-53 with the rate per financial year — the most stable
-# upstream available. EPFO's own site occasionally moves the page; Wikipedia
-# is updated within days of the EPFO declaration.
-EPF_URL = "https://en.wikipedia.org/wiki/Employees%27_Provident_Fund_Organisation"
+# EPF historical interest rates.
+#
+# v6 (hq-wisp-3andt): pivoted off the Wikipedia EPFO page because that page
+# no longer carries the historical FY-rate table — infra's audit confirmed
+# only 5 tables remain on the page and none of them are the rate history
+# (just citation banners + a single prose mention of "March 2022, EPFO
+# lowered the interest rate of 8.10%..."). The source went dry. Sonnet
+# correctly emitted `{"data": []}` against an empty source post-v5, which
+# is the correct behavior but produces zero-coverage rate files.
+#
+# Cleartax was chosen as primary after infra's source-audit:
+#   - cleartax: 19 FY rows (2009-2025 cleanly), 68 rate matches  ← PRIMARY
+#   - groww:    6 FY rows, 39 rate matches                       (fallback)
+#   - epfindia.gov.in: canonical but WAF-blocks bots             (unreachable)
+#   - bankbazaar: 404                                            (dead)
+#
+# Cleartax is a tax-blog page (not a wiki), so the system prompt below is
+# tuned for blog-table structure rather than the wiki-infobox format the
+# v5 prompt anchored on.
+EPF_URL = "https://cleartax.in/s/epf-interest-rate"
 
 EPF_SYSTEM_PROMPT = """You are a data extraction assistant. You will receive the
-HTML of a Wikipedia page that contains a table of historical EPF (Employee
-Provident Fund) interest rates declared by the EPFO for each financial year.
+HTML of a tax-blog article (cleartax.in) that contains one or more tables of
+historical EPF (Employee Provident Fund) interest rates declared by the EPFO
+for each financial year.
+
+The page is a blog article — the rate table is embedded inside the article
+body alongside prose, headings, related-article links, ads, and navigation
+chrome. Locate the table whose rows are financial years and rates (rather
+than e.g. a comparison-of-schemes table). The rate-history table typically
+has columns like "Financial Year" (e.g. "2024-25") and "EPF Interest Rate"
+(e.g. "8.25%") and runs back to roughly 2009-10. Ignore any unrelated tables
+on the page (deposit limits, scheme comparisons, withdrawal slabs, etc.).
 
 Extract every financial year from 2014-15 onwards (inclusive) through the
 most recent year on the page. Each financial year runs April YYYY through
@@ -21,7 +45,7 @@ April through March (inclusive) of the next year.
 
 Output format:
 - "Year" is in "YYYY-MM" format
-- "interest_rate" is a float (e.g. 8.25, not "8.25%")
+- "interest_rate" is a float (e.g. 8.25, not "8.25%" — strip the percent sign)
 - Each financial year's rate applies to all 12 months from April to next March
 - Include entries from April 2014 through the most recent month covered by
   the latest declared rate
