@@ -13,6 +13,14 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 
+# v8 (hq-wisp-3gs06, ak-m4r): monkey-patch nse_eq onto the NextApi
+# endpoint BEFORE the conditional nsepython/nsepythonserver import below.
+# nse_patch patches whichever (or both) library is importable, so the
+# subsequent `nsepython.nse_eq(...)` call site goes through the patched
+# function transparently. See utils/nse_patch.py for the audit + shape
+# adapter rationale. Revert by deleting nse_patch.py + this import line.
+import utils.nse_patch  # noqa: F401
+
 load_dotenv()
 if os.getenv('ENV') == "PROD":
     import nsepythonserver as nsepython
