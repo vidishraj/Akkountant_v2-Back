@@ -14,6 +14,14 @@ from services.agent_tools import get_agent_config
 from services.agent_tool_executor import execute_tool
 from utils.logger import Logger
 from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
+import base64 as _base64  # ak-1x4 pass 2: encode attachment bytes for tool result
+from utils.agent_attachments import (
+    AttachmentNotFound,
+    cleanup as attachment_cleanup,
+    format_for_prompt as attachments_format_for_prompt,
+    resolve as attachment_resolve,
+    MAX_PER_MESSAGE as ATTACHMENTS_MAX_PER_MESSAGE,
+)
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
@@ -63,6 +71,245 @@ MUTATION_TOOLS = {
 
 MAX_TURNS = 20
 
+# Name of the per-turn custom MCP tool that exposes attached files to
+# the investment agent. Confinement is enforced inside the handler's
+# closure (membership check against the resolved attachment_id set);
+# CLI permission semantics are not relied on.
+READ_ATTACHMENT_TOOL_NAME = "read_attachment"
+
+
+def compute_allowed_tools(agent_type, mcp_tool_names, has_attachments):
+    """Build the allowed_tools list for a given chat turn.
+
+    ak-1x4 pass 2 (reviewer hq-wisp-sh1to architectural fix): the
+    investment agent gets ONE additional MCP tool name when attachments
+    are present this turn — `mcp__agent_tools__read_attachment`. No
+    built-in tool (Read, Bash, …) is added; the prior approach used
+    Claude Code's built-in Read with a `can_use_tool` gate, which was
+    architecturally inert under permission_mode='bypassPermissions'
+    (allowed_tools entries are pre-approved → CLI never calls the gate).
+
+    Extracted to module scope so the wiring shape is directly unit-
+    testable from the test suite without a live SDK / MCP server.
+    """
+    tools = list(mcp_tool_names)
+    if agent_type == "investment" and has_attachments:
+        tools.append(f"mcp__{MCP_SERVER_NAME}__{READ_ATTACHMENT_TOOL_NAME}")
+    return tools
+
+
+# Per-allowed-MIME content-block shape for the MCP tool result. Anthropic
+# accepts type=image source=base64 for raster images and type=document
+# source=base64 for PDFs in tool_result content arrays — Claude's vision
+# stack inspects them natively. Anything outside our upload allowlist
+# raises so the handler surfaces an isError tool result rather than
+# falling back to a text dump of the bytes.
+class _UnsupportedAttachmentMime(Exception):
+    """Internal signal that _content_block_for got a MIME outside the
+    image / application-pdf families. Should be unreachable for any
+    attachment that came through save_upload (which enforces
+    ALLOWED_MIME + magic-byte sniffing + persists the validated type
+    via the sidecar). Raised so the read_attachment handler can return
+    isError instead of letting an unvalidated type reach the agent."""
+
+
+def _content_block_for(content_type, data_bytes):
+    """Build the Anthropic content block for a given (mime, bytes) pair.
+
+    Used by the read_attachment SdkMcpTool handler. Encoded inline so
+    the tool handler is a single round-trip — Claude receives the
+    actual bytes (vision-native for image + PDF), not just a description.
+
+    ak-1x4 pass 3 (reviewer hq-wisp-z1fyr MAJOR): fails closed instead
+    of degrading to a utf-8-replace text block. The text-fallback was a
+    prompt-injection channel because:
+      1. resolve() previously re-derived content_type from the user-
+         controlled filename extension; a real PDF saved as "blob"
+         resolved to application/octet-stream.
+      2. octet-stream hit the text branch here.
+      3. data_bytes.decode("utf-8", errors="replace") shoved the PDF
+         (potentially with embedded crafted ASCII) into the prompt
+         instruction channel as TEXT, bypassing Claude's vision sandbox.
+    With pass 3's sidecar persistence in agent_attachments.resolve()
+    the content_type that reaches us is guaranteed to be on
+    ALLOWED_MIME, so this raise is a defense-in-depth wall, not the
+    primary protection.
+    """
+    if content_type and content_type.startswith("image/"):
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": content_type,
+                "data": _base64.b64encode(data_bytes).decode("ascii"),
+            },
+        }
+    if content_type == "application/pdf":
+        return {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": content_type,
+                "data": _base64.b64encode(data_bytes).decode("ascii"),
+            },
+        }
+    raise _UnsupportedAttachmentMime(
+        f"unsupported content_type for read_attachment: {content_type!r}"
+    )
+
+
+def make_read_attachment_tool(user_id, attachment_records, logger=None):
+    """Build an SdkMcpTool that exposes ONLY this turn's attachments.
+
+    ak-1x4 pass 2 (reviewer hq-wisp-sh1to): confinement is enforced
+    inside the closure via a membership check against the resolved
+    attachment_id set. This is mode-independent — it does not rely on
+    permission_mode or any CLI permission control surface. Cross-user
+    isolation is guaranteed because (a) the membership set is built
+    from records resolve()'d under user_id only, and (b) any other id
+    fails the membership check and returns isError without touching
+    disk.
+
+    The handler reads the file off the per-user attachment subtree
+    (path comes from the resolved record, never reconstructed from
+    the model's input) and returns an image/document/text content
+    block as appropriate.
+    """
+    # Build the lookup once: attachment_id → (path, content_type, filename).
+    # Closing over the dict (not the records list) keeps the membership
+    # check O(1) and avoids re-resolving anything during the turn.
+    scope = {
+        rec["attachment_id"]: rec
+        for rec in (attachment_records or [])
+        if rec and rec.get("attachment_id")
+    }
+
+    async def _handler(args):
+        att_id = (args or {}).get("attachment_id")
+        if not att_id or not isinstance(att_id, str):
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "Error: attachment_id is required.",
+                }],
+                "isError": True,
+            }
+
+        # Membership check is the security boundary. Any id outside
+        # this turn's resolved set — cross-user, expired, malformed,
+        # or just made up by the model — gets the same generic error.
+        rec = scope.get(att_id)
+        if rec is None:
+            if logger:
+                logger.warning(
+                    "read_attachment denied: user=%s requested_id=%r "
+                    "(not in turn scope; scope_size=%d)",
+                    user_id, att_id, len(scope),
+                )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Error: attachment '{att_id}' is not in this "
+                        f"chat's attachment scope."
+                    ),
+                }],
+                "isError": True,
+            }
+
+        # Defense in depth: re-resolve the record from disk to catch
+        # the (unlikely) case where the file was swept out from under
+        # us between the stream_chat pre-resolve and this handler call.
+        # AttachmentNotFound here surfaces as an isError tool result
+        # rather than a thrown exception that would crash the turn.
+        try:
+            current = attachment_resolve(user_id, att_id)
+        except AttachmentNotFound:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Error: attachment '{att_id}' is no longer "
+                        f"available (may have been swept after upload)."
+                    ),
+                }],
+                "isError": True,
+            }
+        path = current.get("path") or rec["path"]
+        content_type = current.get("content_type") or rec.get("content_type")
+
+        try:
+            with open(path, "rb") as fh:
+                data_bytes = fh.read()
+        except OSError as exc:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Error reading attachment '{att_id}': {exc}",
+                }],
+                "isError": True,
+            }
+
+        # ak-1x4 pass 3: _content_block_for now raises on any non-image /
+        # non-application-pdf MIME instead of degrading to a text dump
+        # of the raw bytes. With the sidecar-persisted content_type from
+        # save_upload reaching us here, this should be unreachable for
+        # any legitimate upload; but defense-in-depth surface an isError
+        # rather than crashing the turn if it does fire.
+        try:
+            block = _content_block_for(content_type, data_bytes)
+        except _UnsupportedAttachmentMime as exc:
+            if logger:
+                logger.warning(
+                    "read_attachment unsupported MIME: user=%s id=%s "
+                    "content_type=%r — %s",
+                    user_id, att_id, content_type, exc,
+                )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Error: attachment '{att_id}' has an "
+                        f"unsupported content type."
+                    ),
+                }],
+                "isError": True,
+            }
+
+        return {
+            "content": [block],
+            "isError": False,
+        }
+
+    return SdkMcpTool(
+        name=READ_ATTACHMENT_TOOL_NAME,
+        description=(
+            "Read a file the user attached to this message. Pass the "
+            "attachment_id field shown in the [Attachments] block at "
+            "the end of the user's message. Returns the file contents "
+            "as a vision-native content block (image for image/* MIMEs, "
+            "document for application/pdf). Only attachments from this "
+            "chat turn are accessible."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "attachment_id": {
+                    "type": "string",
+                    "description": (
+                        "The attachment_id (UUID) from the [Attachments] "
+                        "block in the user's message."
+                    ),
+                    # uuid4 shape — defensive, the closure membership
+                    # check is the real boundary.
+                    "pattern": "^[a-fA-F0-9-]{8,64}$",
+                },
+            },
+            "required": ["attachment_id"],
+        },
+        handler=_handler,
+    )
+
 
 class AgentService(BaseService):
     _instance = None
@@ -93,7 +340,8 @@ class AgentService(BaseService):
         self.dashboard_service = dashboard_service
         self.mail_processor = mail_processor
 
-    def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None):
+    def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None,
+                    attachments=None):
         """
         Generator that yields SSE events for the agent chat.
         Uses claude_agent_sdk with MCP tools to process queries.
@@ -104,12 +352,64 @@ class AgentService(BaseService):
         - confirm: {"type": "confirm", "tool": "...", "input": {...}, "message": "..."}
         - done: {"type": "done", "mutations": [...]}
         - error: {"type": "error", "message": "..."}
+
+        attachments (ak-1x4): list of attachment_id strings previously
+        returned by POST /agent/attach. Investment agent only. Each id
+        is resolved to an absolute filesystem path under the user's
+        per-user dir; paths are injected into the user's latest message
+        for Claude's Read tool to pick up. The attachment files are
+        deleted in the finally block — ephemeral per-turn lifecycle.
+        Resolution failures (deleted, cross-user, malformed id) emit a
+        single SSE error event and bail before the SDK runs.
         """
         confirmed_tools = confirmed_tools or []
+        attachments = attachments or []
         tool_events = []  # Collected intermediate events (tool_exec, confirm)
         mutations = []
+        # Track resolved attachment_ids so the finally block can clean
+        # them up regardless of which exit path the SDK takes.
+        attachment_ids_to_cleanup = []
 
         try:
+            # ak-1x4: resolve attachments + spec-cap enforcement BEFORE
+            # SDK setup. If anything fails we want to surface a single
+            # clean error event and exit — no MCP server boot, no Claude
+            # subprocess. Investment agent only; other agents ignore.
+            attachment_records = []
+            if attachments:
+                if agent_type != "investment":
+                    yield self._sse_event("error", {
+                        "message": (
+                            "Attachments are only supported in the "
+                            "investment agent at this time."
+                        )
+                    })
+                    return
+                if len(attachments) > ATTACHMENTS_MAX_PER_MESSAGE:
+                    yield self._sse_event("error", {
+                        "message": (
+                            f"Too many attachments: max "
+                            f"{ATTACHMENTS_MAX_PER_MESSAGE} per message."
+                        )
+                    })
+                    return
+                for att_id in attachments:
+                    try:
+                        rec = attachment_resolve(user_id, att_id)
+                    except AttachmentNotFound:
+                        # Track the id anyway so the finally block can
+                        # attempt cleanup (no-op if it doesn't exist).
+                        attachment_ids_to_cleanup.append(att_id)
+                        yield self._sse_event("error", {
+                            "message": (
+                                "Attachment not found or expired. Please "
+                                "re-attach the file."
+                            )
+                        })
+                        return
+                    attachment_records.append(rec)
+                    attachment_ids_to_cleanup.append(att_id)
+
             config = get_agent_config(agent_type)
 
             # Build MCP tools from tool definitions
@@ -117,6 +417,20 @@ class AgentService(BaseService):
                 agent_type, config["tools"], user_id,
                 tool_events, mutations, confirmed_tools,
             )
+
+            # ak-1x4 pass 2: when this turn carries attachments, register
+            # the per-turn read_attachment MCP tool BEFORE creating the
+            # MCP server. The tool closes over the resolved attachment
+            # record set, so it can only return files in this user's
+            # current scope — confinement lives in the closure, not in
+            # CLI permission semantics (which are bypassed via
+            # permission_mode='bypassPermissions').
+            if attachment_records and agent_type == "investment":
+                sdk_tools.append(make_read_attachment_tool(
+                    user_id=user_id,
+                    attachment_records=attachment_records,
+                    logger=self.logger,
+                ))
 
             # Create in-process MCP server
             mcp_server = create_sdk_mcp_server(
@@ -126,6 +440,17 @@ class AgentService(BaseService):
 
             # Format conversation history as prompt text
             prompt_text = self._format_conversation(messages)
+
+            # ak-1x4 pass 2: inject the attachments block into the last
+            # user message. The block lists each attachment_id (NOT the
+            # on-disk path) so the agent calls read_attachment with the
+            # opaque id — paths never leak to the chat surface.
+            if attachment_records:
+                attachments_block = attachments_format_for_prompt(
+                    attachment_records
+                )
+                if attachments_block:
+                    prompt_text = f"{prompt_text}\n{attachments_block}"
 
             # allowed_tools is required: with permission_mode='bypassPermissions'
             # and no list, built-in tools are silently unavailable and the agent
@@ -146,6 +471,21 @@ class AgentService(BaseService):
             mcp_tool_names = [
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in config["tools"]
             ]
+
+            # ak-1x4 pass 2 (reviewer hq-wisp-sh1to architectural fix):
+            # the investment agent gets the per-turn read_attachment
+            # MCP tool name when attachments are present. NO built-in
+            # tool (Read, Bash, …) is added — the previous approach used
+            # Claude Code's Read with a can_use_tool gate, but that gate
+            # is inert under permission_mode='bypassPermissions'
+            # (allowed_tools entries are pre-approved, so the CLI never
+            # calls the gate). Confinement now lives entirely in the
+            # read_attachment handler's closure (membership check on
+            # the resolved attachment_id set).
+            mcp_tool_names = compute_allowed_tools(
+                agent_type, mcp_tool_names,
+                has_attachments=bool(attachment_records),
+            )
 
             # v3.2 instrumentation (hq-wisp-0kdnk): log the SDK call-boundary
             # signature so infra can verify which build is running and what
@@ -204,6 +544,11 @@ class AgentService(BaseService):
                 stderr=_make_sdk_stderr_logger(f"chat.{agent_type}"),
                 extra_args={"debug-to-stderr": None},
             )
+            # ak-1x4 pass 2: can_use_tool is NOT set. The earlier scope
+            # gate approach was architecturally inert under bypass mode
+            # (allowed_tools entries are pre-approved → CLI never invokes
+            # the gate). Confinement now lives inside the read_attachment
+            # MCP tool's handler closure, which is mode-independent.
 
             # Run the query (blocking — collects all results then yields).
             # Streaming + tool_events make the run_query_collect wrapper
@@ -307,6 +652,22 @@ class AgentService(BaseService):
         except Exception as e:
             self.logger.error(f"Agent error: {e}")
             yield self._sse_event("error", {"message": str(e)})
+        finally:
+            # ak-1x4: ephemeral per-turn cleanup. Best-effort rmtree of
+            # any attachment subtrees this stream_chat call resolved (or
+            # tried to resolve). Failures are swallowed inside
+            # attachment_cleanup; the sweeper picks up orphans.
+            # Generator finally fires whether the generator is exhausted
+            # OR closed early (FE disconnect, error), so a flaky upstream
+            # never leaks disk.
+            for att_id in attachment_ids_to_cleanup:
+                try:
+                    attachment_cleanup(user_id, att_id)
+                except Exception:
+                    self.logger.exception(
+                        "attachment cleanup failed for %s (id=%s)",
+                        user_id, att_id,
+                    )
 
     def _build_sdk_tools(self, agent_type, tool_defs, user_id,
                          tool_events, mutations, confirmed_tools):

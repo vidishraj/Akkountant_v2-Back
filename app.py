@@ -93,6 +93,14 @@ class Akkountant(Flask):
         """Set up configuration."""
         self.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
         self.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+        # ak-1x4 reviewer fix: do NOT set a global MAX_CONTENT_LENGTH —
+        # it would also cap legitimate file-storage / signature / bank-
+        # statement uploads on other endpoints which were previously
+        # unlimited. The /agent/attach handler enforces its own
+        # Content-Length check up-front and streams with a hard byte
+        # ceiling in save_upload (see utils/agent_attachments.py),
+        # so per-route enforcement is sufficient without dragging the
+        # global cap along.
 
     def updateFromDump(self, file_name, folder_path):
         """
@@ -443,9 +451,10 @@ class Akkountant(Flask):
             ('/portfolio/stats', 'GET', self.portfolioVisitorEP.get_stats),
         ]
 
-        # Agent chat endpoint
+        # Agent chat endpoint + ak-1x4 attachment upload
         agentRoutes = [
             ('/agent/chat', 'POST', self.agentEP.chat),
+            ('/agent/attach', 'POST', self.agentEP.attach),
         ]
 
         # Register all routes
