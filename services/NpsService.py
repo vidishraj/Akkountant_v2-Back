@@ -29,6 +29,21 @@ class NPSService(Base_MSN, ABC):
 
     def buySecurity(self, security_data, userId):
         try:
+            # ak-bgc fix: parity with MfService — positive-value gate up
+            # front so a zero / negative qty or price (which would skew
+            # NAV or break average-price math) is rejected with a clear
+            # message instead of producing a corrupt row. The upstream
+            # InvestmentService.insertSecurityPurchase already validates
+            # the agent-side shape; this catches PROD callers that
+            # bypass that path (e.g. statement-parsed transactions).
+            try:
+                _q = Decimal(str(security_data['buyQuant']))
+                _p = Decimal(str(security_data['buyPrice']))
+            except Exception:
+                return {"error": "buyQuant and buyPrice must be numeric"}
+            if _q <= 0 or _p <= 0:
+                return {"error": "buyQuant and buyPrice must be positive"}
+
             # Validate the securityCode using the separate function
             if not self.checkIfSecurityExists(security_data['securityCode']):
                 return {"error": "Invalid code"}

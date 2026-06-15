@@ -333,27 +333,37 @@ class InvestmentService(BaseService):
         # Purchase from the UI is possible for MF, NPS, EPF, PF or Gold
         # NOTE: buyPrice in the DB = per-unit price (NAV), NOT total amount.
         # The agent sends {quantity (units), amount (total ₹)} so we compute: NAV = amount / quantity.
+        #
+        # ak-bgc fix: each branch validates its own required fields up
+        # front and raises ValueError on missing / non-positive values.
+        # Previously the MF/NPS branches did `data['quantity']` raw which
+        # surfaced as a generic KeyError 500 (no clue what was missing),
+        # and the NAV calc was `amount / quantity if quantity != 0 else 0`
+        # which silently created NAV=0 rows on bad input. Both now loud-fail
+        # so the agent gets a clear retry message instead of corrupted data.
         if serviceType == MSNENUM.Mutual_Funds:
+            self._validate_msn_insert_data("Mutual_Funds", data)
             quantity = float(data['quantity'])
             amount = float(data['amount'])
             insertionObject = {
                 "securityCode": data['schemeCode'],
                 "date": DateTimeUtil().convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name),
                 "buyQuant": quantity,
-                "buyPrice": amount / quantity if quantity != 0 else 0,
+                "buyPrice": amount / quantity,
             }
             status = self.MFService.buySecurity(insertionObject, userId)
             if 'error' in status:
                 return jsonify({"Error": "Error in MF entry"}), 406
             return jsonify({"Message": "MF Transaction inserted successfully"}), 200
         elif serviceType == MSNENUM.NPS:
+            self._validate_msn_insert_data("NPS", data)
             quantity = float(data['quantity'])
             amount = float(data['amount'])
             insertionObject = {
                 "securityCode": data['schemeCode'],
                 "date": DateTimeUtil().convert_to_sql_datetime(data['date'], DateStatementEnum.EPF_STATEMENT.name),
                 "buyQuant": quantity,
-                "buyPrice": amount / quantity if quantity != 0 else 0,
+                "buyPrice": amount / quantity,
             }
             status = self.NPSService.buySecurity(insertionObject, userId)
             if 'error' in status:
@@ -365,6 +375,41 @@ class InvestmentService(BaseService):
             return self.PPFService.insertDeposit(data, userId)
         elif serviceType == EPGEnum.Gold:
             return self.GoldService.insertDeposit(data, userId)
+
+    @staticmethod
+    def _validate_msn_insert_data(label, data):
+        """ak-bgc fix: strict pre-flight on MF/NPS insert payload.
+
+        Both share the same agent-side shape (schemeCode + date + quantity
+        + amount). Raising ValueError surfaces a clear actionable message
+        to the agent via the MCP tool error path; the previous bare
+        `data['quantity']` style would 500 with a useless KeyError repr.
+        """
+        required = ('schemeCode', 'date', 'quantity', 'amount')
+        missing = [k for k in required if not data.get(k)]
+        if missing:
+            raise ValueError(
+                f"{label} insert requires {list(required)}; missing: {missing}. "
+                f"Got fields: {sorted(data.keys())}."
+            )
+        try:
+            quantity = float(data['quantity'])
+            amount = float(data['amount'])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{label} insert: quantity and amount must be numeric; "
+                f"got quantity={data['quantity']!r}, amount={data['amount']!r} ({exc})"
+            ) from exc
+        if quantity <= 0:
+            raise ValueError(
+                f"{label} insert: quantity must be > 0; got {quantity}. "
+                "Zero / negative quantity would have produced NAV=0 rows "
+                "silently (audit ak-bgc); re-prompt the user for the unit count."
+            )
+        if amount <= 0:
+            raise ValueError(
+                f"{label} insert: amount must be > 0; got {amount}."
+            )
 
     def fetchRateForEPG(self, serviceType):
         if serviceType == EPGEnum.EPF:

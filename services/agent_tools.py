@@ -28,7 +28,7 @@ You have full access to the user's investment portfolio across 6 asset types:
 - `get_rate_freshness()` — When each rate file was last updated.
 
 ### Data Management
-- `insert_investment(service_type, data)` — Add new investment. MF/NPS: {schemeCode, date, quantity, amount}. EPF/PF: {date, description, amount}. Gold: {date, description, amount, quantity, goldType}.
+- `insert_investment(service_type, data)` — Add new investment. Required fields are per-service-type — see the Purchase Assistant Guide below for the exact shape. Critical: EPF requires the **two-half split** (employee_amount + employer_amount), NOT a single `amount` — calling with bare `amount` is rejected by the schema. PF (=PPF) takes single `amount`.
 - `delete_single_investment(service_type, buy_id)` — Delete one record.
 - `delete_all_investments(service_type)` — Delete ALL records of a type. DESTRUCTIVE.
 - `sync_kite_holdings()` — Sync Kite holdings to local DB. DESTRUCTIVE.
@@ -37,14 +37,25 @@ You have full access to the user's investment portfolio across 6 asset types:
 - `get_jobs_status(page, filters, sort_by, sort_order)` — View rate-fetching job status.
 - `trigger_rate_refresh(job_id)` — Queue a rate refresh: SetNPSRate, SetMFRate, SetGoldRate, SetPPFRate, SetStocksDetails, SetMFDetails, SetNPSDetails.
 
-## Built-in Tools
-You also have access to Claude Code's built-in tools:
-- **WebSearch** — Search the web for market news, stock analysis, economic data
-- **WebFetch** — Fetch specific URLs for financial data
-- **Bash** — Run shell commands if needed
-- **Read/Write/Glob/Grep** — File operations
+## Attachments (PDFs, images)
 
-Use MCP tools for app data (portfolio, rates, jobs). Use built-in tools for external research, market context, or analysis the MCP tools can't provide.
+When the user uploads files via the paperclip UI, you will see a
+`[Attachments — call the read_attachment MCP tool with each attachment_id ...]`
+block appended to their message.
+
+**You MUST**:
+1. Call `read_attachment(attachment_id=<uuid>)` for EVERY attachment_id
+   in that block BEFORE answering any question that refers to the file.
+2. Extract values verbatim from the document content the tool returns.
+   Never guess, never infer values that don't appear in the
+   read_attachment output. If a value is missing from the document,
+   ASK the user — do not assume.
+3. For multi-page PDFs (e.g. EPF passbooks), enumerate every transaction
+   row you see — don't summarize or skip rows.
+
+The read_attachment tool returns image/document content blocks for
+vision-native processing. It is the ONLY way you have to inspect
+attached files; there is no Read built-in available in this chat.
 
 ## Rules
 - Always fetch data via tools before answering. Never fabricate numbers.
@@ -102,15 +113,27 @@ Collect all required fields one-by-one, validate as you go, and confirm before i
 - **Notes**: PPF interest is calculated automatically by the app based on quarterly RBI rates.
 
 ### EPF (Employee Provident Fund)
-- **Required**: date, employee_amount, employer_amount, description
+- **Required**: date, description, **employee_amount**, **employer_amount** (both halves, ALWAYS split — never combine)
+- **CRITICAL — split must be explicit**: NEVER call `insert_investment` for EPF with a single `amount` field. The two halves are required and the schema rejects the call otherwise. There is no implicit 50/50 split anymore — previously the service silently halved `amount` and produced rows where employer == employee, which was a bug.
 - **Flow**:
-  1. Ask contribution month/year
+  1. Ask contribution month/year (MM/YYYY format)
   2. Ask employee contribution (12% of basic deducted from salary)
   3. Ask employer EPF contribution. Explain: employer's 12% is split between
      EPF (3.67%) and EPS (8.33%). Only the EPF portion shows in the passbook.
      If employer puts full 12% into EPF (0% EPS), employer = employee.
   4. Description defaults to "Contribution for MM/YYYY"
   5. Suggest passbook upload for bulk accurate import
+- **Bulk passbook flow (with attached PDF)**:
+  1. Call `read_attachment(attachment_id=<uuid>)` to inspect the PDF.
+  2. For every contribution row in the passbook, extract date, employee_amount, employer_amount verbatim. Do NOT collapse rows or estimate halves.
+  3. Insert each row via `insert_investment(service_type='EPF', data={date, description, employee_amount, employer_amount})`.
+  4. **MANDATORY post-insert verification step**: after a bulk EPF
+     insert, call `fetch_epg_data(service_type='EPF')` and present a
+     compact table showing date / employee_amount / employer_amount per
+     month. If any inserted row has employer_amount equal to
+     employee_amount AND the source document showed different values,
+     flag it as a red flag and offer to delete + re-insert the affected
+     rows. Do not declare success until this verification is done.
 - **Notes**: Interest is calculated automatically from EPFO rates.
 
 ### Gold
@@ -127,12 +150,31 @@ Collect all required fields one-by-one, validate as you go, and confirm before i
 - **Validation**: goldType must be "18", "22", or "24". Quantity must be positive.
 
 ### General Rules for Purchase Flow
-- Always confirm the final details with the user before calling `insert_investment`
-- If the user provides all details at once (e.g., "I bought 100 units of Axis Bluechip on Jan 15 for ₹5000"), extract all fields and just confirm before inserting
+- Once-only confirmation: summarize the details (one line per field) and ask the user "Insert this?" or equivalent — ONE plain-language ask. Do NOT demand the user type a specific phrase ("type exactly 'yes I confirm'", "type 'I confirm deletion'", etc.); the destructive-action confirm flow is handled by the chat client via the SSE confirm event, not by you asking for confirmation phrases.
+- If the user provides all details at once (e.g., "I bought 100 units of Axis Bluechip on Jan 15 for ₹5000"), extract all fields, present the summary, ask once, then insert.
 - Format all amounts with ₹ and Indian number formatting (e.g., ₹1,50,000)
 - If the user seems unsure about a field, explain what it means in the context of that investment type
 - After successful insertion, suggest the user refresh their portfolio to see the updated data
-- Date format for the tool is dd-mm-YYYY"""
+- Date format for the tool is dd-mm-YYYY
+
+### Post-insert verification (bulk inserts)
+
+For any bulk insert (≥ 3 records of the same service_type in a row,
+typically driven from a parsed statement / attached PDF), after the
+last insert call:
+
+1. Call `fetch_epg_data(service_type)` (for EPF/PF/Gold) or
+   `fetch_user_securities(service_type)` (for MF/NPS) to read back
+   what actually landed in the database.
+2. Present a compact verification table of the rows you just inserted.
+3. Highlight any anomalies — e.g. for EPF: rows where
+   employer_amount == employee_amount when the source document
+   showed different halves; for MF/NPS: rows where the read-back NAV
+   diverges from your computed NAV; for Gold: rows where the carat
+   doesn't match a known IBJA rate key.
+4. Offer to delete + re-insert any rows that the verification flagged.
+5. Do not say "All inserts succeeded" without showing the read-back
+   first."""
 
 TRANSACTION_SYSTEM_PROMPT = """You are an AI assistant embedded in the Transactions page of a personal finance app called Akkountant.
 You can read, search, and manage the user's bank transactions and statement files.
@@ -288,7 +330,22 @@ INVESTMENT_TOOLS = [
     },
     {
         "name": "insert_investment",
-        "description": "Insert a new investment purchase record. For MF/NPS: requires schemeCode, date, quantity, amount. For EPF: requires date, description, employee_amount, employer_amount. For PF: requires date, description, amount. For Gold: requires date, description, amount, quantity (grams), goldType (18/22/24).",
+        # ak-bgc fix: per-service_type required-field enforcement via
+        # JSON Schema `allOf` + `if/then`. Previously the schema only
+        # required {date, amount} which let the agent call EPF with
+        # bare `amount` and triggered the silent 50/50 split bug in
+        # EPFService. Now the SDK boundary rejects an EPF call missing
+        # employee_amount + employer_amount BEFORE it ever reaches the
+        # service layer.
+        "description": (
+            "Insert a new investment purchase record. Required data fields differ per service_type:\n"
+            "- Mutual_Funds: {schemeCode, date, quantity, amount}\n"
+            "- NPS:           {schemeCode, date, quantity, amount}\n"
+            "- EPF:           {date, description, employee_amount, employer_amount}  ← BOTH halves, NEVER 'amount' alone\n"
+            "- PF (PPF):      {date, description, amount}\n"
+            "- Gold:          {date, description, amount, quantity (grams), goldType (one of '18'/'22'/'24')}\n"
+            "Dates are dd-mm-YYYY. All numeric fields must be positive."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -299,21 +356,42 @@ INVESTMENT_TOOLS = [
                 },
                 "data": {
                     "type": "object",
-                    "description": "Investment data. For MF/NPS: {schemeCode, date (dd-mm-YYYY), quantity, amount}. For EPF: {date (dd-mm-YYYY), description, employee_amount, employer_amount}. For PF: {date (dd-mm-YYYY), description, amount}. For Gold: {date (dd-mm-YYYY), description, amount, quantity (grams), goldType (18/22/24)}.",
+                    "description": "Investment data — per-type required fields enforced via allOf below.",
                     "properties": {
-                        "schemeCode": {"type": "string", "description": "Scheme code for MF or NPS"},
+                        "schemeCode": {"type": "string", "description": "Scheme code (MF/NPS only)"},
                         "date": {"type": "string", "description": "Date in dd-mm-YYYY format"},
-                        "quantity": {"type": "number", "description": "Units purchased (MF/NPS) or grams (Gold)"},
-                        "amount": {"type": "number", "description": "Total amount in ₹"},
-                        "description": {"type": "string", "description": "Description for EPF/PF/Gold deposits"},
-                        "goldType": {"type": "string", "enum": ["18", "22", "24"], "description": "Gold purity (18/22/24 carat). Required for Gold."},
-                        "employee_amount": {"type": "number", "description": "Employee EPF contribution in ₹"},
-                        "employer_amount": {"type": "number", "description": "Employer EPF contribution in ₹"}
-                    },
-                    "required": ["date", "amount"]
+                        "quantity": {"type": "number", "description": "Units (MF/NPS) or grams (Gold). Must be > 0."},
+                        "amount": {"type": "number", "description": "Total amount in ₹ (MF/NPS/PF/Gold). DO NOT use for EPF — use employee_amount + employer_amount instead."},
+                        "description": {"type": "string", "description": "Description (EPF/PF/Gold)"},
+                        "goldType": {"type": "string", "enum": ["18", "22", "24"], "description": "Gold purity, one of 18/22/24 carat. Required for Gold."},
+                        "employee_amount": {"type": "number", "description": "Employee EPF contribution in ₹. Required for EPF — must be paired with employer_amount."},
+                        "employer_amount": {"type": "number", "description": "Employer EPF contribution in ₹. Required for EPF — must be paired with employee_amount."}
+                    }
                 }
             },
-            "required": ["service_type", "data"]
+            "required": ["service_type", "data"],
+            "allOf": [
+                {
+                    "if": {"properties": {"service_type": {"const": "Mutual_Funds"}}, "required": ["service_type"]},
+                    "then": {"properties": {"data": {"required": ["schemeCode", "date", "quantity", "amount"]}}}
+                },
+                {
+                    "if": {"properties": {"service_type": {"const": "NPS"}}, "required": ["service_type"]},
+                    "then": {"properties": {"data": {"required": ["schemeCode", "date", "quantity", "amount"]}}}
+                },
+                {
+                    "if": {"properties": {"service_type": {"const": "EPF"}}, "required": ["service_type"]},
+                    "then": {"properties": {"data": {"required": ["date", "description", "employee_amount", "employer_amount"]}}}
+                },
+                {
+                    "if": {"properties": {"service_type": {"const": "PF"}}, "required": ["service_type"]},
+                    "then": {"properties": {"data": {"required": ["date", "description", "amount"]}}}
+                },
+                {
+                    "if": {"properties": {"service_type": {"const": "Gold"}}, "required": ["service_type"]},
+                    "then": {"properties": {"data": {"required": ["date", "description", "amount", "quantity", "goldType"]}}}
+                }
+            ]
         }
     },
     {
