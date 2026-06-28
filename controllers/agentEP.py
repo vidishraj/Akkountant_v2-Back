@@ -22,17 +22,26 @@ class AgentController:
         """
         POST /agent/chat
         Body: {agent_type: str, messages: list, confirmed_tools?: list,
-               attachments?: list[str]}
+               attachments?: list[str], conversation_id?: int}
         Returns: SSE stream
 
         attachments (ak-1x4): list of attachment_ids previously returned
         by POST /agent/attach. Investment agent only.
+
+        conversation_id (ak-bq5): optional int — when present, the user
+        message is appended to the existing thread + the assistant
+        reply is appended after the stream completes. When absent, the
+        service layer creates a new conversation row, derives a title
+        from the first user message, and emits a leading SSE event
+        `{"type":"conversation_id","id": ...}` so the FE can pin the
+        id for follow-up turns.
         """
         data = request.get_json(force=True)
         agent_type = data.get("agent_type")
         messages = data.get("messages", [])
         confirmed_tools = data.get("confirmed_tools", [])
         attachments = data.get("attachments", []) or []
+        conversation_id = data.get("conversation_id")  # ak-bq5
         user_id = g.get("firebase_id")
 
         if not agent_type:
@@ -55,6 +64,17 @@ class AgentController:
                 )
             }), 400
 
+        # ak-bq5: optional conversation_id sanity — must be int-coercible.
+        # Membership scope is validated inside the service layer (404 on
+        # miss / cross-user / soft-deleted; surfaced as an SSE error).
+        if conversation_id is not None:
+            try:
+                conversation_id = int(conversation_id)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "error": "conversation_id must be an integer"
+                }), 400
+
         def generate():
             for event in self.agent_service.stream_chat(
                 agent_type=agent_type,
@@ -62,6 +82,7 @@ class AgentController:
                 user_id=user_id,
                 confirmed_tools=confirmed_tools,
                 attachments=attachments,
+                conversation_id=conversation_id,
             ):
                 yield event
 
