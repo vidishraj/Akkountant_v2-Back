@@ -307,6 +307,102 @@ class TestStreamChatSSEEvent(unittest.TestCase):
 # ── Service-layer scope guard contract ───────────────────────────────────
 
 
+class TestAttachmentsMetaFullDescriptor(unittest.TestCase):
+    """ak-bq5 pass-2 reviewer fix (hq-wisp-4tbck MAJOR): the persisted
+    user message MUST carry the resolved descriptor (filename,
+    content_type, size) per attachment, not just the opaque id. On a
+    second device the /tmp file is gone; the metadata is the FE's only
+    render source.
+
+    Verified via source inspection of the stream_chat shape so we don't
+    need to boot Flask/SDK for the assertion."""
+
+    @classmethod
+    def setUpClass(cls):
+        repo = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(repo, "services", "agentService.py")) as fh:
+            cls.src = fh.read()
+        with open(os.path.join(repo, "models", "AgentMessage.py")) as fh:
+            cls.model_src = fh.read()
+
+    def test_attachments_meta_built_from_resolved_records(self):
+        print("\n[agentService — attachments_meta built from attachment_records]")
+        # The post-fix shape iterates over attachment_records (the
+        # resolved list with full descriptors), NOT over the bare
+        # attachments arg.
+        self.assertRegex(
+            self.src,
+            r"for r in attachment_records",
+            "attachments_meta should iterate the resolved records list",
+        )
+        # Each descriptor includes the four reviewer-required keys.
+        for key in ("attachment_id", "filename", "content_type", "size"):
+            self.assertRegex(
+                self.src,
+                rf'"{key}":\s*r\.get\("{key}"\)',
+                f"attachments_meta descriptor must include {key!r}",
+            )
+        print("  ✓ resolved-record iteration + full descriptor keys")
+
+    def test_bare_id_attachments_meta_removed(self):
+        print("\n[agentService — bare-id attachments_meta shape removed]")
+        # The pass-1 shape was a list comprehension over `attachments`
+        # (the bare-id list) — that's the MAJOR bug. Make sure it
+        # doesn't sneak back in.
+        self.assertNotRegex(
+            self.src,
+            r'\[\{"attachment_id":\s*aid\}\s*for\s*aid\s*in\s*attachments\]',
+            "bare-id attachments_meta shape must not return",
+        )
+        print("  ✓ pass-1 bare-id list comprehension is gone")
+
+    def test_user_persist_after_attachment_resolution(self):
+        print("\n[agentService — user-msg persist is downstream of attachment resolution]")
+        # Sanity ordering: the append_message(role='user', ...) call
+        # MUST appear AFTER the "for att_id in attachments:" resolution
+        # loop. If it returns to the pre-resolution position we lose
+        # the resolved-descriptor guarantee.
+        resolve_loop_pos = self.src.find("for att_id in attachments:")
+        user_persist_pos = self.src.find('role="user",')
+        self.assertGreater(
+            resolve_loop_pos, 0, "resolve loop must exist in source",
+        )
+        self.assertGreater(
+            user_persist_pos, 0, "user-msg persist call must exist",
+        )
+        self.assertGreater(
+            user_persist_pos, resolve_loop_pos,
+            "user-msg persist must come AFTER attachment resolution loop",
+        )
+        print("  ✓ persist is downstream of resolve")
+
+    def test_model_docstring_no_sha256_claim(self):
+        print("\n[AgentMessage.py — no implied sha256 claim in column comment]")
+        # The column comment previously promised sha256 in attachments_meta
+        # but we don't compute it. Reviewer flagged the implied claim.
+        # The post-fix comment lists what we DO carry and notes sha256
+        # as a follow-up.
+        # Column comment lists the 4 keys we actually persist.
+        for key in ("attachment_id", "filename", "content_type", "size"):
+            self.assertIn(key, self.model_src,
+                          f"attachments_meta comment should mention {key}")
+        # If sha256 still appears, it must be clearly flagged as
+        # follow-up / not-computed — not promised as part of the
+        # current shape. Accept either "not currently computed",
+        # "isn't computed", "follow-up", or "not yet" phrasing.
+        if "sha256" in self.model_src:
+            lowered = self.model_src.lower()
+            disclaimers = ("not currently computed", "isn't computed",
+                           "is not currently computed", "follow-up",
+                           "not yet")
+            has_disclaimer = any(d in lowered for d in disclaimers)
+            self.assertTrue(
+                has_disclaimer,
+                "sha256 still appears but isn't disclaimed as TBD",
+            )
+        print("  ✓ docstring reflects what we actually persist")
+
+
 class TestServiceScopeGuards(unittest.TestCase):
     """Every read / write path must go through _fetch_owned so the
     cross-user check has a single source of truth. Verifying via source

@@ -8,13 +8,16 @@ content stores the message text verbatim. For the assistant role this
 is the concatenation of TextBlocks the SDK returned (matching what
 agentService.stream_chat yields as the "text" event payload).
 
-attachments_meta stores DESCRIPTORS only — NOT the bytes. See dispatch
-hq-wisp-rr15b:
-  > Persisted messages keep attachment metadata (filename, type, size,
-  > sha256) but NOT the bytes. Existing /tmp/akkountant-agent-attachments/...
-  > sweep behavior unchanged.
-The FE renders "[attachment expired]" when the referenced uuid is no
-longer on disk.
+attachments_meta stores DESCRIPTORS only — NOT the bytes. Shape per
+descriptor: {attachment_id, filename, content_type, size}. Built from
+the resolved attachment records in agentService.stream_chat AFTER
+the per-user attachment subtree is validated, then persisted with
+the user message. The FE renders "[attachment expired]" when the
+referenced uuid is no longer on disk (sweep ran post-turn).
+
+Note: sha256 was mentioned in the dispatch but is NOT currently
+computed. Adding it is a follow-up (cheap — open the bytes once at
+resolve time, hash, add to the dict).
 
 partial flag: set TRUE if the SSE stream was interrupted mid-assistant-
 turn (e.g. FE disconnect, SDK error after some text). The FE can show a
@@ -52,10 +55,12 @@ class AgentMessage(Base):
     # write time by agentConversationService.append_message.
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
-    # JSON column: a list of {filename, mime, size, sha256, attachment_id}
+    # JSON column: a list of {attachment_id, filename, content_type, size}
     # descriptors when the user attached files this turn. NULL when no
     # attachments. We do NOT store the on-disk path or the bytes —
     # ephemeral sweep semantics from ak-1x4 apply.
+    # (sha256 was in the original dispatch but isn't computed today —
+    # tracked as a follow-up; cheap to add at resolve time.)
     attachments_meta = Column(JSON, nullable=True)
     # See class docstring on `partial`. Default FALSE.
     partial = Column(Boolean, nullable=False, default=False, server_default='0')

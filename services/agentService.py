@@ -397,8 +397,7 @@ class AgentService(BaseService):
         attachment_ids_to_cleanup = []
 
         try:
-            # ak-bq5: conversation_id pre-flight + persist user msg
-            # BEFORE any expensive SDK work. Three cases:
+            # ak-bq5: conversation_id pre-flight. Three cases:
             #
             # (a) no conversation_service wired → persistence OFF,
             #     legacy stateless behavior. Skip the whole block.
@@ -410,9 +409,15 @@ class AgentService(BaseService):
             #     emit the new id as the leading SSE event so the FE
             #     can pin it.
             #
-            # Then in all "on" cases we append the inbound user message
-            # so the read-back endpoint reflects the full thread even
-            # if the SDK crashes mid-stream.
+            # ak-bq5 pass-2 reviewer fix (hq-wisp-4tbck MAJOR): the
+            # user message is NO LONGER persisted here. We defer it
+            # until AFTER attachment_records is resolved so the row's
+            # attachments_meta carries full descriptors (filename,
+            # content_type, size) — not just the opaque id. On a
+            # second device the /tmp file is gone, so the metadata
+            # IS the only thing the FE has to render. See "user msg
+            # persist (deferred)" below.
+            last_user_text = ""
             if self.conversation_service is not None:
                 last_user_text = self._extract_last_user_content(messages)
                 if active_conversation_id is None:
@@ -458,34 +463,11 @@ class AgentService(BaseService):
                         return
 
                 # Emit the id as the leading SSE event so the FE can
-                # pin it for follow-up turns + persist the user message.
+                # pin it for follow-up turns. User message persistence
+                # is deferred — see below.
                 yield self._sse_event("conversation_id", {
                     "id": active_conversation_id,
                 })
-                # Build attachments_meta from the just-parsed attachment
-                # arg (we resolve the full records below, but only the
-                # ids are guaranteed at this point — the FE already
-                # holds the filename/size from its own upload step).
-                attachments_meta = (
-                    [{"attachment_id": aid} for aid in attachments]
-                    if attachments else None
-                )
-                try:
-                    self.conversation_service.append_message(
-                        user_id=user_id,
-                        conversation_id=active_conversation_id,
-                        role="user",
-                        content=last_user_text or "",
-                        attachments_meta=attachments_meta,
-                    )
-                except Exception:
-                    self.logger.exception(
-                        "append user message failed for conv=%s",
-                        active_conversation_id,
-                    )
-                    # Don't bail — the SDK loop can still run; the
-                    # missing user-msg row is a non-fatal degradation
-                    # we'd rather surface to logs than block on.
 
             # ak-1x4: resolve attachments + spec-cap enforcement BEFORE
             # SDK setup. If anything fails we want to surface a single
@@ -525,6 +507,51 @@ class AgentService(BaseService):
                         return
                     attachment_records.append(rec)
                     attachment_ids_to_cleanup.append(att_id)
+
+            # ak-bq5 pass-2 reviewer fix (hq-wisp-4tbck MAJOR): persist
+            # the inbound user message HERE — after attachment resolution
+            # has succeeded. attachments_meta now carries the full
+            # descriptor (id + filename + content_type + size) for each
+            # attachment, not just the bare id. When a second device
+            # reads the thread back, the /tmp file is gone (sweep ran),
+            # so the metadata IS the FE's only render source.
+            #
+            # If resolution failed we've already SSE-errored and
+            # returned above — we never reach this point with an
+            # invalid attachment ref, so a persisted user row with full
+            # descriptors is always trustworthy.
+            if (
+                self.conversation_service is not None
+                and active_conversation_id is not None
+            ):
+                attachments_meta = (
+                    [
+                        {
+                            "attachment_id": r.get("attachment_id"),
+                            "filename": r.get("filename"),
+                            "content_type": r.get("content_type"),
+                            "size": r.get("size"),
+                        }
+                        for r in attachment_records
+                    ]
+                    if attachment_records else None
+                )
+                try:
+                    self.conversation_service.append_message(
+                        user_id=user_id,
+                        conversation_id=active_conversation_id,
+                        role="user",
+                        content=last_user_text or "",
+                        attachments_meta=attachments_meta,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "append user message failed for conv=%s",
+                        active_conversation_id,
+                    )
+                    # Don't bail — the SDK loop can still run; the
+                    # missing user-msg row is a non-fatal degradation
+                    # we'd rather surface to logs than block on.
 
             config = get_agent_config(agent_type)
 
