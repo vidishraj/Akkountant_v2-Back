@@ -16,6 +16,22 @@ class EPFService(Base_EPG, ABC):
         self.parser = EPFStatementParser()
 
     def insertDeposit(self, data, userId):
+        # ak-bgc fix: strict required-field check up-front. Description and
+        # date are non-negotiable; employee+employer is the only valid pair.
+        # Bare-amount silent 50/50 split was the original bug (Overseer
+        # transcript hq-wisp-qmtj3): the agent would call with `amount`
+        # only, fallback split would render employer == employee on the
+        # dashboard, user never knew. Now we raise — InvestmentService's
+        # caller surfaces this as a clear tool error to the agent.
+        if 'date' not in data or not data['date']:
+            raise ValueError(
+                "EPF insert requires 'date' (MM/YYYY or DD/MM/YYYY)"
+            )
+        if 'description' not in data or not data['description']:
+            raise ValueError(
+                "EPF insert requires 'description' (e.g. 'Contribution for MM/YYYY')"
+            )
+
         # Handle different date formats from parser
         date_str = data['date']
         if '/' in date_str and len(date_str.split('/')) == 3:
@@ -26,20 +42,51 @@ class EPFService(Base_EPG, ABC):
             month, year = date_str.split('/')
             date_str = f"01/{month}/{year}"
             date_obj = self.dateTimeUtil.convert_to_sql_datetime(date_str, DateStatementEnum.EPF_STATEMENT.name)
-        
-        # Extract employee and employer amounts from different data formats
+
+        # Extract employee and employer amounts. Two acceptable shapes:
+        #   - parser format (PDF passbook): {employee_deposit, employer_deposit}
+        #   - agent format (AI chat): {employee_amount, employer_amount}
+        # The legacy bare-amount → 50/50 fallback was REMOVED — it was the
+        # silent bug that motivated this audit (ak-bgc / hq-wisp-qmtj3).
+        # Partial input (one of two amounts) is also rejected since it can't
+        # represent the user's intent unambiguously.
         if 'employee_deposit' in data and 'employer_deposit' in data:
-            # Parser data format (from EPF passbook PDF)
             employee_amount = data['employee_deposit']
             employer_amount = data['employer_deposit']
         elif 'employee_amount' in data and 'employer_amount' in data:
-            # Agent data format (from AI chat)
             employee_amount = data['employee_amount']
             employer_amount = data['employer_amount']
         else:
-            # Legacy fallback: single 'amount' → split 50/50
-            employee_amount = data['amount'] / 2
-            employer_amount = data['amount'] / 2
+            # Surface the missing fields explicitly so the agent (and the
+            # caller) can act on the message verbatim. Lists both accepted
+            # name conventions so the agent can fix its tool call on retry.
+            got = sorted(k for k in data.keys() if k not in {'date', 'description'})
+            raise ValueError(
+                "EPF insert requires both employee_amount and "
+                "employer_amount (or employee_deposit / employer_deposit). "
+                f"Got fields: {got}. Do NOT call with a single 'amount' — "
+                "split was previously assumed 50/50 silently and corrupted "
+                "data; provide both halves explicitly."
+            )
+
+        # Defensive: both amounts must be non-negative numbers. Coercion
+        # to float surfaces a clear TypeError on malformed input rather
+        # than letting it propagate as a DB cast failure later.
+        try:
+            employee_amount = float(employee_amount)
+            employer_amount = float(employer_amount)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"EPF insert: employee_amount and employer_amount must be "
+                f"numeric; got employee={data.get('employee_amount') or data.get('employee_deposit')!r}, "
+                f"employer={data.get('employer_amount') or data.get('employer_deposit')!r} ({exc})"
+            ) from exc
+        if employee_amount < 0 or employer_amount < 0:
+            raise ValueError(
+                f"EPF insert: employee_amount and employer_amount must be "
+                f"non-negative; got employee={employee_amount}, "
+                f"employer={employer_amount}"
+            )
 
         deposit_security = DepositSecurities(
             buyID=self.genericUtil.generate_custom_buyID(),
