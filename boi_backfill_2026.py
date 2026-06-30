@@ -135,7 +135,54 @@ def pick_user(app, override=None):
     return users[0][0]
 
 
-def probe_boi_download(app, date_from, date_to):
+def _wire_gmail_service(app, user_id):
+    """Build a live Gmail API client for the given user and return it.
+
+    Mirrors the schedular's canonical wiring path used by
+    utils/GmailServiceUtils.py:46-49:
+
+        gmailService = self.googleService.get_gmail_service(userId, token)
+        StatementDownloadService(gmailService=gmailService, password=...)
+
+    We don't trust the StatementDownloadService constructor's
+    `gmailService=...` kwarg path because the class is a singleton:
+    its `__init__` short-circuits via `if not hasattr(self, 'initialized')`,
+    so a second instantiation with a non-None gmailService is
+    silently ignored if anything else built it first (e.g. an
+    import-time side effect). Instead the caller sets
+    `svc.gmail_service = <api>` directly on the singleton after
+    construction.
+
+    ak-5oi fix (hq-wisp-u5ctj): initial dry-run came back RED because
+    singleton.gmail_service was None at script-fire time. Token +
+    api builder are the same surfaces mailProcessorService uses
+    (line 251, 604) so wiring this way matches schedular's prod
+    behavior exactly.
+    """
+    ts = getattr(app, "transactionService", None)
+    if ts is None:
+        raise SystemExit(
+            "app.transactionService not wired; cannot build Gmail "
+            "service. Check app.py _setup_services."
+        )
+    token = ts.fetchGmailTokenForUser(user_id)
+    if not token or not token.get("token"):
+        raise SystemExit(
+            f"No Gmail token found for user {user_id}; "
+            f"fetchGmailTokenForUser returned {token!r}"
+        )
+    gmail_api = ts.gmailService.googleService.get_gmail_service(
+        user_id, token,
+    )
+    if gmail_api is None:
+        raise SystemExit(
+            "get_gmail_service returned None — token may be expired "
+            "or revoked. Re-authenticate Gmail in the app, then re-run."
+        )
+    return gmail_api
+
+
+def probe_boi_download(app, user_id, date_from, date_to):
     """STEP 1: bank-specific Gmail probe.
 
     Uses StatementDownloadService.route_download_process to fire the
@@ -149,10 +196,13 @@ def probe_boi_download(app, date_from, date_to):
     print(f"\n[STEP 1] BOI-only Gmail probe ({date_from} → {date_to})")
     print(f"         using ak-2ql StatementPatternEnum.BOI")
 
+    gmail_api = _wire_gmail_service(app, user_id)
     svc = StatementDownloadService()
-    # Note: route_download_process uses the singleton gmailService set
-    # during app boot. The first user we pick should be the same
-    # Overseer whose Gmail token is loaded.
+    # Force-set the API on the singleton regardless of any prior
+    # instantiation. See _wire_gmail_service docstring for why we
+    # don't trust the constructor kwarg path here.
+    svc.gmail_service = gmail_api
+
     try:
         files = svc.route_download_process(
             bank_type="BOI",
@@ -267,7 +317,8 @@ def main():
         probe_files = None
         if not args.skip_probe:
             probe_files = probe_boi_download(
-                app, date_from=args.date_from, date_to=args.date_to,
+                app, user_id=user_id,
+                date_from=args.date_from, date_to=args.date_to,
             )
 
         summary = run_ingest(
