@@ -1157,6 +1157,9 @@ class MailProcessorService:
             "yesbank.co.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
             "bankofindia.co.in": ["BOI"],
             "bankofindia.com": ["BOI"],
+            # ak-2ql: 2026-03-07 RBI-mandated `.bank.in` TLD migration
+            # (precedent: hdfcbank.bank.in above).
+            "bankofindia.bank.in": ["BOI"],
         }
 
         # ── Strategy 1: Explicit bank passwords from DB ─────────────

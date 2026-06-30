@@ -20,6 +20,10 @@ DOMAIN_TO_BANK = {
     # Bank of India
     "bankofindia.co.in": "BOI",
     "bankofindia.com": "BOI",
+    # ak-2ql: 2026-03-07 RBI-mandated `.bank.in` TLD migration.
+    # New sender domain: alerts.bankofindia.bank.in. Mirrors the
+    # earlier HDFC migration (see hdfcbank.bank.in above).
+    "bankofindia.bank.in": "BOI",
     # Axis
     "axisbank.com": "AXIS",
     # Kotak

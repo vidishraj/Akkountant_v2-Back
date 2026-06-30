@@ -8,6 +8,6 @@ class StatementPatternEnum(Enum):
     ICICI_AMAZON_PAY = "Amazon Pay ICICI Bank Credit Card Statement "
     YES_BANK_ACE = "from:(estatement@yesbank.in) Credit Card, ACE "
     YES_BANK_DEBIT = "from:(estatement@yesbank.in) -{ACE, Credit Card} "
-    BOI = "BOI: Account Statement"
+    BOI = "from:(noreply-estatement@alerts.bankofindia.bank.in) "
     HDFC_REGALIA = "Visa Regalia USD Statement"
 
