@@ -22,6 +22,7 @@ from controllers.paymentEP import PaymentController
 from controllers.customFieldEP import CustomFieldController
 from controllers.jobsEP import JobsController
 from controllers.agentEP import AgentController
+from controllers.agentConversationsEP import AgentConversationsController  # ak-bq5
 from controllers.customerEmailEP import CustomerEmailController
 from controllers.fileStorageEP import FileStorageController
 from controllers.jobEmailEP import JobEmailController
@@ -42,6 +43,7 @@ from services.customerEmailService import CustomerEmailService
 from services.fileStorageService import FileStorageService
 from services.jobEmailService import JobEmailService
 from services.agentService import AgentService
+from services.agentConversationService import AgentConversationService  # ak-bq5
 from services.cronAgent import CronAgent
 from services.portfolioVisitorService import PortfolioVisitorService
 from services.mailProcessorService import MailProcessorService
@@ -198,6 +200,10 @@ class Akkountant(Flask):
             mail_processor=self.mailProcessor,
             reconciliation_service=self.reconciliationService,
         )
+        # ak-bq5: cross-device chat persistence — instantiate the
+        # conversation service BEFORE wiring it into AgentService so
+        # set_services receives a ready instance.
+        self.agentConversationService = AgentConversationService()
         self.agentService = AgentService()
         self.agentService.set_services(
             investment_service=self.investmentService,
@@ -206,8 +212,12 @@ class Akkountant(Flask):
             customer_service=self.customerService,
             dashboard_service=self.dashboardService,
             mail_processor=self.mailProcessor,
+            conversation_service=self.agentConversationService,  # ak-bq5
         )
         self.agentEP = AgentController(self.agentService)
+        self.agentConversationsEP = AgentConversationsController(  # ak-bq5
+            self.agentConversationService,
+        )
         self.portfolioVisitorService = PortfolioVisitorService()
         self.portfolioVisitorEP = PortfolioVisitorController(self.portfolioVisitorService)
 
@@ -451,10 +461,22 @@ class Akkountant(Flask):
             ('/portfolio/stats', 'GET', self.portfolioVisitorEP.get_stats),
         ]
 
-        # Agent chat endpoint + ak-1x4 attachment upload
+        # Agent chat endpoint + ak-1x4 attachment upload + ak-bq5
+        # cross-device conversation persistence
         agentRoutes = [
             ('/agent/chat', 'POST', self.agentEP.chat),
             ('/agent/attach', 'POST', self.agentEP.attach),
+            # ak-bq5: cross-device chat persistence endpoints. All
+            # endpoints filter by g.firebase_id (set by before_request
+            # middleware). Soft delete via /agent/conversations/<id>.
+            ('/agent/conversations', 'GET',
+                self.agentConversationsEP.list),
+            ('/agent/conversations', 'POST',
+                self.agentConversationsEP.create),
+            ('/agent/conversations/<conversation_id>', 'GET',
+                self.agentConversationsEP.get),
+            ('/agent/conversations/<conversation_id>', 'DELETE',
+                self.agentConversationsEP.delete),
         ]
 
         # Register all routes

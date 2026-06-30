@@ -25,3 +25,9 @@ from .user_files import UserFolder, UserFile
 from .jobEmails import JobEmail
 from .jobProcessedEmails import ProcessedEmail as JobProcessedEmail
 from .portfolioVisitors import PortfolioVisitor
+# ak-bq5: cross-device agent chat persistence — see dispatch hq-wisp-rr15b.
+# Order: AgentConversation first so AgentMessage's FK target exists at
+# create_all() time. Both must be imported BEFORE db.create_all() runs
+# in app.py so the schema is materialized.
+from .AgentConversation import AgentConversation
+from .AgentMessage import AgentMessage, AGENT_MESSAGE_ROLES

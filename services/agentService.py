@@ -328,10 +328,17 @@ class AgentService(BaseService):
         self.customer_service = None
         self.dashboard_service = None
         self.mail_processor = None
+        # ak-bq5: injected by app.py during route setup. None means
+        # persistence is OFF (stateless legacy behavior) — code paths
+        # guard on `self.conversation_service is not None` so the SDK
+        # loop runs cleanly even without it (useful in offline tests
+        # that mock the heavy app boot).
+        self.conversation_service = None
 
     def set_services(self, investment_service=None, transaction_service=None,
                      invoice_service=None, customer_service=None,
-                     dashboard_service=None, mail_processor=None):
+                     dashboard_service=None, mail_processor=None,
+                     conversation_service=None):
         """Called from app.py to inject existing service instances."""
         self.investment_service = investment_service
         self.transaction_service = transaction_service
@@ -339,14 +346,18 @@ class AgentService(BaseService):
         self.customer_service = customer_service
         self.dashboard_service = dashboard_service
         self.mail_processor = mail_processor
+        # ak-bq5: optional — only wired when chat persistence is active.
+        if conversation_service is not None:
+            self.conversation_service = conversation_service
 
     def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None,
-                    attachments=None):
+                    attachments=None, conversation_id=None):
         """
         Generator that yields SSE events for the agent chat.
         Uses claude_agent_sdk with MCP tools to process queries.
 
         Event types:
+        - conversation_id: {"type": "conversation_id", "id": int}  (ak-bq5)
         - text: {"type": "text", "content": "..."}
         - tool_exec: {"type": "tool_exec", "tool": "..."}
         - confirm: {"type": "confirm", "tool": "...", "input": {...}, "message": "..."}
@@ -361,16 +372,103 @@ class AgentService(BaseService):
         deleted in the finally block — ephemeral per-turn lifecycle.
         Resolution failures (deleted, cross-user, malformed id) emit a
         single SSE error event and bail before the SDK runs.
+
+        conversation_id (ak-bq5): optional int. When None AND a
+        conversation_service is wired, a new conversation row is created
+        from the last user message (title derived from first 60 chars)
+        and the assigned id is emitted as the leading SSE event. When
+        present, the user message is appended to that thread. When the
+        id is provided but doesn't belong to the caller (or is
+        soft-deleted), an SSE error event is yielded and the stream
+        bails BEFORE the SDK runs — saves a costly model call on a
+        scope-violating request.
         """
         confirmed_tools = confirmed_tools or []
         attachments = attachments or []
         tool_events = []  # Collected intermediate events (tool_exec, confirm)
         mutations = []
+        # ak-bq5: track the active conversation_id + collected assistant
+        # text so the finally block can persist whatever made it out
+        # (full or partial) without depending on the happy-path tail.
+        active_conversation_id = conversation_id
+        persisted_assistant = False  # set True after a successful save
         # Track resolved attachment_ids so the finally block can clean
         # them up regardless of which exit path the SDK takes.
         attachment_ids_to_cleanup = []
 
         try:
+            # ak-bq5: conversation_id pre-flight. Three cases:
+            #
+            # (a) no conversation_service wired → persistence OFF,
+            #     legacy stateless behavior. Skip the whole block.
+            # (b) caller passed a conversation_id → confirm it belongs
+            #     to user_id (soft-deleted / cross-user → SSE error +
+            #     bail without spinning up Claude).
+            # (c) caller passed nothing → create a fresh conversation
+            #     row, derive the title from the last user message,
+            #     emit the new id as the leading SSE event so the FE
+            #     can pin it.
+            #
+            # ak-bq5 pass-2 reviewer fix (hq-wisp-4tbck MAJOR): the
+            # user message is NO LONGER persisted here. We defer it
+            # until AFTER attachment_records is resolved so the row's
+            # attachments_meta carries full descriptors (filename,
+            # content_type, size) — not just the opaque id. On a
+            # second device the /tmp file is gone, so the metadata
+            # IS the only thing the FE has to render. See "user msg
+            # persist (deferred)" below.
+            last_user_text = ""
+            if self.conversation_service is not None:
+                last_user_text = self._extract_last_user_content(messages)
+                if active_conversation_id is None:
+                    try:
+                        active_conversation_id = (
+                            self.conversation_service.create_conversation(
+                                user_id=user_id,
+                                agent_type=agent_type,
+                                first_user_message=last_user_text,
+                            )
+                        )
+                    except ValueError as exc:
+                        yield self._sse_event("error", {"message": str(exc)})
+                        return
+                    except Exception as exc:
+                        # DB write failure is a hard error — don't run
+                        # the SDK if we can't track the turn.
+                        self.logger.exception(
+                            "conversation create failed for user=%s "
+                            "agent_type=%s", user_id, agent_type,
+                        )
+                        yield self._sse_event("error", {
+                            "message": (
+                                "Could not start a new conversation. "
+                                "Please retry."
+                            )
+                        })
+                        return
+                else:
+                    # Existing id — verify ownership before doing
+                    # anything else. get_conversation returns None on
+                    # miss / soft-delete / cross-user (no leak).
+                    owned = self.conversation_service.get_conversation(
+                        user_id, active_conversation_id,
+                    )
+                    if owned is None:
+                        yield self._sse_event("error", {
+                            "message": (
+                                "Conversation not found. It may have "
+                                "been deleted; please start a new chat."
+                            )
+                        })
+                        return
+
+                # Emit the id as the leading SSE event so the FE can
+                # pin it for follow-up turns. User message persistence
+                # is deferred — see below.
+                yield self._sse_event("conversation_id", {
+                    "id": active_conversation_id,
+                })
+
             # ak-1x4: resolve attachments + spec-cap enforcement BEFORE
             # SDK setup. If anything fails we want to surface a single
             # clean error event and exit — no MCP server boot, no Claude
@@ -409,6 +507,51 @@ class AgentService(BaseService):
                         return
                     attachment_records.append(rec)
                     attachment_ids_to_cleanup.append(att_id)
+
+            # ak-bq5 pass-2 reviewer fix (hq-wisp-4tbck MAJOR): persist
+            # the inbound user message HERE — after attachment resolution
+            # has succeeded. attachments_meta now carries the full
+            # descriptor (id + filename + content_type + size) for each
+            # attachment, not just the bare id. When a second device
+            # reads the thread back, the /tmp file is gone (sweep ran),
+            # so the metadata IS the FE's only render source.
+            #
+            # If resolution failed we've already SSE-errored and
+            # returned above — we never reach this point with an
+            # invalid attachment ref, so a persisted user row with full
+            # descriptors is always trustworthy.
+            if (
+                self.conversation_service is not None
+                and active_conversation_id is not None
+            ):
+                attachments_meta = (
+                    [
+                        {
+                            "attachment_id": r.get("attachment_id"),
+                            "filename": r.get("filename"),
+                            "content_type": r.get("content_type"),
+                            "size": r.get("size"),
+                        }
+                        for r in attachment_records
+                    ]
+                    if attachment_records else None
+                )
+                try:
+                    self.conversation_service.append_message(
+                        user_id=user_id,
+                        conversation_id=active_conversation_id,
+                        role="user",
+                        content=last_user_text or "",
+                        attachments_meta=attachments_meta,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "append user message failed for conv=%s",
+                        active_conversation_id,
+                    )
+                    # Don't bail — the SDK loop can still run; the
+                    # missing user-msg row is a non-fatal degradation
+                    # we'd rather surface to logs than block on.
 
             config = get_agent_config(agent_type)
 
@@ -646,6 +789,31 @@ class AgentService(BaseService):
             if full_text:
                 yield self._sse_event("text", {"content": full_text})
 
+            # ak-bq5: persist the assistant message BEFORE yielding
+            # `done`. This way the read-back endpoint shows the full
+            # turn for any client that pings GET /agent/conversations/<id>
+            # the moment the FE marks the message as final. We mark
+            # persisted_assistant=True so the finally block doesn't
+            # double-save with partial=True.
+            if (
+                self.conversation_service is not None
+                and active_conversation_id is not None
+            ):
+                try:
+                    self.conversation_service.append_message(
+                        user_id=user_id,
+                        conversation_id=active_conversation_id,
+                        role="assistant",
+                        content=full_text or "",
+                        partial=False,
+                    )
+                    persisted_assistant = True
+                except Exception:
+                    self.logger.exception(
+                        "append assistant message failed for conv=%s",
+                        active_conversation_id,
+                    )
+
             # Done
             yield self._sse_event("done", {"mutations": mutations})
 
@@ -653,6 +821,41 @@ class AgentService(BaseService):
             self.logger.error(f"Agent error: {e}")
             yield self._sse_event("error", {"message": str(e)})
         finally:
+            # ak-bq5: if the SDK loop crashed OR the generator was
+            # closed early (FE disconnect after first text chunk),
+            # persisted_assistant is still False AND we've collected
+            # partial text. Save it with partial=True so the FE can
+            # render a "stream interrupted" badge.
+            #
+            # We only fire this in the conversation_service-wired path
+            # AND only when there's something worth saving (text or
+            # tool events). Empty-turn case is already handled by the
+            # happy path's v3 sentinel.
+            if (
+                self.conversation_service is not None
+                and active_conversation_id is not None
+                and not persisted_assistant
+            ):
+                partial_text = ""
+                try:
+                    partial_text = "".join(text_parts)
+                except Exception:
+                    partial_text = ""
+                if partial_text or tool_events:
+                    try:
+                        self.conversation_service.append_message(
+                            user_id=user_id,
+                            conversation_id=active_conversation_id,
+                            role="assistant",
+                            content=partial_text,
+                            partial=True,
+                        )
+                    except Exception:
+                        self.logger.exception(
+                            "append partial assistant message failed "
+                            "for conv=%s", active_conversation_id,
+                        )
+
             # ak-1x4: ephemeral per-turn cleanup. Best-effort rmtree of
             # any attachment subtrees this stream_chat call resolved (or
             # tried to resolve). Failures are swallowed inside
@@ -668,6 +871,26 @@ class AgentService(BaseService):
                         "attachment cleanup failed for %s (id=%s)",
                         user_id, att_id,
                     )
+
+    @staticmethod
+    def _extract_last_user_content(messages):
+        """ak-bq5: pull the most recent user message's content for
+        title derivation + persistence. Returns "" if absent or shaped
+        unexpectedly so callers can pass it directly to
+        derive_title (which itself falls back to a default)."""
+        if not messages:
+            return ""
+        # Scan from the end — the FE typically sends history with the
+        # newest user turn at messages[-1], but be tolerant of an
+        # `assistant`-trailing payload.
+        for msg in reversed(messages):
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            return content if isinstance(content, str) else str(content)
+        return ""
 
     def _build_sdk_tools(self, agent_type, tool_defs, user_id,
                          tool_events, mutations, confirmed_tools):
