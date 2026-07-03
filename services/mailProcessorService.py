@@ -322,6 +322,43 @@ class MailProcessorService:
             return at_part.strip().rstrip(">").lower()
         return ""
 
+    @staticmethod
+    def _lookup_domain_map(domain_map, sender_domain):
+        """Subdomain-aware lookup against a {domain: [bank_ids]} map.
+
+        ak-x6p fix (hq-wisp-i30l3w): the password-lookup helpers below
+        maintain their own local dicts (they carry per-domain
+        bank-order hints that differ from bankFormatRules.DOMAIN_TO_BANK,
+        so we don't consolidate them). Historically both hit sender's
+        raw domain against the map with exact match — which misses
+        subdomain-prefixed senders like `alerts.bankofindia.bank.in`.
+
+        Now:
+          - Exact match first (backward-compatible: preserves the
+            ordered list of bank ids the map author encoded).
+          - Dot-boundary suffix match otherwise, so
+            `alerts.bankofindia.bank.in` resolves to
+            `bankofindia.bank.in`'s entry list.
+        Returns a list of bank ids or [] if unresolved.
+        """
+        if not sender_domain:
+            return []
+        domain = sender_domain.strip().rstrip(">").lower()
+        if not domain:
+            return []
+        # Exact match — preserves prior ordering + behavior for
+        # senders whose domain IS a canonical key.
+        exact = domain_map.get(domain)
+        if exact:
+            return list(exact)
+        # Dot-boundary suffix match — same rule get_bank_from_sender
+        # uses. Guards `evilbank.foo.bank.in` from silently matching
+        # `foo.bank.in`.
+        for known_domain, bank_ids in domain_map.items():
+            if domain.endswith("." + known_domain):
+                return list(bank_ids)
+        return []
+
     # ── Agent-1: Claude-powered classification ─────────────────────
 
     def _classify_emails(self, all_emails):
@@ -917,8 +954,15 @@ class MailProcessorService:
             sender = email.get("sender", "")
             domain = self._extract_domain(sender)
 
-            # Currently only handles HDFC Smart Statements
-            if domain not in ("hdfcbank.net", "hdfcbank.com", "hdfcbank.bank.in"):
+            # Currently only handles HDFC Smart Statements. ak-x6p fix:
+            # dot-boundary suffix match so subdomain senders like
+            # `alerts.hdfcbank.bank.in` still route through the Smart
+            # Statement extractor (prior exact-match would silently
+            # skip them).
+            _hdfc_domains = ("hdfcbank.net", "hdfcbank.com", "hdfcbank.bank.in")
+            if domain not in _hdfc_domains and not any(
+                domain.endswith("." + d) for d in _hdfc_domains
+            ):
                 return None
 
             # Fetch full message to get HTML body
@@ -1124,7 +1168,9 @@ class MailProcessorService:
                 "hdfcbank.com": ["HDFC_DEBIT", "Millenia_Credit", "HDFC_REGALIA"],
                 "hdfcbank.bank.in": ["HDFC_DEBIT", "Millenia_Credit", "HDFC_REGALIA"],
             }
-            bank_names = domain_to_bank.get(domain, [])
+            # ak-x6p fix: subdomain-aware lookup (alerts.hdfcbank.bank.in
+            # etc.); prior `.get(domain, [])` missed these.
+            bank_names = self._lookup_domain_map(domain_to_bank, domain)
             for bank_name in bank_names:
                 pw = self.transaction_service.db.session.query(StatementPasswords).filter_by(
                     user=user_id, bank=bank_name
@@ -1167,7 +1213,10 @@ class MailProcessorService:
         explicit_passwords = []
         try:
             from models import StatementPasswords
-            bank_names = domain_to_bank.get(domain, [])
+            # ak-x6p fix: subdomain-aware lookup so senders like
+            # `noreply-estatement@alerts.bankofindia.bank.in` still
+            # resolve to the BOI password candidates.
+            bank_names = self._lookup_domain_map(domain_to_bank, domain)
             for bank_name in bank_names:
                 pw = self.transaction_service.db.session.query(StatementPasswords).filter_by(
                     user=user_id, bank=bank_name

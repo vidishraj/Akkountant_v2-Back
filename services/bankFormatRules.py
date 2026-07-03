@@ -81,11 +81,77 @@ def get_bank_from_sender(sender_email):
 
     Returns:
         Bank identifier string (e.g. 'HDFC_DEBIT') or 'UNKNOWN'
+
+    ak-x6p fix (hq-wisp-i30l3w): banks increasingly send from
+    subdomain-prefixed addresses (`alerts.bankofindia.bank.in`,
+    `noreply.hdfcbank.com`, etc.) that don't hit exact match against
+    DOMAIN_TO_BANK's canonical keys. Post-fix we try exact match
+    FIRST (backward-compatible), then a dot-boundary suffix match
+    to resolve subdomain-prefixed senders to their base bank.
+
+    The BOI backfill (ak-5oi) surfaced this: BOI's new sender is
+    `noreply-estatement@alerts.bankofindia.bank.in`, and the
+    domain-lookup returned "UNKNOWN". Downstream that "UNKNOWN"
+    hint got injected into the LLM prompt ("Use bank=\"UNKNOWN\"...")
+    and stamped onto fileDetails.bank — the visible ak-x6p symptom.
     """
     if "@" not in sender_email:
         return "UNKNOWN"
     domain = sender_email.split("@")[-1].strip().rstrip(">").lower()
-    return DOMAIN_TO_BANK.get(domain, "UNKNOWN")
+    # Exact match — preserves prior behavior for senders whose
+    # domain IS the canonical key (e.g. `noreply@hdfcbank.net`).
+    if domain in DOMAIN_TO_BANK:
+        return DOMAIN_TO_BANK[domain]
+    # Dot-boundary suffix match — resolves `alerts.<canonical>`,
+    # `noreply.<canonical>`, `mail.<canonical>`, etc. The leading dot
+    # requirement prevents `evilbankofindia.bank.in` from silently
+    # matching `bankofindia.bank.in`.
+    for known_domain, bank_id in DOMAIN_TO_BANK.items():
+        if domain.endswith("." + known_domain):
+            return bank_id
+    return "UNKNOWN"
+
+
+def get_banks_for_domain(sender_domain):
+    """List of possible bank identifiers for a raw domain string.
+
+    Used by mailProcessorService's password-lookup helpers, which
+    historically maintained their own inline domain→bank maps in
+    two places (lines 1122 + 1150 of mailProcessorService.py).
+    Same subdomain-blind problem as get_bank_from_sender: the sender
+    `alerts.bankofindia.bank.in` misses the map's `bankofindia.bank.in`
+    key. Returning a suffix-tolerant list here lets those callers
+    stop duplicating the map data.
+
+    Returns a list because a single canonical domain can host
+    multiple bank identifiers (e.g. hdfcbank.net covers HDFC_DEBIT,
+    Millenia_Credit, HDFC_REGALIA — the callers need to try each
+    password key in turn). We preserve the original insertion order
+    of DOMAIN_TO_BANK so existing "which bank to try first" behavior
+    isn't perturbed.
+
+    ak-x6p fix (hq-wisp-i30l3w): also fixes the parallel password-
+    lookup subdomain miss.
+    """
+    if not sender_domain:
+        return []
+    domain = sender_domain.strip().rstrip(">").lower()
+    if not domain:
+        return []
+    matched = []
+    # Exact match — walk DOMAIN_TO_BANK preserving insertion order so
+    # callers that want "closest sibling first" (e.g. try the primary
+    # HDFC_DEBIT password before Millenia_Credit) still get that.
+    for known_domain, bank_id in DOMAIN_TO_BANK.items():
+        if domain == known_domain and bank_id not in matched:
+            matched.append(bank_id)
+    if matched:
+        return matched
+    # Suffix match — same dot-boundary rule as get_bank_from_sender.
+    for known_domain, bank_id in DOMAIN_TO_BANK.items():
+        if domain.endswith("." + known_domain) and bank_id not in matched:
+            matched.append(bank_id)
+    return matched
 
 
 def get_format_rules(bank):
