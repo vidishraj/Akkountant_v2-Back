@@ -35,6 +35,22 @@ class GenericUtil:
         return reference_id
 
     @staticmethod
+    def generate_stable_reference_id(bank, datetime_str, description, amount):
+        """Bank-scoped, chunk-position-stable content hash for statement tx.
+
+        Thin wrapper around utils.reference_id.generate_stable_reference_id
+        so callers that already hold a GenericUtil instance don't have to
+        re-import the pure module. The pure module is the source of truth
+        and is directly testable without flask (which utils.GenericUtils
+        transitively imports via utils.logger).
+
+        ak-tik fix — see utils/reference_id.py docstring for the full
+        rationale + historic bug context.
+        """
+        from utils.reference_id import generate_stable_reference_id as _gen
+        return _gen(bank, datetime_str, description, amount)
+
+    @staticmethod
     def getFileSize(filePath):
         return os.path.getsize(os.getcwd() + '/tmp/' + filePath)
 

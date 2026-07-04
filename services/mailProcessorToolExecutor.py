@@ -220,14 +220,27 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
 
     transactions = []
     for txn in args.get("transactions", []):
-        # Include reference_number in hash if available — this prevents
-        # false dedup when two different transactions have the same
-        # date+description+amount (e.g., two UPI payments to same merchant).
-        desc_for_hash = txn["description"]
-        if txn.get("reference_number"):
-            desc_for_hash += f"|{txn['reference_number']}"
-        ref_id = generic.generate_reference_id(
-            txn["date"], desc_for_hash, txn["amount"]
+        # ak-tik fix (hq-wisp-1trny5): the previous hash composed
+        # `date | description[|reference_number] | amount`. When the
+        # extractor read the same tx from two adjacent PDF chunks
+        # (because it visually straddled a page boundary), the LLM
+        # emitted slightly different description text OR extracted a
+        # `reference_number` from one chunk but not the other — either
+        # variance produced a different MD5 → different `referenceID`
+        # PK → both rows landed. Footprint: 836 excess BOI rows across
+        # 2017-2026 (ak-7dz).
+        #
+        # New hash normalizes the description (whitespace collapse,
+        # uppercase, trailing-punct strip) and drops `reference_number`
+        # from the hash contents entirely. The two chunks now emit the
+        # same referenceID; the PK constraint catches the second insert.
+        # `bank` is folded in for defense-in-depth against cross-bank
+        # collisions on same-date-same-amount rows.
+        #
+        # `reference_number` still gets extracted + logged; it just
+        # doesn't participate in the identity hash.
+        ref_id = generic.generate_stable_reference_id(
+            bank, txn["date"], txn["description"], txn["amount"],
         )
         transactions.append({
             "reference": ref_id,
