@@ -140,8 +140,18 @@ def execute_mail_tool(tool_name, tool_input, user_id,
 # ── Individual tool handlers ─────────────────────────────────────────────
 
 def _handle_insert_transaction(args, user_id, transaction_service):
-    """Insert a single transaction from an email alert."""
+    """Insert a single transaction from an email alert.
+
+    ak-8l5 update: same hash scheme as the batch path — primary from
+    (bank, bank_reference_id) when the ref is present, positional
+    fallback otherwise. Email-alert flow rarely emits a
+    bank_reference_id today (the alert bodies don't consistently
+    carry one), but if the LLM does extract one, we honor it so a
+    tx arriving via BOTH an email alert AND a later statement PDF
+    lands on the same referenceID and dedups correctly.
+    """
     from models.transactions import Transactions
+    from utils.reference_id import generate_reference_from_row
 
     generic = GenericUtil()
     bank = args.get("bank", "UNKNOWN")
@@ -181,15 +191,36 @@ def _handle_insert_transaction(args, user_id, transaction_service):
             except Exception as e:
                 logger.warning(f"Email dedup check failed, proceeding with insert: {e}")
 
-    ref_id = generic.generate_reference_id(
-        args["date"], args["description"], args["amount"]
-    )
+    # ak-8l5: build the row dict + resolve referenceID via the v2
+    # helper. Email path never has a statement file_id, so the
+    # positional fallback is unreachable here — if the extractor
+    # DIDN'T give us a ref, fall back to the legacy content hash so
+    # the row still lands. The behavioral email dedup above catches
+    # the alert-duplicate class regardless of the ID scheme.
+    row = {
+        "date": args["date"],
+        "description": args["description"],
+        "amount": args["amount"],
+        "bank_reference_id": args.get("bank_reference_id"),
+    }
+    if row["bank_reference_id"]:
+        # Primary v2 path — same ref → same PK across email alert +
+        # statement PDF ingest of the same tx.
+        from utils.reference_id import generate_reference_v2
+        ref_id = generate_reference_v2(bank, row["bank_reference_id"])
+    else:
+        # No ref → legacy content hash. Email path doesn't get a
+        # positional fallback (no file_id).
+        ref_id = generic.generate_reference_id(
+            args["date"], args["description"], args["amount"],
+        )
     transactions = [{
         "reference": ref_id,
         "date": args["date"],
         "description": args["description"],
         "amount": args["amount"],
         "processed_via": "CLAUDE_CODE",
+        "bank_reference_id": row["bank_reference_id"],
     }]
 
     gmail_id = args.get("gmail_message_id")
@@ -209,7 +240,25 @@ def _handle_insert_transaction(args, user_id, transaction_service):
 
 
 def _handle_insert_batch_transactions(args, user_id, transaction_service, reconciliation_service=None):
-    """Insert multiple transactions at once (from a statement)."""
+    """Insert multiple transactions at once (from a statement).
+
+    ak-8l5: dedup engine is (bank, bank_reference_id) when a ref is
+    present, positional-fallback otherwise. The extractor was updated
+    to emit `bank_reference_id` and `line_position` per row (see the
+    ak-8l5 section in mailProcessorTools.py PDF_SYSTEM_PROMPT). Chunk
+    re-reads of the same tx must now collapse via the PK conflict path
+    while legitimate same-tuple tx stay distinct.
+
+    ak-tik (superseded by ak-8l5) had used a normalized content hash
+    that silently merged legitimate same-tuple rows — the reviewer
+    MAJOR that got the whole approach withdrawn. Do NOT reintroduce
+    that shape here.
+    """
+    from utils.reference_id import (
+        generate_reference_v2,
+        generate_reference_v2_fallback,
+    )
+
     generic = GenericUtil()
     bank = args.get("bank", "UNKNOWN")
     source = args.get("source", "Statement")
@@ -219,23 +268,70 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
     period_end_raw = args.get("period_end")
 
     transactions = []
-    for txn in args.get("transactions", []):
-        # Include reference_number in hash if available — this prevents
-        # false dedup when two different transactions have the same
-        # date+description+amount (e.g., two UPI payments to same merchant).
-        desc_for_hash = txn["description"]
-        if txn.get("reference_number"):
-            desc_for_hash += f"|{txn['reference_number']}"
-        ref_id = generic.generate_reference_id(
-            txn["date"], desc_for_hash, txn["amount"]
-        )
+    # Track how each row was hashed so the batch summary log makes it
+    # obvious when a chunk re-read collapses vs. a novel row lands.
+    primary_hash_count = 0
+    fallback_hash_count = 0
+    for idx, txn in enumerate(args.get("transactions", [])):
+        # ak-8l5 primary — LLM extracted a per-tx bank ref. Chunk
+        # re-reads should emit the SAME ref, so same PK, so the
+        # PK-conflict path collapses.
+        raw_ref = txn.get("bank_reference_id")
+        if raw_ref:
+            ref_id = generate_reference_v2(bank, raw_ref)
+            primary_hash_count += 1
+        else:
+            # ak-8l5 fallback — positional. Requires file_id +
+            # line_position. If the LLM didn't emit a line_position
+            # (older prompts, or the extractor missed it) we STILL
+            # need a stable key — the reviewer's zero-loss rule says
+            # we can't drop the row. Fall back further to the ak-tik
+            # content hash for this row and log loudly so the
+            # extractor prompt drift is visible.
+            line_pos = txn.get("line_position")
+            if line_pos is not None and file_id:
+                ref_id = generate_reference_v2_fallback(
+                    bank, file_id, line_pos,
+                    txn["date"], txn["amount"], txn["description"],
+                )
+                fallback_hash_count += 1
+            else:
+                # Extractor didn't give us a positional anchor.
+                # Fall back to the legacy content hash so the row
+                # still lands (Overseer: no tx loss). Adds `idx` so
+                # two ref-less same-content rows in the SAME batch
+                # don't accidentally collide — chunk re-reads emit
+                # rows in the same order so this stays deterministic
+                # per-batch, at the cost of not collapsing an
+                # inter-batch re-read of a ref-less row. That's
+                # acceptable — ref-less rows are the minority tail;
+                # the majority already collapse via v2 primary.
+                ref_id = generic.generate_reference_id(
+                    txn["date"], f"{txn['description']}|no_pos|{idx}",
+                    txn["amount"],
+                )
+                fallback_hash_count += 1
+                logger.warning(
+                    f"insert_batch_transactions: row missing "
+                    f"bank_reference_id AND line_position; using legacy "
+                    f"content hash. bank={bank} file_id={file_id} "
+                    f"idx={idx} desc={txn['description'][:50]!r}"
+                )
         transactions.append({
             "reference": ref_id,
             "date": txn["date"],
             "description": txn["description"],
             "amount": txn["amount"],
             "processed_via": "CLAUDE_CODE",
+            "bank_reference_id": raw_ref,
         })
+
+    if transactions:
+        logger.info(
+            f"insert_batch_transactions ak-8l5 hash split: "
+            f"primary={primary_hash_count} fallback={fallback_hash_count} "
+            f"(bank={bank}, file_id={file_id})"
+        )
 
     if not transactions:
         logger.info(f"insert_batch_transactions called with 0 transactions for {bank}")

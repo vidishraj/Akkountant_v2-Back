@@ -250,7 +250,13 @@ class TransactionService(BaseService):
                     source=source,
                     user=userId,
                     processed_via=processing_method,
-                    gmail_message_id=gmail_message_id
+                    gmail_message_id=gmail_message_id,
+                    # ak-8l5: persist the LLM-extracted per-tx bank ref
+                    # alongside the derived PK so downstream tools
+                    # (audit, reprocess, inspection queries) can see
+                    # the identifier that drove the dedup without
+                    # re-reading the PDF.
+                    bank_reference_id=transaction.get('bank_reference_id'),
                 )
                 transaction_objects.append(transaction_obj)
             

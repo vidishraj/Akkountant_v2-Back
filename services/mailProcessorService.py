@@ -1627,7 +1627,10 @@ class MailProcessorService:
         finally:
             pass  # query() manages its own lifecycle per chunk
 
-    # JSON schema for structured output in text mode
+    # JSON schema for structured output in text mode.
+    # ak-8l5: adds bank_reference_id + line_position per row.
+    # reference_number stays for informational purposes; the dedup
+    # engine uses bank_reference_id + line_position instead.
     _TXN_OUTPUT_SCHEMA = {
         "type": "object",
         "properties": {
@@ -1640,6 +1643,25 @@ class MailProcessorService:
                         "description": {"type": "string"},
                         "amount": {"type": "number", "description": "positive=debit, negative=credit"},
                         "reference_number": {"type": "string", "description": "Chq./Ref.No. or UPI/IMPS/NEFT reference number from the statement"},
+                        "bank_reference_id": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "ak-8l5 primary dedup key. Per-tx "
+                                "bank-native ref extracted from the "
+                                "narration (UPI/IMPS/NEFT/MBSF/cheque). "
+                                "null for genuinely ref-less rows."
+                            ),
+                        },
+                        "line_position": {
+                            "type": ["integer", "null"],
+                            "description": (
+                                "ak-8l5 positional fallback anchor. "
+                                "File-level 1-indexed line number "
+                                "matching the [Ln] marker in the "
+                                "source text. Same row across chunk "
+                                "re-reads must emit the same number."
+                            ),
+                        },
                     },
                     "required": ["date", "description", "amount", "reference_number"],
                 },
@@ -1693,16 +1715,46 @@ class MailProcessorService:
         detected_bank = email.get("_bank") or get_bank_from_sender(email.get("sender", ""))
         bank_rules = get_format_rules(detected_bank)
 
-        # Extract text from pages, stripping repeated headers
+        # ak-8l5: compute file-level line offsets so `line_position`
+        # in the extractor output points at the RAW FILE, not the chunk.
+        # We open the doc twice — once to compute per-page starting
+        # line offsets across the whole file, then again below to
+        # pull the chunk's text. It's an O(N) scan but the file is
+        # typically <20 pages; the offset dict is tiny.
         doc = _fitz.open(pdf_path)
         if doc.needs_pass and password:
             doc.authenticate(password)
+        page_start_line = {}  # page_num → 1-indexed line offset of that page's first line
+        line_ptr = 1
+        for pn in range(1, doc.page_count + 1):
+            page_start_line[pn] = line_ptr
+            raw_page_text = doc[pn - 1].get_text("text")
+            # +1 for the trailing newline PyMuPDF appends; consistent
+            # across pages so re-reads collapse identically.
+            line_ptr += raw_page_text.count("\n") + 1
+
+        # Now pull the chunk's text, annotate each line with its
+        # file-level line number so the LLM can echo the correct
+        # position onto each extracted tx.
         page_texts = []
         for pn in range(page_start, page_end + 1):
             page = doc[pn - 1]
             text = page.get_text("text")
             clean_text = self._strip_page_header(text)
-            page_texts.append(f"--- Page {pn} ---\n{clean_text}")
+            annotated_lines = []
+            local_line = 0
+            for raw_line in clean_text.split("\n"):
+                # Use the file-level line number for THIS page's
+                # first line as anchor; increment per local line.
+                # Header stripping may drop lines — that's fine; the
+                # marker still points at the raw-file position of the
+                # line that survived.
+                file_line = page_start_line[pn] + local_line
+                annotated_lines.append(f"[L{file_line}] {raw_line}")
+                local_line += 1
+            page_texts.append(
+                f"--- Page {pn} ---\n" + "\n".join(annotated_lines)
+            )
         doc.close()
         extracted_text = "\n\n".join(page_texts)
 
@@ -1714,10 +1766,30 @@ class MailProcessorService:
             prompt_text += f"{bank_rules}\n"
         prompt_text += (
             f"Return a JSON object with a \"transactions\" array.\n"
-            f"Each transaction: {{\"date\": \"DD/MM/YYYY\", \"description\": \"...\", \"amount\": N, \"reference_number\": \"...\"}}\n"
+            f"Each transaction: {{\"date\": \"DD/MM/YYYY\", \"description\": \"...\", "
+            f"\"amount\": N, \"reference_number\": \"...\", "
+            f"\"bank_reference_id\": \"...\", \"line_position\": N}}\n"
             f"where positive=debit (withdrawal), negative=credit (deposit).\n"
+            f"\n"
+            f"### ak-8l5 dedup fields (REQUIRED per row)\n"
+            f"\n"
+            f"- `bank_reference_id` (string or null): per-tx bank-native "
+            f"identifier extracted from the narration. Examples: "
+            f"HDFC UPI ref (digits after 'UPI-'), IMPS ref, NEFT UTR, "
+            f"BOI MBSF number (middle numeric block of MBSF/…/…), cheque "
+            f"number. Return null for genuinely ref-less rows (cash "
+            f"deposit / interest / fee) — never guess. The same tx read "
+            f"from two adjacent chunks MUST extract to the same ref.\n"
+            f"- `line_position` (integer): the file-level line number "
+            f"marked in the source above as `[Ln]`. Every line in the "
+            f"extracted text carries a `[Ln]` prefix — echo the number "
+            f"from the line where the tx's date/amount appears. This "
+            f"lets the dedup engine collapse chunk re-reads of "
+            f"ref-less rows via (file, line_position).\n"
+            f"\n"
             f"The reference_number is the Chq./Ref.No. from the statement — the digits-only line "
-            f"that appears between the narration and the Value Date. This is CRITICAL for deduplication.\n"
+            f"that appears between the narration and the Value Date. Keep this field too; it's "
+            f"informational and doesn't participate in dedup post-ak-8l5.\n"
             f"IMPORTANT: Every row is a UNIQUE transaction. Do NOT skip transactions even if "
             f"the merchant name, amount, or description looks similar to another — each has a "
             f"unique reference number and must be extracted separately.\n"
