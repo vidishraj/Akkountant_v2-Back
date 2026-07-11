@@ -64,7 +64,18 @@ MAIL_PROCESSOR_TOOLS = [
                     "description": "Gmail message ID for deduplication (optional)"
                 },
             },
-            "required": ["date", "description", "amount", "bank", "source"]
+            # ak-8l5 M2: bank_reference_id + line_position are now
+            # required on the schema. Both accept null, but the field
+            # must be present in the payload — this makes the
+            # extractor's "did I forget to think about it" pathology
+            # visible instead of silent. Zero-loss is enforced at the
+            # insert-time backstop regardless, so this is defense-in-
+            # depth; a hallucinated non-null ref is caught by the
+            # backstop's (date, amount, desc)-differs check.
+            "required": [
+                "date", "description", "amount", "bank", "source",
+                "bank_reference_id", "line_position",
+            ]
         }
     },
     {
@@ -115,7 +126,14 @@ MAIL_PROCESSOR_TOOLS = [
                                 )
                             },
                         },
-                        "required": ["date", "description", "amount"]
+                        # ak-8l5 M2: dedup fields are required (nullable)
+                        # on every batch row — same rationale as
+                        # insert_transaction. Makes extractor drift
+                        # visible; backstop enforces zero-loss.
+                        "required": [
+                            "date", "description", "amount",
+                            "bank_reference_id", "line_position",
+                        ]
                     },
                     "description": "Array of transaction objects to insert"
                 },

@@ -20,6 +20,33 @@ from utils.logger import Logger
 logger = Logger(__name__).get_logger()
 
 
+def _record_hash_tier(dual_path_seen, txn, *, primary):
+    """ak-8l5 M1 (review minor): record which hash tier saw this row's
+    (normalized) content. Callers pass one of primary=True or primary=
+    False per row. When both flags fire for the same key within a
+    batch, the batch-summary log emits a M1 dual-tier warning.
+
+    Normalization matches the fallback-hash contract so a chunk-boundary
+    variant (case / whitespace / trailing punct) doesn't hide a real
+    dual-tier hit.
+    """
+    from utils.reference_id import normalize_description_for_backstop
+    try:
+        amt = round(float(txn.get("amount", 0)), 2)
+    except (TypeError, ValueError):
+        amt = None
+    key = (
+        str(txn.get("date", "")),
+        amt,
+        normalize_description_for_backstop(txn.get("description", "")),
+    )
+    slot = dual_path_seen.setdefault(key, [False, False])
+    if primary:
+        slot[0] = True
+    else:
+        slot[1] = True
+
+
 def _unwrap_response(result):
     """Unwrap Flask jsonify responses into plain dicts for Claude."""
     import json as _json
@@ -205,9 +232,12 @@ def _handle_insert_transaction(args, user_id, transaction_service):
     }
     if row["bank_reference_id"]:
         # Primary v2 path — same ref → same PK across email alert +
-        # statement PDF ingest of the same tx.
+        # statement PDF ingest of the same tx. ak-8l5 M3: amount is
+        # folded in so shared-ref-across-amounts stays distinct.
         from utils.reference_id import generate_reference_v2
-        ref_id = generate_reference_v2(bank, row["bank_reference_id"])
+        ref_id = generate_reference_v2(
+            bank, row["bank_reference_id"], args["amount"],
+        )
     else:
         # No ref → legacy content hash. Email path doesn't get a
         # positional fallback (no file_id).
@@ -272,14 +302,24 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
     # obvious when a chunk re-read collapses vs. a novel row lands.
     primary_hash_count = 0
     fallback_hash_count = 0
+    # ak-8l5 M1 (review minor): dual-path visibility. If the SAME
+    # normalized (date, amount, description) tuple appears in this
+    # batch once via the primary path AND once via the fallback path,
+    # that's an extraction pathology worth warning about (chunk
+    # boundary saw a ref on one side and not the other, or the LLM
+    # emitted a ref for the summary line but not the detail line).
+    # We record { normkey: (via_primary, via_fallback) } per batch.
+    _dual_path_seen: dict[tuple, list[bool]] = {}
     for idx, txn in enumerate(args.get("transactions", [])):
         # ak-8l5 primary — LLM extracted a per-tx bank ref. Chunk
         # re-reads should emit the SAME ref, so same PK, so the
         # PK-conflict path collapses.
         raw_ref = txn.get("bank_reference_id")
         if raw_ref:
-            ref_id = generate_reference_v2(bank, raw_ref)
+            # ak-8l5 M3: pass amount into the primary hash.
+            ref_id = generate_reference_v2(bank, raw_ref, txn["amount"])
             primary_hash_count += 1
+            _record_hash_tier(_dual_path_seen, txn, primary=True)
         else:
             # ak-8l5 fallback — positional. Requires file_id +
             # line_position. If the LLM didn't emit a line_position
@@ -295,6 +335,7 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
                     txn["date"], txn["amount"], txn["description"],
                 )
                 fallback_hash_count += 1
+                _record_hash_tier(_dual_path_seen, txn, primary=False)
             else:
                 # Extractor didn't give us a positional anchor.
                 # Fall back to the legacy content hash so the row
@@ -311,6 +352,7 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
                     txn["amount"],
                 )
                 fallback_hash_count += 1
+                _record_hash_tier(_dual_path_seen, txn, primary=False)
                 logger.warning(
                     f"insert_batch_transactions: row missing "
                     f"bank_reference_id AND line_position; using legacy "
@@ -332,6 +374,20 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
             f"primary={primary_hash_count} fallback={fallback_hash_count} "
             f"(bank={bank}, file_id={file_id})"
         )
+        # ak-8l5 M1: emit the dual-path warning if the same normalized
+        # tuple crossed both tiers in this batch. Non-blocking — this
+        # is monitoring visibility; the primary/fallback split alone
+        # doesn't imply loss, but persistent dual-path signals prompt
+        # drift and a follow-up sweep should look.
+        _dual = [k for k, v in _dual_path_seen.items() if v[0] and v[1]]
+        if _dual:
+            logger.warning(
+                f"insert_batch_transactions ak-8l5 M1 dual-tier: "
+                f"{len(_dual)} tuple(s) inserted via BOTH primary and "
+                f"fallback in the same batch — possible extractor "
+                f"pathology. bank={bank} file_id={file_id} "
+                f"first_sample={_dual[0]!r}"
+            )
 
     if not transactions:
         logger.info(f"insert_batch_transactions called with 0 transactions for {bank}")

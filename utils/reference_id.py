@@ -71,6 +71,17 @@ def _normalize_description(description):
     return desc
 
 
+def normalize_description_for_backstop(description):
+    """Public re-export of the description-normalization the ak-8l5
+    fallback hash uses. The insert-time backstop
+    (TransactionService._insert_transactions_individually) needs the
+    same normalization to compare existing vs incoming rows on a PK
+    collision — if the normalized descriptions match, that's the
+    intended chunk-overlap dedup path; if they differ, we suffix and
+    keep both."""
+    return _normalize_description(description)
+
+
 def _normalize_bank(bank):
     """UNKNOWN sentinel + upper. Also the shape callers of the
     ak-tik-era hash used."""
@@ -98,7 +109,7 @@ def _hash(components):
     return digest[:64]
 
 
-def generate_reference_v2(bank, bank_reference_id):
+def generate_reference_v2(bank, bank_reference_id, amount):
     """Primary dedup hash for tx with an extracted bank-native ref.
 
     Contract:
@@ -108,17 +119,32 @@ def generate_reference_v2(bank, bank_reference_id):
         makes accidental "collapse-all-null-refs" impossible.
       - bank is folded in as a scope prefix — same UPI ref number
         under HDFC vs BOI won't collide (paranoid but cheap).
+      - amount is folded in as a belt-and-suspenders defense
+        (ak-8l5 review M3). Amount is chunk-invariant (the same
+        physical row read from two overlapping chunks reports the
+        same amount) so chunk-overlap collapse still works, but a
+        shared ref across distinct amounts (rare — some banks reuse
+        ref numbers across posts, or the extractor picks up a
+        semantically-similar substring twice) stays distinct.
+        Prevents a whole class of "different tx, shared ref"
+        silent-merge failures that the backstop at insert time
+        would otherwise have to catch.
 
     Example collisions:
-      HDFC + "UPI-1234"        → collapses re-read of same UPI tx
-      BOI + "MBSF/443710..."   → collapses re-read of same MBSF tx
+      HDFC + "UPI-1234" + 500  → collapses re-read of same UPI tx
+      BOI + "MBSF/…" + 25000   → collapses re-read of same MBSF tx
 
     Example distinctness:
-      HDFC + "UPI-1234"        distinct from HDFC + "UPI-5678"
+      HDFC + "UPI-1234" + 500  distinct from HDFC + "UPI-5678" + 500
                                 (two different UPI tx same day, same
                                  amount, same merchant)
-      HDFC + "UPI-1234"        distinct from BOI + "UPI-1234"
+      HDFC + "UPI-1234" + 500  distinct from BOI + "UPI-1234" + 500
                                 (cross-bank collision guard)
+      HDFC + "REF-X" + 500     distinct from HDFC + "REF-X" + 750
+                                (M3: shared ref across amounts stays
+                                 distinct — the extractor sometimes
+                                 collapses a substring that isn't the
+                                 real ref)
     """
     ref = _normalize_ref(bank_reference_id)
     if not ref:
@@ -127,7 +153,17 @@ def generate_reference_v2(bank, bank_reference_id):
             "generate_reference_v2_fallback for tx rows without an "
             "extracted reference."
         )
-    return _hash([_normalize_bank(bank), ref])
+    # Amount is folded in as the ak-8l5 M3 belt-and-suspenders guard.
+    # Normalized to 2dp so 500 / 500.00 / 500.001 hash to the same
+    # bucket (matching the fallback path's amount normalization).
+    try:
+        amount_str = f"{float(amount):.2f}"
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"generate_reference_v2: amount must be numeric, got "
+            f"{amount!r}"
+        )
+    return _hash([_normalize_bank(bank), ref, amount_str])
 
 
 def generate_reference_v2_fallback(
@@ -205,7 +241,8 @@ def generate_reference_from_row(
     """
     ref = _normalize_ref(row.get("bank_reference_id"))
     if ref:
-        return generate_reference_v2(bank, ref)
+        # ak-8l5 M3: primary hash now includes amount.
+        return generate_reference_v2(bank, ref, row.get("amount"))
     return generate_reference_v2_fallback(
         bank,
         file_id,

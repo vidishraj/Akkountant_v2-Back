@@ -29,35 +29,40 @@ from utils.reference_id import (
 
 
 class TestGenerateReferenceV2Primary(unittest.TestCase):
-    """Primary path: (bank, bank_reference_id) → SHA256 → 64 hex."""
+    """Primary path: (bank, bank_reference_id, amount) → SHA256 → 64 hex.
 
-    def test_same_ref_same_hash(self):
-        """Chunk re-reads emit the same ref → same PK → PK-conflict
-        path collapses the second insert."""
-        a = generate_reference_v2("HDFC_DEBIT", "9876543210")
-        b = generate_reference_v2("HDFC_DEBIT", "9876543210")
+    ak-8l5 review M3: amount is folded into the primary hash so a
+    shared ref across distinct amounts stays distinct (chunk-overlap
+    collapse still works because amount is chunk-invariant).
+    """
+
+    def test_same_ref_same_amount_same_hash(self):
+        """Chunk re-reads emit the same ref + same amount → same PK →
+        PK-conflict path collapses the second insert."""
+        a = generate_reference_v2("HDFC_DEBIT", "9876543210", 500)
+        b = generate_reference_v2("HDFC_DEBIT", "9876543210", 500)
         self.assertEqual(a, b)
 
     def test_different_refs_different_hashes(self):
         """Two UPI tx on same day, same amount, same merchant, but
         different UPI refs — MUST stay distinct."""
-        a = generate_reference_v2("HDFC_DEBIT", "9876543210")
-        b = generate_reference_v2("HDFC_DEBIT", "1234567890")
+        a = generate_reference_v2("HDFC_DEBIT", "9876543210", 500)
+        b = generate_reference_v2("HDFC_DEBIT", "1234567890", 500)
         self.assertNotEqual(a, b)
 
     def test_cross_bank_same_ref_distinct(self):
         """Cross-bank collision guard — same numeric ref under HDFC
         vs BOI must not collide."""
-        a = generate_reference_v2("HDFC_DEBIT", "1234567890")
-        b = generate_reference_v2("BOI", "1234567890")
+        a = generate_reference_v2("HDFC_DEBIT", "1234567890", 500)
+        b = generate_reference_v2("BOI", "1234567890", 500)
         self.assertNotEqual(a, b)
 
     def test_ref_whitespace_normalized(self):
         """Chunk-boundary variance in whitespace/trailing punct on the
         ref itself collapses."""
-        a = generate_reference_v2("HDFC_DEBIT", "9876543210")
-        b = generate_reference_v2("HDFC_DEBIT", " 9876543210 ")
-        c = generate_reference_v2("HDFC_DEBIT", "9876543210.")
+        a = generate_reference_v2("HDFC_DEBIT", "9876543210", 500)
+        b = generate_reference_v2("HDFC_DEBIT", " 9876543210 ", 500)
+        c = generate_reference_v2("HDFC_DEBIT", "9876543210.", 500)
         self.assertEqual(a, b)
         self.assertEqual(a, c)
 
@@ -65,25 +70,60 @@ class TestGenerateReferenceV2Primary(unittest.TestCase):
         """UTRs and some UPI refs are case-sensitive alphanumeric —
         do NOT uppercase them (would collide UTRs like 'aBcDeF' with
         'ABCDEF' which are different UTRs)."""
-        a = generate_reference_v2("HDFC_DEBIT", "aBcDeF123")
-        b = generate_reference_v2("HDFC_DEBIT", "abcdef123")
+        a = generate_reference_v2("HDFC_DEBIT", "aBcDeF123", 500)
+        b = generate_reference_v2("HDFC_DEBIT", "abcdef123", 500)
         self.assertNotEqual(a, b)
 
     def test_empty_ref_raises(self):
         """Empty ref must fail loudly — callers must branch to the
         fallback path explicitly."""
         with self.assertRaises(ValueError):
-            generate_reference_v2("HDFC_DEBIT", "")
+            generate_reference_v2("HDFC_DEBIT", "", 500)
         with self.assertRaises(ValueError):
-            generate_reference_v2("HDFC_DEBIT", None)
+            generate_reference_v2("HDFC_DEBIT", None, 500)
         with self.assertRaises(ValueError):
-            generate_reference_v2("HDFC_DEBIT", "   ")
+            generate_reference_v2("HDFC_DEBIT", "   ", 500)
+
+    def test_non_numeric_amount_raises(self):
+        """M3: amount must be convertible to float."""
+        with self.assertRaises(ValueError):
+            generate_reference_v2("HDFC_DEBIT", "9876543210", "not-a-number")
+        with self.assertRaises(ValueError):
+            generate_reference_v2("HDFC_DEBIT", "9876543210", None)
 
     def test_hash_length(self):
         """PK column is VARCHAR(64) — hex output must fit."""
-        h = generate_reference_v2("BOI", "MBSF/443710110001487/Rent")
+        h = generate_reference_v2("BOI", "MBSF/443710110001487/Rent", 5000)
         self.assertEqual(len(h), 64)
         self.assertRegex(h, r"^[0-9a-f]{64}$")
+
+    # ── ak-8l5 M3: amount folded into primary hash ───────────────
+
+    def test_same_ref_different_amount_stays_distinct(self):
+        """M3 core guarantee: shared ref across distinct amounts stays
+        distinct. Prevents the "different tx, same ref number" silent-
+        merge failure (extractor pathologies where a substring lookalike
+        is picked up as the ref for two rows with different amounts)."""
+        a = generate_reference_v2("HDFC_DEBIT", "REF-X", 500)
+        b = generate_reference_v2("HDFC_DEBIT", "REF-X", 750)
+        self.assertNotEqual(a, b)
+
+    def test_amount_normalization_2dp(self):
+        """M3: amounts equal at 2dp collapse; sub-cent variance ignored.
+        (This matches the fallback path's amount treatment.)"""
+        a = generate_reference_v2("HDFC_DEBIT", "REF-X", 500)
+        b = generate_reference_v2("HDFC_DEBIT", "REF-X", 500.00)
+        c = generate_reference_v2("HDFC_DEBIT", "REF-X", 500.001)
+        self.assertEqual(a, b)
+        self.assertEqual(a, c)
+
+    def test_amount_sign_matters(self):
+        """M3: same ref, opposite signs (500 debit vs -500 credit) →
+        distinct. Realistic when an extractor mis-signs one of two
+        posts sharing a ref."""
+        a = generate_reference_v2("HDFC_DEBIT", "REF-X", 500)
+        b = generate_reference_v2("HDFC_DEBIT", "REF-X", -500)
+        self.assertNotEqual(a, b)
 
 
 # ── Fallback path — positional dedup ─────────────────────────────────
@@ -231,7 +271,8 @@ class TestGenerateReferenceFromRow(unittest.TestCase):
 
     def test_row_with_ref_uses_primary(self):
         """When a row has a bank_reference_id, the primary path fires
-        and the file/line info is ignored."""
+        and the file/line info is ignored. M3: the dispatcher passes
+        amount through so the primary hash is amount-aware."""
         row = {
             "bank_reference_id": "9876543210",
             "date": "2023-01-26",
@@ -241,7 +282,7 @@ class TestGenerateReferenceFromRow(unittest.TestCase):
         got = generate_reference_from_row(
             "HDFC_DEBIT", row, file_id="ignored", line_position=1,
         )
-        expected = generate_reference_v2("HDFC_DEBIT", "9876543210")
+        expected = generate_reference_v2("HDFC_DEBIT", "9876543210", 25000)
         self.assertEqual(got, expected)
 
     def test_row_without_ref_uses_fallback(self):
@@ -298,8 +339,14 @@ class TestHDFCReferencePatterns(unittest.TestCase):
     emit the same ref across chunk re-reads. If a future prompt
     change causes drift, these tests fail loudly."""
 
-    def _p(self, ref):
-        return generate_reference_v2("HDFC_DEBIT", ref)
+    # Fixed sample amount — M3 requires it but these tests only care
+    # about ref stability so the amount is a constant here.
+    _AMT = 1000
+
+    def _p(self, ref, amount=None):
+        return generate_reference_v2(
+            "HDFC_DEBIT", ref, amount if amount is not None else self._AMT,
+        )
 
     def test_upi_p2m_stable(self):
         """UPI-9876543210-P2M-… → '9876543210'"""
@@ -348,8 +395,12 @@ class TestHDFCReferencePatterns(unittest.TestCase):
 class TestBOIReferencePatterns(unittest.TestCase):
     """BOI's narration format is 'MBSF/<numeric>/<narration>' etc."""
 
-    def _p(self, ref):
-        return generate_reference_v2("BOI", ref)
+    _AMT = 5000
+
+    def _p(self, ref, amount=None):
+        return generate_reference_v2(
+            "BOI", ref, amount if amount is not None else self._AMT,
+        )
 
     def test_mbsf_stable(self):
         """MBSF/443710110001487/Rent → middle numeric block."""
@@ -387,8 +438,8 @@ class TestZeroLossGuarantee(unittest.TestCase):
         installments). Different UPI refs must → different PKs."""
         r1 = "UPI-A-9876543210"
         r2 = "UPI-A-9876543211"
-        h1 = generate_reference_v2("HDFC_DEBIT", r1)
-        h2 = generate_reference_v2("HDFC_DEBIT", r2)
+        h1 = generate_reference_v2("HDFC_DEBIT", r1, 25000)
+        h2 = generate_reference_v2("HDFC_DEBIT", r2, 25000)
         self.assertNotEqual(h1, h2)
 
     def test_two_ref_less_rows_same_content_stay_distinct(self):
