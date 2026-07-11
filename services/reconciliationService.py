@@ -46,73 +46,65 @@ class ReconciliationService(BaseService):
     ):
         """
         When a statement arrives for a bank+period:
-        1. Delete email-sourced transactions for that instrument+period
-        2. Delete overlapping statement-sourced transactions (period-based clean replace)
-           and clean up their orphaned file records
-        3. Record the statement period
-        Returns dict with counts.
+        1. Delete email-sourced ALERT transactions (source='email' AND
+           fileID IS NULL) for that instrument+period.
+        2. Record the statement period.
+
+        ak-a0m (P1): the pre-ak-a0m implementation ALSO deleted
+        "overlapping statement transactions", excluding the current
+        file_id. That silently nuked rows from OTHER statement files
+        whose periods overlapped — a hard zero-loss violation
+        (Overseer's ledger drops rows without warning). Removed.
+
+        The delete policy now lives in
+        utils.reconciliation_delete_policy — see that module's
+        docstring for the "email-alert only, cross-file never" rule
+        and rationale.
+
+        Cross-file protection: statement-source rows (any fileID) are
+        NEVER deleted here. If two statements legitimately overlap
+        (e.g. HDFC monthly + quarterly summary), BOTH sets stay.
+        Chunk re-reads of the same statement collapse via ak-8l5's
+        referenceID PK collision path at insert time — no delete
+        required.
+
+        Returns dict with counts (statement_transactions_deleted and
+        orphaned_files_deleted are always 0 under the ak-a0m policy;
+        the fields stay in the dict for backward compat with
+        upstream callers that log the counts).
         """
         session = self.db.session
-        from models.fileDetails import FileDetails
+        from utils.reconciliation_delete_policy import (
+            build_email_deletion_filters,
+        )
 
-        # 1. Delete email transactions for this bank+period
+        # 1. Delete email-alert transactions for this bank+period.
+        #    ak-a0m: the filter is now sourced from a single policy
+        #    module so it matches the pure-Python
+        #    should_delete_on_statement_arrival predicate exactly.
+        email_delete_filter = build_email_deletion_filters(
+            Transactions, user_id, bank,
+            period_start, period_end, func=func,
+        )
         email_deleted = session.query(Transactions).filter(
-            Transactions.user == user_id,
-            Transactions.bank == bank,
-            func.lower(Transactions.source) == 'email',
-            Transactions.date.between(period_start, period_end),
+            *email_delete_filter
         ).delete(synchronize_session='fetch')
 
         self.logger.info(
-            f"Deleted {email_deleted} email transactions for {bank} "
-            f"({period_start} to {period_end})"
+            f"ak-a0m: deleted {email_deleted} email-alert transaction(s) "
+            f"for {bank} ({period_start} to {period_end}) on statement "
+            f"arrival (file_id={file_id!r}). Statement-source rows "
+            f"preserved cross-file per zero-loss policy."
         )
 
-        # 2. Delete overlapping statement transactions for same bank+period
-        #    This prevents duplicates when re-processing or when statement periods overlap.
-        #    IMPORTANT: Exclude the current file_id so chunked PDFs don't delete
-        #    their own earlier chunks' transactions.
-        #    Collect affected fileIDs before deleting so we can clean up orphaned file records.
-        overlapping_file_ids = set()
-        overlap_filter = [
-            Transactions.user == user_id,
-            Transactions.bank == bank,
-            func.lower(Transactions.source) == 'statement',
-            Transactions.date.between(period_start, period_end),
-        ]
-        if file_id:
-            overlap_filter.append(Transactions.fileID != file_id)
-
-        overlapping_stmt_txns = session.query(Transactions).filter(*overlap_filter).all()
-        for txn in overlapping_stmt_txns:
-            if txn.fileID:
-                overlapping_file_ids.add(txn.fileID)
-
-        stmt_deleted = session.query(Transactions).filter(*overlap_filter).delete(synchronize_session='fetch')
-
-        if stmt_deleted > 0:
-            self.logger.info(
-                f"Overlap guard: deleted {stmt_deleted} prior statement transactions "
-                f"for {bank} ({period_start} to {period_end})"
-            )
-            if stmt_deleted > transaction_count > 0:
-                self.logger.warning(
-                    f"Overlap guard WARNING: new statement has {transaction_count} txns "
-                    f"but deleted {stmt_deleted} old ones — possible extraction regression"
-                )
-
-        # Soft-delete orphaned file records (files that now have zero transactions)
+        # 2. ak-a0m: cross-file statement-delete REMOVED. Rows from
+        #    other statements are protected under the zero-loss
+        #    constraint. Chunk re-reads of the same statement dedup
+        #    at the storage layer via ak-8l5 (referenceID PK
+        #    collision → silent drop OR suffix-and-keep). No further
+        #    action needed here.
+        stmt_deleted = 0
         orphaned_files_deleted = 0
-        for old_file_id in overlapping_file_ids:
-            remaining = session.query(Transactions).filter(
-                Transactions.fileID == old_file_id,
-            ).count()
-            if remaining == 0:
-                old_file = session.query(FileDetails).filter_by(fileID=old_file_id).first()
-                if old_file:
-                    old_file.deleted = True
-                    orphaned_files_deleted += 1
-                    self.logger.info(f"Soft-deleted orphaned file record: {old_file_id}")
 
         # 3. Upsert statement period record
         existing = session.query(StatementPeriod).filter_by(
