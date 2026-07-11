@@ -1,6 +1,11 @@
 from models.fileDetails import FileDetails
 from models.users import User
 from models.transactions import Transactions
+# ak-ex2-v2: snapshot-before-delete audit table for the non-savings
+# row stripper. Import BEFORE db.create_all() so the fresh table is
+# created on next boot. No ALTER TABLE prereq (new table, not a
+# column addition).
+from models.strippedTransactionsAudit import StrippedTransactionsAudit
 from models.transactionsForReview import TransactionForReview
 from models.savedTags import SavedTags
 from models.statementPasswords import StatementPasswords

@@ -321,6 +321,10 @@ class Akkountant(Flask):
             ('/zeroSumReport', 'POST', self.transactionEP.zeroSumReport),
             ('/statementPeriods', 'GET', self.transactionEP.statementPeriods),
             ('/reconciliationStatus', 'GET', self.transactionEP.reconciliationStatus),
+            # ak-ex2: post-fallback non-savings row stripper. Called by
+            # infra during the ak-32o HDFC re-parse cycle for each file
+            # tagged reconciliation_fallback=True by ak-ifc-v3.
+            ('/admin/stripFallbackRows', 'POST', self.transactionEP.stripFallbackRows),
         ]
 
         for rule, method, view_func in transactionRoutes:

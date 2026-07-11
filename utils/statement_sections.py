@@ -612,3 +612,170 @@ def check_hdfc_savings_reconciliation(
         stated_debits=summary.total_debits,
         stated_credits=summary.total_credits,
     )
+
+
+# ── ak-ex2: post-fallback non-savings row stripper ──────────────────
+#
+# When ak-ifc-v3's file-level reconciliation detects divergence, it
+# re-runs every chunk with force_no_mask=True so previously-missed
+# savings rows are recovered. That re-run ALSO re-admits non-savings
+# sub-account rows (credit card, fixed deposit, mutual fund, RD, PPF)
+# into the savings fileID. The `reconciliation_fallback=True` tag on
+# fileDetails flags these files; ak-ex2 strips the actual over-parse.
+#
+# Strategy: for each tx row on a tagged file, locate the row in the
+# RAW file text and determine which section (SAVINGS vs. non-SAVINGS)
+# its narration line belongs to. Delete rows whose section is
+# non-SAVINGS. `line_position` is NOT stored on Transactions, so we
+# match by (amount, description) narration overlap against the raw
+# text. Ambiguous matches (multiple candidates OR no candidate) are
+# left alone — conservative: never delete something we can't classify
+# confidently.
+
+
+def build_line_to_section_map(
+    spans: Iterable[SectionSpan],
+    num_lines: int,
+) -> list[SectionType]:
+    """Given a list of SectionSpans (0-indexed line ranges) and the
+    total number of lines in the raw text, return a list[SectionType]
+    of length `num_lines` where index i is the section that line i
+    belongs to.
+
+    Lines not covered by any span become UNKNOWN (defensive — the
+    section detector already emits an UNKNOWN leading span for the
+    account-holder / summary header, and each header line opens its
+    own span, so uncovered lines are rare edge cases).
+
+    Used by the ak-ex2 stripper to look up a row's section given
+    its located line index in one O(1) hit.
+    """
+    section_by_line: list[SectionType] = [SectionType.UNKNOWN] * num_lines
+    for span in spans:
+        stop = min(span.end_line + 1, num_lines)
+        for i in range(span.start_line, stop):
+            section_by_line[i] = span.section
+    return section_by_line
+
+
+# Amount rendering variants observed in HDFC PDFs. Statements
+# sometimes show "1,234.56", sometimes "1234.56", sometimes with a
+# trailing " CR" / " DR" suffix, sometimes with "Rs. " / "₹" prefix.
+# We match a canonical .2f magnitude both with and without commas
+# and let the caller decide how strict to be about surrounding
+# formatting.
+_AMOUNT_NUM_ONLY_RE = re.compile(r"\d[\d,]*(?:\.\d{1,2})?")
+
+
+def _amount_variants(amount: float) -> list[str]:
+    """Yield string forms of `amount` that are likely to appear in
+    HDFC narration lines. Uses the ABSOLUTE magnitude (sign is
+    inferred by the extractor's positive-debit / negative-credit
+    convention and doesn't appear on the source line in HDFC's
+    layout — CR/DR is a text suffix, not a sign).
+
+    Emits:
+      - "1234.56"  (comma-less)
+      - "1,234.56" (comma-grouped, Indian numbering)
+      - "1234"     (no decimal for whole rupee)
+    """
+    mag = round(abs(float(amount)), 2)
+    fixed = f"{mag:.2f}"
+    # Comma-less: identity of fixed.
+    variants = [fixed]
+    # Comma-grouped Indian numbering: "1,00,000.50" for 100000.50.
+    # Split integer / fraction parts, group integer part from the
+    # right with lakh convention (last 3 digits, then groups of 2).
+    int_part, _, frac_part = fixed.partition(".")
+    if len(int_part) > 3:
+        # Reverse, take first 3, then chunks of 2.
+        rev = int_part[::-1]
+        head = rev[:3][::-1]
+        rest = rev[3:]
+        groups = [rest[i:i+2][::-1] for i in range(0, len(rest), 2)]
+        grouped = ",".join(reversed(groups)) + "," + head
+        variants.append(f"{grouped}.{frac_part}")
+    # Whole-rupee shape (no decimal) — some HDFC layouts drop the
+    # trailing .00 in narration lines even when the summary carries
+    # it. Only meaningful for whole numbers.
+    if frac_part == "00":
+        variants.append(int_part)
+        if len(int_part) > 3:
+            variants.append(grouped)
+    return list(dict.fromkeys(variants))  # dedup, preserve order
+
+
+def _description_tokens(description: str) -> set[str]:
+    """Tokenize a description narration into upper-case alphanumeric
+    tokens for cheap overlap scoring."""
+    words = re.findall(r"[A-Za-z0-9]+", (description or "").upper())
+    # Drop 1-2 char tokens (too many false-positive matches).
+    return {w for w in words if len(w) >= 3}
+
+
+def find_row_line_in_raw_text(
+    amount: float,
+    description: str,
+    raw_lines: Iterable[str],
+) -> Optional[int]:
+    """Locate the raw-file line that a tx row was extracted from.
+
+    Heuristic: scan each raw line for the amount (in any of the
+    common HDFC render forms). For each amount hit, score by how
+    many description tokens overlap that line. If ONE line has the
+    highest score AND at least one description token match → return
+    that line's 0-indexed position. If no match, or a tie, return
+    None (caller treats as "can't classify — leave alone").
+
+    Line indices are 0-indexed into the `raw_lines` sequence (which
+    should be the same shape the caller feeds to detect_hdfc_sections
+    so span indices align).
+
+    Deliberately conservative: prefer false-negative (row left
+    alone) over false-positive (wrong row deleted). The reconciliation
+    fallback already ensures no savings tx is lost; ak-ex2's job is
+    the over-parse cleanup, and missing a few over-parse rows is
+    much less costly than deleting a legit savings row.
+    """
+    variants = _amount_variants(amount)
+    desc_tokens = _description_tokens(description)
+    if not desc_tokens:
+        return None  # empty desc → nothing to score against
+
+    lines = list(raw_lines)
+    scored: list[tuple[int, int]] = []  # (line_idx, overlap_score)
+    for i, line in enumerate(lines):
+        # Cheap amount-presence check first (skip the tokenization
+        # for lines that don't carry the amount at all).
+        if not any(v in line for v in variants):
+            continue
+        line_tokens = _description_tokens(line)
+        overlap = len(desc_tokens & line_tokens)
+        if overlap > 0:
+            scored.append((i, overlap))
+
+    if not scored:
+        return None
+    # Pick the highest-overlap line. If tied on top score → ambiguous.
+    scored.sort(key=lambda x: (-x[1], x[0]))
+    if len(scored) >= 2 and scored[0][1] == scored[1][1]:
+        return None
+    return scored[0][0]
+
+
+def classify_row_section(
+    amount: float,
+    description: str,
+    raw_lines: Iterable[str],
+    section_by_line: list[SectionType],
+) -> SectionType:
+    """Combine find_row_line_in_raw_text + build_line_to_section_map
+    into a single classification call. UNKNOWN if the row can't be
+    located confidently (ambiguous / no match). Caller treats
+    UNKNOWN as "leave alone" — don't delete.
+    """
+    lines = list(raw_lines)
+    line_idx = find_row_line_in_raw_text(amount, description, lines)
+    if line_idx is None or line_idx >= len(section_by_line):
+        return SectionType.UNKNOWN
+    return section_by_line[line_idx]
