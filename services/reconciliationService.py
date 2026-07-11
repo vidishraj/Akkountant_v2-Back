@@ -46,63 +46,108 @@ class ReconciliationService(BaseService):
     ):
         """
         When a statement arrives for a bank+period:
-        1. Delete email-sourced ALERT transactions (source='email' AND
-           fileID IS NULL) for that instrument+period.
+        1. MATCH-BEFORE-DELETE (ak-a0m v2) email-alert candidates
+           against statement rows in the same period. Delete only
+           those where a statement-side row for the SAME tx exists;
+           preserve the rest.
         2. Record the statement period.
 
-        ak-a0m (P1): the pre-ak-a0m implementation ALSO deleted
-        "overlapping statement transactions", excluding the current
-        file_id. That silently nuked rows from OTHER statement files
-        whose periods overlapped — a hard zero-loss violation
-        (Overseer's ledger drops rows without warning). Removed.
+        ak-a0m v1 removed the cross-file statement-delete that was
+        nuking rows from other files. That was necessary but not
+        sufficient: the email-side delete was still blanket, which
+        silently loses:
+          - alert-only tx (never appear on a statement)
+          - alerts under an under-parsed statement (statement missed
+            the row for some reason).
 
-        The delete policy now lives in
-        utils.reconciliation_delete_policy — see that module's
-        docstring for the "email-alert only, cross-file never" rule
-        and rationale.
+        ak-a0m v2 (reviewer BOUNCE hq-wisp-35ufm6) adds symmetric
+        zero-loss on the email side: match each candidate against
+        the statement rows in the period. Primary match uses
+        bank_reference_id (ak-8l5's stable identity); fallback uses
+        (bank, date, amount, normalized-description). Rows with no
+        match are PRESERVED.
 
-        Cross-file protection: statement-source rows (any fileID) are
-        NEVER deleted here. If two statements legitimately overlap
-        (e.g. HDFC monthly + quarterly summary), BOTH sets stay.
-        Chunk re-reads of the same statement collapse via ak-8l5's
-        referenceID PK collision path at insert time — no delete
-        required.
+        Cross-file protection (v1) still holds: statement rows are
+        never deleted here regardless of overlap. Chunk re-reads of
+        the same statement collapse via ak-8l5's referenceID PK
+        collision path at insert time.
 
-        Returns dict with counts (statement_transactions_deleted and
-        orphaned_files_deleted are always 0 under the ak-a0m policy;
-        the fields stay in the dict for backward compat with
-        upstream callers that log the counts).
+        Returns dict with counts:
+          email_transactions_deleted: number matched + deleted
+          email_transactions_preserved: number preserved (v2 added)
+          statement_transactions_deleted: 0 (retained for backward
+            compat with upstream loggers)
+          orphaned_files_deleted: 0 (same)
+          statement_period_recorded: True on success.
         """
         session = self.db.session
         from utils.reconciliation_delete_policy import (
             build_email_deletion_filters,
+            build_statement_lookup_filters,
+            build_statement_match_index,
+            is_email_matched_by_statement,
         )
 
-        # 1. Delete email-alert transactions for this bank+period.
-        #    ak-a0m: the filter is now sourced from a single policy
-        #    module so it matches the pure-Python
-        #    should_delete_on_statement_arrival predicate exactly.
-        email_delete_filter = build_email_deletion_filters(
+        # 1a. Load the email-alert CANDIDATES for the period.
+        #     ak-a0m v2: filter is sourced from the same policy
+        #     module as the pure predicate, so a SQL / Python
+        #     divergence can't slip in silently (v2 MINOR fix).
+        candidate_filter = build_email_deletion_filters(
             Transactions, user_id, bank,
             period_start, period_end, func=func,
         )
-        email_deleted = session.query(Transactions).filter(
-            *email_delete_filter
-        ).delete(synchronize_session='fetch')
+        candidates = session.query(Transactions).filter(
+            *candidate_filter
+        ).all()
+
+        # 1b. Load the statement-side rows in the same period. Any
+        #     statement file for the (user, bank, period). The
+        #     statement we're about to record has already inserted
+        #     via the calling pipeline, so its rows are visible
+        #     here.
+        statement_filter = build_statement_lookup_filters(
+            Transactions, user_id, bank,
+            period_start, period_end, func=func,
+        )
+        statement_rows = session.query(Transactions).filter(
+            *statement_filter
+        ).all()
+
+        # 1c. Build the match indexes ONCE per invocation.
+        #     O(n_stmt) build, O(1) lookup per candidate. Beats the
+        #     naive O(n_email × n_stmt) inner loop.
+        by_ref, by_tuple = build_statement_match_index(statement_rows)
+
+        # 1d. Match-before-delete: only mark candidates with a
+        #     matching statement-side row. Zero match → preserve.
+        to_delete_refs = []
+        preserved_count = 0
+        for c in candidates:
+            if is_email_matched_by_statement(c, by_ref, by_tuple):
+                to_delete_refs.append(c.referenceID)
+            else:
+                preserved_count += 1
+
+        email_deleted = 0
+        if to_delete_refs:
+            email_deleted = session.query(Transactions).filter(
+                Transactions.referenceID.in_(to_delete_refs),
+                Transactions.user == user_id,
+            ).delete(synchronize_session='fetch')
 
         self.logger.info(
-            f"ak-a0m: deleted {email_deleted} email-alert transaction(s) "
-            f"for {bank} ({period_start} to {period_end}) on statement "
-            f"arrival (file_id={file_id!r}). Statement-source rows "
-            f"preserved cross-file per zero-loss policy."
+            f"ak-a0m v2: {email_deleted} email-alert(s) replaced by "
+            f"matching statement rows; {preserved_count} preserved "
+            f"(no matching statement row). "
+            f"bank={bank} period={period_start} to {period_end} "
+            f"file_id={file_id!r} statement_rows_in_period={len(statement_rows)} "
+            f"candidates={len(candidates)}"
         )
 
-        # 2. ak-a0m: cross-file statement-delete REMOVED. Rows from
-        #    other statements are protected under the zero-loss
+        # 2. ak-a0m v1: cross-file statement-delete REMOVED. Rows
+        #    from other statements are protected under the zero-loss
         #    constraint. Chunk re-reads of the same statement dedup
-        #    at the storage layer via ak-8l5 (referenceID PK
-        #    collision → silent drop OR suffix-and-keep). No further
-        #    action needed here.
+        #    at the storage layer via ak-8l5.
         stmt_deleted = 0
         orphaned_files_deleted = 0
 
@@ -147,6 +192,10 @@ class ReconciliationService(BaseService):
 
         return {
             "email_transactions_deleted": email_deleted,
+            # ak-a0m v2: NEW observability field — how many candidate
+            # email alerts were preserved because no matching
+            # statement row existed.
+            "email_transactions_preserved": preserved_count,
             "statement_transactions_deleted": stmt_deleted,
             "orphaned_files_deleted": orphaned_files_deleted,
             "statement_period_recorded": True,
