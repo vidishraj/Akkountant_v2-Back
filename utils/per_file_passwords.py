@@ -16,9 +16,11 @@ proper store later"):
   password strings. Loaded on demand, cached per process. No DB /
   no schema change.
 
-  Path resolution order:
+  Path resolution order (ak-nyd v2 — reviewer BOUNCE hq-wisp-*):
     1. `AK_PER_FILE_PASSWORDS_PATH` env var if set.
-    2. `<cwd>/per_file_passwords.json` if it exists.
+    2. `~/.config/akkountant/per_file_passwords.json`
+       (XDG-style config dir OUTSIDE the repo — v1 defaulted to
+       CWD which is a landmine).
     3. Empty dict (safe default — lookups return None).
 
   The JSON shape is a flat map:
@@ -28,14 +30,26 @@ proper store later"):
     }
   Two namespaces so a caller with either key can hit the store.
 
-SECURITY NOTE:
+SECURITY (ak-nyd v2 — reviewer flagged three landmines in v1; all
+three fixed here):
 
-Passwords land plaintext on disk — no worse than the personal-info
-flow (which also uses plaintext DOB / PAN / phone segments as
-password candidates), but not great. A proper encrypted store is
-deferred until the pipeline has a full secrets story (probably
-alongside the ak-2ln umbrella work). For NOW: chmod 600 the file,
-put it outside git, and treat it as short-lived recovery scaffolding.
+  1. **0o600 mode on write.** _save_raw runs `os.chmod(path, 0o600)`
+     after every write so only the owning user can read/write.
+     Umask can't override — chmod is explicit. Parent dir is 0o700
+     when we create it.
+
+  2. **Default path outside the repo.** v1 landed
+     `./per_file_passwords.json` next to the source tree with git
+     watching. v2 default is
+     `~/.config/akkountant/per_file_passwords.json`.
+
+  3. **.gitignore entry.** The backend .gitignore blocks
+     `per_file_passwords.json` at any depth so an operator running
+     an old (pre-v2) CLI can't accidentally commit the file.
+
+  Deferred: proper encrypted-secrets store (probably alongside the
+  ak-2ln umbrella work). Passwords remain plaintext even under this
+  v2 hardening — the fixes above just narrow the exposure surface.
 
 Pure-Python (no framework deps) so it's testable without booting
 flask/SQLAlchemy.
@@ -51,14 +65,30 @@ from typing import Optional
 _ENV_PATH_VAR = "AK_PER_FILE_PASSWORDS_PATH"
 _DEFAULT_FILENAME = "per_file_passwords.json"
 
+# ak-nyd v2: default lives OUTSIDE the repo. XDG-style config dir
+# under $HOME.
+_DEFAULT_CONFIG_DIR_REL = os.path.join(".config", "akkountant")
+
+# ak-nyd v2 file / dir modes.
+_FILE_MODE = 0o600  # owner rw only
+_DIR_MODE = 0o700   # owner rwx only
+
+
+def _default_config_path() -> str:
+    """ak-nyd v2: resolve the OUT-OF-REPO default path.
+    Uses os.path.expanduser("~") so the path picks up the running
+    user's home dir."""
+    home = os.path.expanduser("~")
+    return os.path.join(home, _DEFAULT_CONFIG_DIR_REL, _DEFAULT_FILENAME)
+
 
 def _resolve_config_path() -> str:
     """Return the file path to load / save the JSON store from.
-    Order: env var, then <cwd>/per_file_passwords.json."""
+    Order: env var, then ak-nyd v2 default outside the repo."""
     env_path = os.environ.get(_ENV_PATH_VAR, "").strip()
     if env_path:
         return env_path
-    return os.path.join(os.getcwd(), _DEFAULT_FILENAME)
+    return _default_config_path()
 
 
 def _load_raw(path: Optional[str] = None) -> dict:
@@ -80,18 +110,49 @@ def _load_raw(path: Optional[str] = None) -> dict:
 
 
 def _save_raw(data: dict, path: Optional[str] = None) -> None:
-    """Overwrite the JSON file with `data`. Caller is responsible
-    for ensuring the containing dir exists; we create it if not."""
+    """Overwrite the JSON file with `data`. Enforces ak-nyd v2 file /
+    dir modes (0o600 on the file, 0o700 on the parent dir when we
+    create it).
+
+    Sequence:
+      1. Create parent dir if missing (0o700; won't tighten an
+         existing dir the operator manages).
+      2. Write to a `.tmp` sibling.
+      3. chmod the tmp to 0o600 BEFORE the rename — closes a
+         narrow race where a reader could open the file between
+         rename and chmod.
+      4. Atomic rename to the target path.
+      5. Belt-and-braces chmod of the final path — some
+         filesystems (or umask quirks) can drop the mode across
+         rename; explicit chmod covers those.
+    """
     if path is None:
         path = _resolve_config_path()
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
-        os.makedirs(parent, exist_ok=True)
+        os.makedirs(parent, mode=_DIR_MODE, exist_ok=True)
+        # os.makedirs honors mode only when creating — cascade a
+        # chmod on the final component so the mode is applied even
+        # if a parent already existed with a looser mode.
+        try:
+            os.chmod(parent, _DIR_MODE)
+        except OSError:
+            pass  # non-fatal
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
+    # ak-nyd v2: chmod BEFORE the rename so the file is 0o600 the
+    # instant it becomes visible under the final path.
+    try:
+        os.chmod(tmp, _FILE_MODE)
+    except OSError:
+        pass  # non-fatal — belt-and-braces chmod below covers this
     os.replace(tmp, path)
+    try:
+        os.chmod(path, _FILE_MODE)
+    except OSError:
+        pass  # non-fatal
 
 
 def lookup_password(
