@@ -15,3 +15,11 @@ CLAUDE.md
 /saved_emails/
 /uploads/
 /attachments/
+# ak-nyd v2: per-file PDF password store. Legacy default was
+# ./per_file_passwords.json (in-repo CWD) which is a landmine — the
+# gitignore entry blocks accidental commits even if operator ran an
+# old version of the CLI. New default lives outside the repo at
+# ~/.config/akkountant/per_file_passwords.json.
+per_file_passwords.json
+/per_file_passwords.json
+

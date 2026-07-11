@@ -19,14 +19,24 @@ Usage:
   python manage_pdf_password.py remove --gmail-id 19c248db3a7b7d55
 
   # Use an explicit path (defaults to $AK_PER_FILE_PASSWORDS_PATH or
-  # ./per_file_passwords.json):
+  # ~/.config/akkountant/per_file_passwords.json — ak-nyd v2):
   python manage_pdf_password.py --path /etc/akkountant/pw.json list
 
 MailProcessor's reprocess_pdf reads this store before falling back to
 _try_personal_info_passwords. See utils/per_file_passwords.py for
-lookup semantics + security notes (chmod 600 the file; treat as
-short-lived recovery scaffolding; a proper encrypted store lands
-later under ak-2ln).
+lookup semantics + security notes.
+
+ak-nyd v2 security hardening (per reviewer BOUNCE):
+  - Default path is now ~/.config/akkountant/per_file_passwords.json
+    (OUTSIDE the source tree — v1 defaulted to CWD which risked
+    accidental git commits).
+  - The store file is written 0o600 (owner rw only) after every
+    write. Parent dir is 0o700 when we create it.
+  - Backend .gitignore blocks per_file_passwords.json at any depth
+    so an operator running an old (pre-v2) CLI can't accidentally
+    commit the file.
+  - Passwords still plaintext on disk — proper encrypted store lands
+    under ak-2ln umbrella.
 
 dispatched_by: akkountant/crew/akkountant_lead (hq-wisp-6n526p)
 bead: ak-nyd
