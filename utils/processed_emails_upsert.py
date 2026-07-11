@@ -82,6 +82,35 @@ def _parse_email_date(raw_date) -> Optional[datetime]:
     return None
 
 
+def should_stamp_success(analysis_summary) -> bool:
+    """ak-bwe v2: decide whether _process_single_pdf_email should
+    stamp processedEmails with status='success' after a call to
+    _run_pdf_analysis.
+
+    Contract:
+      - True iff `analysis_summary` is a dict with `success` truthy
+        AND `failed_chunks` empty (or absent).
+      - False on None, non-dict, missing 'success', explicit
+        success=False, OR non-empty failed_chunks even when success
+        is truthy (defensive — the two should agree, but if they
+        disagree we treat any failure signal as authoritative).
+
+    The zero-loss preference: prefer to NOT stamp (re-run retries
+    the file) over stamping something that might silently lose
+    transactions. False is the safe default.
+    """
+    if not isinstance(analysis_summary, dict):
+        return False
+    if not analysis_summary.get("success"):
+        return False
+    if analysis_summary.get("failed_chunks"):
+        # success=True with non-empty failed_chunks is a
+        # contradiction the caller can't safely act on — treat
+        # as failure.
+        return False
+    return True
+
+
 def map_tool_status_to_db(tool_status: Optional[str]) -> str:
     """Public tool-status → DB-status map. Unknown / missing → 'processed'
     (matches pre-ak-bwe fallback in _handle_report_result)."""
