@@ -847,6 +847,83 @@ class TestBroadenedRealisticMultiSection(unittest.TestCase):
         self.assertIn(SectionType.MUTUAL_FUND, sections)
 
 
+class TestFallbackTagDecision(unittest.TestCase):
+    """ak-dby v2: the fallback-flag on savings_spans==0 should ONLY
+    trigger when at least one NON-SAVINGS section was detected. A
+    pure single-account statement (no HDFC-combined-statement banner
+    headers at all) also produces savings_spans==0 but must NOT be
+    tagged — there's no non-savings contamination for the strip
+    endpoint to clean up.
+
+    This test locks the decision predicate the service layer applies:
+      tag = (savings_spans == 0) AND (non_savings_spans >= 1)
+    """
+
+    def _counts(self, text):
+        """Return (savings_spans, non_savings_spans). UNKNOWN is not
+        counted on either side — matches the mailProcessorService
+        branch's predicate exactly."""
+        spans = detect_hdfc_sections(text)
+        s = sum(1 for x in spans if x.section == SectionType.SAVINGS)
+        ns = sum(
+            1 for x in spans
+            if x.section not in (SectionType.SAVINGS, SectionType.UNKNOWN)
+        )
+        return s, ns
+
+    def test_pure_single_account_should_not_tag(self):
+        """Boring single-account HDFC savings statement without any
+        combined-statement banner headers. savings_spans=0 AND
+        non_savings_spans=0 → detector correctly saw nothing → do
+        NOT tag."""
+        text = "\n".join([
+            "HDFC Bank Statement",
+            "Account Holder: Vidish Rajkumar",
+            "01/04  Salary Credit  50000",
+            "02/04  Rent Payment  25000",
+        ])
+        savings, non_savings = self._counts(text)
+        self.assertEqual(savings, 0)
+        self.assertEqual(non_savings, 0)
+        # → predicate is False → NOT tagged.
+
+    def test_combined_missing_savings_header_should_tag(self):
+        """Combined statement where the SAVINGS header was missed
+        (regex failed) but the CC / FD headers matched. savings=0
+        AND non_savings>=1 → contamination present → TAG."""
+        text = "\n".join([
+            "HDFC Bank Combined Statement",
+            "01/04  savings row that leaks",
+            "Statement of Account for : CREDIT CARD",
+            "02/04  CC purchase  1500",
+            "Statement of Account for : FIXED DEPOSIT",
+            "03/04  FD interest  750",
+        ])
+        savings, non_savings = self._counts(text)
+        self.assertEqual(savings, 0)
+        self.assertGreaterEqual(non_savings, 1)
+        # → predicate is True → TAGGED.
+
+    def test_savings_detected_no_tag_needed(self):
+        """Normal case: SAVINGS header found. Detector worked;
+        mask fires normally; no fallback tag path exercised."""
+        text = "\n".join([
+            "Statement of Account for : SAVINGS ACCOUNT",
+            "01/04 row",
+            "Statement of Account for : CREDIT CARD",
+            "02/04 CC row",
+        ])
+        savings, non_savings = self._counts(text)
+        self.assertGreaterEqual(savings, 1)
+        # → savings_spans != 0 → fallback branch not taken.
+
+    def test_empty_text_should_not_tag(self):
+        """Empty raw text → no spans → not tagged."""
+        savings, non_savings = self._counts("")
+        self.assertEqual(savings, 0)
+        self.assertEqual(non_savings, 0)
+
+
 class TestNarrationDoesNotFalsePositive(unittest.TestCase):
     """ak-dby's bare-banner patterns are anchored to line start so a
     transaction narration mentioning "savings account" mid-line can't
