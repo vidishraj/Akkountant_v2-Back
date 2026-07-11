@@ -725,10 +725,17 @@ def _handle_save_attachment(args, user_id):
 
 
 def _handle_report_result(args, user_id, transaction_service):
-    """Log the processing result for a single email and persist to processedEmails table."""
-    from datetime import datetime
+    """Log the processing result for a single email and persist to processedEmails table.
+
+    ak-bwe: the actual upsert now lives in
+    utils.processed_emails_upsert.upsert_processed_email so the
+    LLM tool-call path (this function) and the service-layer
+    stamping path (MailProcessorService._stamp_processed_email)
+    share one implementation. Behavior is identical whichever
+    caller signals completion.
+    """
     from models.processedEmails import ProcessedEmails
-    from sqlalchemy.exc import IntegrityError
+    from utils.processed_emails_upsert import upsert_processed_email
 
     status = args.get("status", "unknown")
     category = args.get("category", "unknown")
@@ -742,87 +749,60 @@ def _handle_report_result(args, user_id, transaction_service):
         f"{', msg=' + message if message else ''}"
     )
 
-    # Persist to processedEmails table
     if not gmail_id or not user_id:
         return {"result": "logged", "status": status, "persisted": False}
-
-    # Map tool status to DB status
-    status_map = {"success": "processed", "skipped": "skipped", "error": "failed"}
-    db_status = status_map.get(status, "processed")
-
-    # Parse email_date if provided
-    email_date = None
-    raw_date = args.get("email_date")
-    if raw_date:
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%dT%H:%M:%S"):
-            try:
-                email_date = datetime.strptime(raw_date, fmt)
-                break
-            except ValueError:
-                continue
 
     session = _get_db_session(transaction_service)
     if not session:
         return {"result": "logged", "status": status, "persisted": False}
 
-    try:
-        row = ProcessedEmails(
-            gmail_id=gmail_id,
-            user_id=user_id,
-            sender=args.get("sender"),
-            subject=args.get("subject"),
-            email_date=email_date,
-            category=category,
-            processing_type=args.get("processing_type"),
-            status=db_status,
-            items_extracted=items or 0,
-            extraction_summary=args.get("extraction_summary"),
-            error_message=message if db_status == "failed" else None,
-        )
-        session.add(row)
-        session.commit()
+    result = upsert_processed_email(
+        session,
+        ProcessedEmails,
+        gmail_id=gmail_id,
+        user_id=user_id,
+        sender=args.get("sender"),
+        subject=args.get("subject"),
+        email_date=args.get("email_date"),
+        category=category,
+        processing_type=args.get("processing_type"),
+        status=status,
+        items_extracted=items or 0,
+        extraction_summary=args.get("extraction_summary"),
+        error_message=message,
+    )
 
-        # Auto-link to freelance customer if sender matches
+    if result.get("status") in ("inserted", "updated"):
+        # Auto-link to freelance customer if sender matches. Only run
+        # when we know a row exists; needs the row instance so we
+        # re-query.
         try:
-            from services.customerEmailService import CustomerEmailService
-            ce_service = CustomerEmailService()
-            ce_service.auto_link_email(row, user_id)
+            row = session.query(ProcessedEmails).filter_by(
+                gmail_id=gmail_id, user_id=user_id,
+            ).first()
+            if row is not None:
+                from services.customerEmailService import CustomerEmailService
+                ce_service = CustomerEmailService()
+                ce_service.auto_link_email(row, user_id)
         except Exception:
             pass  # Non-critical, don't break email processing
+        return {
+            "result": "logged",
+            "status": status,
+            "persisted": True,
+            "updated": result["status"] == "updated",
+        }
 
-        return {"result": "logged", "status": status, "persisted": True}
-    except IntegrityError:
-        # Duplicate gmail_id+user_id — update the existing row
-        session.rollback()
-        try:
-            existing = session.query(ProcessedEmails).filter_by(
-                gmail_id=gmail_id, user_id=user_id
-            ).first()
-            if existing:
-                existing.category = category
-                existing.status = db_status
-                existing.items_extracted = items or 0
-                existing.extraction_summary = args.get("extraction_summary")
-                existing.processing_type = args.get("processing_type")
-                if db_status == "failed":
-                    existing.error_message = message
-                session.commit()
-
-                # Auto-link on update too
-                if existing:
-                    try:
-                        from services.customerEmailService import CustomerEmailService
-                        ce_service = CustomerEmailService()
-                        ce_service.auto_link_email(existing, user_id)
-                    except Exception:
-                        pass
-
-            return {"result": "logged", "status": status, "persisted": True, "updated": True}
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Failed to update existing processedEmails row: {e}")
-            return {"result": "logged", "status": status, "persisted": False}
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Failed to persist processedEmails row: {e}")
-        return {"result": "logged", "status": status, "persisted": False}
+    # Helper returned "failed" or an unexpected shape — log and
+    # bubble up. The helper has already rolled back the session and
+    # logged the specific error internally.
+    logger.error(
+        f"ak-bwe: upsert_processed_email returned "
+        f"{result.get('status')!r} for gmail_id={gmail_id!r}: "
+        f"{result.get('reason', '(no reason)')}"
+    )
+    return {
+        "result": "logged",
+        "status": status,
+        "persisted": False,
+    }
