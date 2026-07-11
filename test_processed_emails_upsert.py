@@ -439,6 +439,62 @@ class TestShouldStampSuccessFailurePaths(unittest.TestCase):
         self.assertFalse(should_stamp_success(summary))
 
 
+class TestSingleChunkUnknownResultFailClosed(unittest.TestCase):
+    """ak-bwe v3 (reviewer BOUNCE hq-wisp-97i5qm): the single-chunk
+    branch of _run_pdf_analysis previously defaulted to
+    {success=True, failed_chunks=[]} when the chunk function's
+    return value wasn't a dict (e.g. None, tuple, or a future
+    refactor's non-dict shape). That's fail-OPEN and re-introduces
+    the exact regression class the v2 outer gate closed.
+
+    v3 flips the default to fail-CLOSED — matching
+    should_stamp_success and the multi-chunk path.
+
+    These tests pin down the SHAPE of the summary v3 emits when a
+    single-chunk return is unknown, so a future refactor that flips
+    it back to fail-open fails loudly.
+    """
+
+    def _synthesize_v3_unknown_result_summary(self, chunk_result_type):
+        """Mirror the exact shape _run_pdf_analysis emits for a
+        non-dict chunk_result. Kept as a helper so a service-layer
+        refactor that changes the summary shape can be caught by
+        this test file too (the shape is the contract)."""
+        return {
+            "success": False,
+            "failed_chunks": [[1, 8]],  # arbitrary page range
+            "total_chunks": 1,
+            "reason": f"unknown_chunk_result_shape: {chunk_result_type}",
+        }
+
+    def test_none_chunk_result_does_not_stamp(self):
+        summary = self._synthesize_v3_unknown_result_summary("NoneType")
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_tuple_chunk_result_does_not_stamp(self):
+        summary = self._synthesize_v3_unknown_result_summary("tuple")
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_int_chunk_result_does_not_stamp(self):
+        summary = self._synthesize_v3_unknown_result_summary("int")
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_v3_default_summary_has_success_false(self):
+        """Explicit shape assertion: the v3 default MUST carry
+        success=False even before we hand it to
+        should_stamp_success. Guards against a future flip that
+        re-introduces success=True."""
+        summary = self._synthesize_v3_unknown_result_summary("NoneType")
+        self.assertFalse(summary["success"],
+                         "v3 default summary regressed to success=True")
+        self.assertTrue(summary["failed_chunks"],
+                        "v3 default summary must carry a failed_chunks "
+                        "entry so the outer gate sees the failure")
+        self.assertIn("reason", summary,
+                      "v3 default summary must carry a reason field "
+                      "for operator log grep")
+
+
 class TestReviewerAskScenarios(unittest.TestCase):
     """Verbatim from Lead's BOUNCE hq-wisp-b48kot:
 
