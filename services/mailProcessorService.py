@@ -146,6 +146,19 @@ class MailProcessorService:
         bank: Bank identifier for format rule injection (default HDFC_DEBIT).
         only_chunks: Optional list of [start, end] page ranges to process,
             e.g. [[31,32],[11,12]]. Skips all other chunks.
+
+        ak-uvy blocking guarantee: this method is SYNCHRONOUS. All
+        chunk processing happens inside anyio.run(...) inside
+        _run_pdf_analysis (which is called below), so this method
+        does not return until every chunk has finished (success or
+        failure). Direct callers (scripts, backfill drivers) can
+        trust the return value the moment reprocess_pdf returns.
+        The async completion race that leaked 618 rows in the
+        ak-32o run only affects callers that hit the HTTP endpoint
+        /readEmails (which spawns a thread); use
+        TransactionController.wait_for_scan_completion(scan_id) or
+        GET /readEmails/status?scan_id=…&wait=true to block on
+        that path.
         """
         import glob as _glob
 

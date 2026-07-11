@@ -112,10 +112,24 @@ class TransactionController:
         if not self.mail_processor:
             return jsonify({"error": "Mail processor not configured"}), 500
 
+        # ak-uvy: create a per-scan threading.Event so any caller
+        # (poller, wait_for_scan_completion, /readEmails/wait) can
+        # block cleanly until the background thread hits a terminal
+        # status. Fixes the race that leaked 618 rows in the ak-32o
+        # elapsed-hour window.
+        from utils.scan_wait import make_scan_event, signal_terminal
+        # v2: uuid4 is unguessable (128 bits of entropy) and we
+        # store user_id in the progress dict so getEmailScanStatus
+        # can verify a caller isn't probing another user's scan.
         scan_id = str(uuid.uuid4())[:8]
         progress = {
             "status": "started",
             "stage": "initializing",
+            # ak-uvy v2 (reviewer MINOR 2): user_id scoping. Any
+            # caller with a leaked scan_id from another user still
+            # can't observe it — the endpoint checks user_id
+            # against g.firebase_id before returning.
+            "user_id": userId,
             "total_emails_fetched": 0,
             "emails_classified": 0,
             "text_emails_processed": 0,
@@ -125,6 +139,10 @@ class TransactionController:
             "pre_skipped": 0,
             "errors": [],
             "result": None,
+            # Private (underscore-prefixed) so scan_progress_for_client
+            # strips it before JSON-encoding. Not exposed to the
+            # HTTP client.
+            "_event": make_scan_event(),
         }
 
         with self._scans_lock:
@@ -160,6 +178,16 @@ class TransactionController:
                         "stage": "error",
                         "errors": [str(e)],
                     })
+            finally:
+                # ak-uvy v2 (reviewer note): signal_terminal in a
+                # `finally` so BaseException (KeyboardInterrupt /
+                # SystemExit / thread cancellation) still unpins any
+                # HTTP wait=true caller. Fires exactly once
+                # regardless of the terminal branch.
+                with self._scans_lock:
+                    progress_ref = self._scans.get(scan_id)
+                    if progress_ref is not None:
+                        signal_terminal(progress_ref)
 
         thread = threading.Thread(target=run_scan, daemon=True)
         thread.start()
@@ -168,18 +196,114 @@ class TransactionController:
 
     @Logger.standardLogger
     def getEmailScanStatus(self):
-        """GET /readEmails/status?scan_id=xxx — Poll scan progress."""
+        """GET /readEmails/status?scan_id=xxx[&wait=true[&timeout=N]]
+
+        ak-uvy: `wait=true` blocks the request handler up to
+        `timeout` seconds waiting for the background thread's
+        completion signal. Response body always includes
+        `is_terminal` bool so callers switch on that instead of
+        trying to match status strings.
+
+        ak-uvy v2 (reviewer MAJOR): the HTTP path NEVER passes
+        `timeout=None` to event.wait — a hanging scan would pin the
+        gunicorn worker indefinitely. Client-supplied timeout is
+        clamped to HTTP_MAX_WAIT_SECONDS (30s default). Callers
+        that need longer waits use long-poll semantics: re-poll on
+        non-terminal return until is_terminal==True.
+
+        ak-uvy v2 (reviewer MINOR 1): read-path also runs a lazy
+        eviction sweep against SCAN_TTL_SECONDS so the _scans
+        registry can't grow without bound.
+
+        ak-uvy v2 (reviewer MINOR 2): user_id scoping. If the
+        scan's stored user_id doesn't match g.firebase_id, return
+        404 (same shape as scan-not-found — don't leak existence).
+        """
+        from utils.scan_wait import (
+            HTTP_MAX_WAIT_SECONDS,
+            SCAN_TTL_SECONDS,
+            clamp_http_wait_timeout,
+            evict_completed_scans,
+            scan_progress_for_client,
+            scope_scan_to_user,
+            wait_for_scan_completion,
+        )
+
         scan_id = request.args.get('scan_id')
         if not scan_id:
             return jsonify({"error": "scan_id is required"}), 400
 
-        with self._scans_lock:
-            progress = self._scans.get(scan_id)
+        # v2 MINOR 1: lazy eviction on every read.
+        try:
+            evicted = evict_completed_scans(
+                self._scans, self._scans_lock,
+                ttl_seconds=SCAN_TTL_SECONDS,
+            )
+            if evicted:
+                self.logger.debug(
+                    f"ak-uvy v2: evicted {evicted} completed scan "
+                    f"entrie(s) past {SCAN_TTL_SECONDS}s TTL"
+                )
+        except Exception:
+            pass  # eviction is best-effort; never fail the read
+
+        wait_flag = str(request.args.get("wait", "")).strip().lower() in (
+            "1", "true", "yes",
+        )
+        # v2 MAJOR: server-side cap. Any HTTP wait — with or without
+        # a client-supplied timeout — is clamped to
+        # HTTP_MAX_WAIT_SECONDS. Non-numeric timeout falls back to
+        # the cap default (was: 400 error; v2 tolerates + clamps).
+        raw_timeout = request.args.get("timeout") if wait_flag else None
+        if wait_flag:
+            timeout = clamp_http_wait_timeout(
+                raw_timeout, max_seconds=HTTP_MAX_WAIT_SECONDS,
+            )
+            progress = wait_for_scan_completion(
+                self._scans, self._scans_lock, scan_id, timeout=timeout,
+            )
+        else:
+            with self._scans_lock:
+                progress = self._scans.get(scan_id)
 
         if not progress:
             return jsonify({"error": "Scan not found"}), 404
 
-        return jsonify(progress), 200
+        # v2 MINOR 2: scoping. If the scan belongs to a different
+        # user, return 404 to avoid leaking existence.
+        expected_user_id = g.get('firebase_id') or request.headers.get("X-Firebase-ID")
+        if not scope_scan_to_user(progress, expected_user_id):
+            self.logger.warning(
+                f"ak-uvy v2 scoping: scan_id={scan_id!r} probed by "
+                f"user={expected_user_id!r} but belongs to a different "
+                f"user; returning 404."
+            )
+            return jsonify({"error": "Scan not found"}), 404
+
+        return jsonify(scan_progress_for_client(progress)), 200
+
+    def wait_for_scan_completion(self, scan_id, timeout=None):
+        """ak-uvy programmatic API: block until the scan hits a
+        terminal state (or timeout elapses). Used by orchestrators
+        that run in-process and don't want the HTTP hop.
+
+        Not on a request thread — the HTTP MAJOR (worker DoS) does
+        NOT apply here. Callers can pass timeout=None for an
+        unbounded wait, or a large number, at their own risk.
+
+        Returns the progress dict (with `is_terminal` injected) or
+        None if scan_id doesn't exist.
+        """
+        from utils.scan_wait import (
+            scan_progress_for_client,
+            wait_for_scan_completion,
+        )
+        progress = wait_for_scan_completion(
+            self._scans, self._scans_lock, scan_id, timeout=timeout,
+        )
+        if progress is None:
+            return None
+        return scan_progress_for_client(progress)
 
     @Logger.standardLogger
     def triggerStatementCheck(self):
