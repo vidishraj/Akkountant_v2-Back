@@ -1572,12 +1572,28 @@ class MailProcessorService:
                         "total_chunks": 1,
                     }
                 else:
-                    # Unknown return shape — safest default is
-                    # success=True (matches pre-ak-bwe-v2 behavior
-                    # where anyio.run's return was ignored). Callers
-                    # that need stricter can inspect this and re-run.
-                    summary = {"success": True, "failed_chunks": [],
-                               "total_chunks": 1}
+                    # ak-bwe v3 (reviewer BOUNCE hq-wisp-97i5qm):
+                    # unknown / None return → default to fail-CLOSED.
+                    # Prior fail-OPEN default was the exact regression
+                    # class v2's MAJOR fix closed at the outer gate:
+                    # a chunk function returning None (or a shape
+                    # future refactors don't preserve) would flow
+                    # through should_stamp_success → True → stamp
+                    # 'processed' → skip forever → silent loss.
+                    # should_stamp_success is fail-closed; the
+                    # multi-chunk path is fail-closed; this spot must
+                    # match. Zero-loss preference: prefer to NOT
+                    # stamp, re-run absorbs the already-done chunk
+                    # via ak-8l5 dedup.
+                    summary = {
+                        "success": False,
+                        "failed_chunks": [[1, total_pages]],
+                        "total_chunks": 1,
+                        "reason": (
+                            f"unknown_chunk_result_shape: "
+                            f"{type(chunk_result).__name__}"
+                        ),
+                    }
             elif total_pages <= pages_per_chunk and processing_mode == "text":
                 # Small PDF in text mode — use structured output path
                 file_id = f"mail_pipeline_{user_id}_{bank}_{gmail_id}"
