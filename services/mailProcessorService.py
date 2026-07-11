@@ -1838,6 +1838,28 @@ class MailProcessorService:
                         consecutive_failures = 0
 
             if failed_chunks:
+                # ak-n44: emit one structured chunk_error per failed
+                # range so a per-file per-chunk report is a single
+                # grep away. Follows the aggregate free-form
+                # WARNING below for backward compat with any log
+                # consumer that already parses the aggregate line.
+                from utils.pipeline_logging import emit_chunk_error
+                for i, pair in enumerate(failed_chunks):
+                    try:
+                        page_range = list(pair) if isinstance(pair, (list, tuple)) else [pair]
+                    except Exception:
+                        page_range = None
+                    emit_chunk_error(
+                        self.logger,
+                        file_id=file_id,
+                        chunk_index=i,
+                        chunks_total=len(failed_chunks),
+                        page_range=page_range,
+                        message="chunk failed after inner retries — "
+                                "aggregated by _run_all_chunks_async",
+                        error_type="analysis_exception",
+                        extra={"processing_mode": processing_mode},
+                    )
                 self.logger.warning(
                     f"Failed chunks (retry with only_chunks): {failed_chunks}"
                 )
@@ -2009,6 +2031,23 @@ class MailProcessorService:
             return
 
         # DIVERGED — fallback.
+        # ak-n44: structured event so a grep for
+        # '"event":"reconciliation_divergent"' produces a
+        # per-file ledger of every divergence + the extracted vs
+        # stated totals + which checks fired.
+        from utils.pipeline_logging import emit_reconciliation_divergent
+        emit_reconciliation_divergent(
+            self.logger,
+            file_id=file_id,
+            bank=detected_bank,
+            extracted_debits=recon.extracted_debits,
+            extracted_credits=recon.extracted_credits,
+            stated_debits=recon.stated_debits,
+            stated_credits=recon.stated_credits,
+            checked_fields=recon.checked_fields,
+            reason=recon.reason,
+            extra={"num_chunks": num_chunks},
+        )
         self.logger.warning(
             f"ak-ifc file-reconciliation: DIVERGED — masked extraction "
             f"totals disagree with the PDF's savings summary at file "
@@ -2469,6 +2508,22 @@ class MailProcessorService:
             and attempts_used <= MAX_RETRIES
         ):
             delay = retry_delay_seconds(attempts_used - 1)
+            # ak-n44: structured chunk-retry event so a single
+            # `grep '"event":"chunk_retry"' | jq` produces a
+            # per-file per-chunk retry ledger.
+            from utils.pipeline_logging import emit_chunk_retry
+            emit_chunk_retry(
+                self.logger,
+                file_id=preset_file_id,
+                page_range=[page_start, page_end],
+                attempt=attempts_used,
+                max_attempts=MAX_RETRIES + 1,
+                message=str(run_result.error),
+                extra={
+                    "delay_seconds": delay,
+                    "processing_mode": "text",
+                },
+            )
             self.logger.warning(
                 f"ak-wty: transient SDK error on chunk "
                 f"{page_start}-{page_end} (file_id={preset_file_id!r}) "
@@ -2492,8 +2547,22 @@ class MailProcessorService:
 
         if error_msg:
             # ak-wty: retries exhausted (or non-retryable error).
-            # Log with all the observability fields so a follow-up
-            # sweep can find the file.
+            # ak-n44: emit structured chunk_error so the operator's
+            # grep produces a full per-chunk failure record
+            # (fileID + page range + error_type + attempts +
+            # retryable flag) without hand-parsing free-form text.
+            from utils.pipeline_logging import emit_chunk_error
+            emit_chunk_error(
+                self.logger,
+                file_id=preset_file_id,
+                page_range=[page_start, page_end],
+                message=str(error_msg),
+                extra={
+                    "attempts_used": attempts_used,
+                    "retryable": is_retryable_sdk_error(error_msg),
+                    "processing_mode": "text",
+                },
+            )
             self.logger.error(
                 f"ak-wty: text chunk error unresolved after "
                 f"{attempts_used} attempt(s). "
