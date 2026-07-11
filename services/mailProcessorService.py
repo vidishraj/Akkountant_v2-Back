@@ -840,17 +840,37 @@ class MailProcessorService:
                     if unlocked_path:
                         pdf_path = unlocked_path
                         password = None  # PDF is now unlocked
-                self._run_pdf_analysis(pdf_path, email, user_id, password, processing_mode)
-
-                # ak-bwe: stamp processedEmails BEFORE the persist
-                # path so _update_processed_email_pdf's UPDATE call
-                # below has a row to update. Idempotency for
-                # backfill re-runs — _filter_already_processed sees
-                # this row on the next pass and skips the file.
-                self._stamp_processed_email(
-                    email, user_id, category=email.get("_category", "bank_statement"),
-                    status="success",
+                analysis_summary = self._run_pdf_analysis(
+                    pdf_path, email, user_id, password, processing_mode,
                 )
+
+                # ak-bwe v2 (reviewer BOUNCE hq-wisp-b48kot):
+                # GATE the stamp on genuine ingest success. Only
+                # stamp status='success' when _run_pdf_analysis
+                # reports success=True AND no failed_chunks
+                # residual. On partial/persistent failure DO NOT
+                # stamp — _filter_already_processed re-processes
+                # anything that isn't 'processed' → next run
+                # retries the file → ak-8l5 dedup absorbs
+                # already-done chunks and only the missed rows
+                # land. Symmetric with ak-wty (retry) + ak-ifc
+                # (reconciliation fallback): all three lean on
+                # re-runs to close the loop.
+                from utils.processed_emails_upsert import should_stamp_success
+                if should_stamp_success(analysis_summary):
+                    self._stamp_processed_email(
+                        email, user_id,
+                        category=email.get("_category", "bank_statement"),
+                        status="success",
+                    )
+                else:
+                    self.logger.warning(
+                        f"ak-bwe v2: NOT stamping processedEmails "
+                        f"for gmail_id={gmail_id!r} — ingest not fully "
+                        f"successful (summary={analysis_summary!r}). "
+                        f"Next run will re-attempt; ak-8l5 dedup "
+                        f"absorbs the already-done chunks."
+                    )
 
                 # Only persist PDF after successful processing
                 try:
@@ -1484,15 +1504,38 @@ class MailProcessorService:
 
         Uses a single anyio.run() event loop for ALL chunks to prevent
         connection/resource leaks from repeated event loop creation.
+
+        ak-bwe v2 (reviewer BOUNCE hq-wisp-b48kot): returns a summary
+        dict {success: bool, failed_chunks: list, total_chunks: int,
+        reason: str} so the caller (_process_single_pdf_email) can
+        gate the processedEmails stamp on genuine ingest success.
+        Prior version returned None and callers hardcoded status=
+        'success', which stamped 'processed' for persistently-failed
+        ingests → _filter_already_processed skipped forever → silent
+        transaction loss. Inverted the exact recovery ak-wty + ak-ifc
+        were built to provide.
+
+        Any unhandled exception is caught and reflected as
+        success=False so a caller-facing raise can't accidentally
+        skip the stamping decision.
         """
         import fitz as _fitz
 
         # Count pages to decide if chunking is needed
-        doc = _fitz.open(pdf_path)
-        if doc.needs_pass and password:
-            doc.authenticate(password)
-        total_pages = doc.page_count
-        doc.close()
+        try:
+            doc = _fitz.open(pdf_path)
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            total_pages = doc.page_count
+            doc.close()
+        except Exception as e:
+            self.logger.error(
+                f"ak-bwe v2: PDF open failed for {pdf_path!r}: {e}. "
+                f"Reporting ingest as FAILED."
+            )
+            return {"success": False, "failed_chunks": [],
+                    "total_chunks": 0,
+                    "reason": f"pdf_open_failed: {e}"}
 
         # Auto-detect: if PDF has extractable text, prefer text mode
         if processing_mode == "image" and self._pdf_has_usable_text(pdf_path, password):
@@ -1508,43 +1551,73 @@ class MailProcessorService:
         # Text mode can handle more pages per chunk since text is small
         pages_per_chunk = self.TEXT_PAGES_PER_CHUNK if processing_mode == "text" else self.PAGES_PER_CHUNK
 
-        if total_pages <= pages_per_chunk and processing_mode != "text":
-            # Small PDF in image mode — single MCP query handles everything
-            anyio.run(self._run_pdf_chunk_async,
-                pdf_path, email, user_id, password,
-                1, total_pages, total_pages,
-                True, False, None, processing_mode,
-            )
-        elif total_pages <= pages_per_chunk and processing_mode == "text":
-            # Small PDF in text mode — use structured output path
-            file_id = f"mail_pipeline_{user_id}_{bank}_{gmail_id}"
-            anyio.run(
-                self._run_all_chunks_async,
-                pdf_path, email, user_id, password,
-                total_pages, pages_per_chunk, file_id,
-                processing_mode, only_chunks,
-            )
-            self._post_chunk_reconciliation(file_id, gmail_id, user_id)
-        else:
-            # Large PDF — split into chunks with separate queries
-            # Pre-create a single file_id so all chunks share it
-            file_id = f"mail_pipeline_{user_id}_{bank}_{gmail_id}"
+        summary = {"success": False, "failed_chunks": [], "total_chunks": 0}
+        try:
+            if total_pages <= pages_per_chunk and processing_mode != "text":
+                # Small PDF in image mode — single MCP query handles everything
+                chunk_result = anyio.run(self._run_pdf_chunk_async,
+                    pdf_path, email, user_id, password,
+                    1, total_pages, total_pages,
+                    True, False, None, processing_mode,
+                )
+                # ak-bwe v2: derive success from the single-chunk result.
+                # `called=False` OR an `sdk_error` field means the chunk
+                # didn't land tx cleanly.
+                if isinstance(chunk_result, dict):
+                    called = chunk_result.get("called", False)
+                    sdk_error = chunk_result.get("sdk_error")
+                    summary = {
+                        "success": bool(called) and not sdk_error,
+                        "failed_chunks": [] if called and not sdk_error else [[1, total_pages]],
+                        "total_chunks": 1,
+                    }
+                else:
+                    # Unknown return shape — safest default is
+                    # success=True (matches pre-ak-bwe-v2 behavior
+                    # where anyio.run's return was ignored). Callers
+                    # that need stricter can inspect this and re-run.
+                    summary = {"success": True, "failed_chunks": [],
+                               "total_chunks": 1}
+            elif total_pages <= pages_per_chunk and processing_mode == "text":
+                # Small PDF in text mode — use structured output path
+                file_id = f"mail_pipeline_{user_id}_{bank}_{gmail_id}"
+                summary = anyio.run(
+                    self._run_all_chunks_async,
+                    pdf_path, email, user_id, password,
+                    total_pages, pages_per_chunk, file_id,
+                    processing_mode, only_chunks,
+                ) or summary
+                self._post_chunk_reconciliation(file_id, gmail_id, user_id)
+            else:
+                # Large PDF — split into chunks with separate queries
+                # Pre-create a single file_id so all chunks share it
+                file_id = f"mail_pipeline_{user_id}_{bank}_{gmail_id}"
 
-            self.logger.info(
-                f"Large PDF ({total_pages} pages) — splitting into "
-                f"chunks of {pages_per_chunk} ({processing_mode} mode)"
-            )
+                self.logger.info(
+                    f"Large PDF ({total_pages} pages) — splitting into "
+                    f"chunks of {pages_per_chunk} ({processing_mode} mode)"
+                )
 
-            # Run ALL chunks inside a single event loop
-            anyio.run(
-                self._run_all_chunks_async,
-                pdf_path, email, user_id, password,
-                total_pages, pages_per_chunk, file_id,
-                processing_mode, only_chunks,
-            )
+                # Run ALL chunks inside a single event loop
+                summary = anyio.run(
+                    self._run_all_chunks_async,
+                    pdf_path, email, user_id, password,
+                    total_pages, pages_per_chunk, file_id,
+                    processing_mode, only_chunks,
+                ) or summary
 
-            # After all chunks: run reconciliation once using actual date range
-            self._post_chunk_reconciliation(file_id, gmail_id, user_id)
+                # After all chunks: run reconciliation once using actual date range
+                self._post_chunk_reconciliation(file_id, gmail_id, user_id)
+        except Exception as e:
+            self.logger.error(
+                f"ak-bwe v2: _run_pdf_analysis top-level failure: {e}. "
+                f"Reporting ingest as FAILED so processedEmails stamp "
+                f"is skipped (next run retries the file)."
+            )
+            summary = {"success": False, "failed_chunks": [],
+                       "total_chunks": summary.get("total_chunks", 0),
+                       "reason": f"analysis_exception: {e}"}
+        return summary
 
     async def _run_all_chunks_async(self, pdf_path, email, user_id, password,
                                      total_pages, pages_per_chunk, file_id,
@@ -1733,8 +1806,23 @@ class MailProcessorService:
             self.logger.error(
                 f"PDF chunk processing error: {e}"
             )
+            # ak-bwe v2 (reviewer BOUNCE hq-wisp-b48kot): the top-level
+            # exception path also constitutes a failed ingest —
+            # propagate as False so _process_single_pdf_email doesn't
+            # stamp 'processed' for a file that lost tx.
+            return {"success": False, "failed_chunks": failed_chunks,
+                    "reason": f"top_level_exception: {e}"}
         finally:
             pass  # query() manages its own lifecycle per chunk
+
+        # ak-bwe v2: return a summary so callers can gate the
+        # processedEmails stamp on genuine ingest success. Zero
+        # failed_chunks AND no exception → success.
+        return {
+            "success": not failed_chunks,
+            "failed_chunks": list(failed_chunks),
+            "total_chunks": len(chunks),
+        }
 
     async def _run_hdfc_file_level_reconciliation(
         self, pdf_path, email, user_id, password,

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.processed_emails_upsert import (
     map_tool_status_to_db,
+    should_stamp_success,
     upsert_processed_email,
 )
 
@@ -364,6 +365,107 @@ class TestIdempotencyScenario(unittest.TestCase):
         )
         self.assertEqual(sess.rows[("gm_y", "u1")].status, "processed")
         self.assertEqual(sess.rows[("gm_y", "u1")].items_extracted, 15)
+
+
+# ── ak-bwe v2: should_stamp_success gating (reviewer MAJOR) ────────
+
+
+class TestShouldStampSuccessSuccessPath(unittest.TestCase):
+    """Genuine full-ingest success → stamp is allowed."""
+
+    def test_success_true_no_failed_chunks_stamps(self):
+        summary = {"success": True, "failed_chunks": [],
+                   "total_chunks": 4}
+        self.assertTrue(should_stamp_success(summary))
+
+    def test_success_true_missing_failed_chunks_field(self):
+        """Absent failed_chunks field → treat as empty → stamp."""
+        summary = {"success": True, "total_chunks": 4}
+        self.assertTrue(should_stamp_success(summary))
+
+    def test_success_true_single_chunk_no_failed(self):
+        summary = {"success": True, "failed_chunks": [],
+                   "total_chunks": 1}
+        self.assertTrue(should_stamp_success(summary))
+
+
+class TestShouldStampSuccessFailurePaths(unittest.TestCase):
+    """The MAJOR ak-bwe-v2 guarantee: any signal of failure /
+    partial ingest / missing summary → do NOT stamp so
+    _filter_already_processed re-processes on the next run."""
+
+    def test_success_false_does_not_stamp(self):
+        summary = {"success": False, "failed_chunks": [[3, 4]],
+                   "total_chunks": 8}
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_success_true_but_failed_chunks_does_not_stamp(self):
+        """A summary claiming success=True BUT with residual
+        failed_chunks is treated as failure — the two disagree and
+        we side with the failure signal. Prevents a bad status
+        merge from silently permitting the stamp."""
+        summary = {"success": True, "failed_chunks": [[5, 6]],
+                   "total_chunks": 8}
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_none_does_not_stamp(self):
+        """_run_pdf_analysis returning None (legacy / exception
+        path that predates ak-bwe-v2) must NOT stamp — the whole
+        point of the gating."""
+        self.assertFalse(should_stamp_success(None))
+
+    def test_non_dict_does_not_stamp(self):
+        for form in ("success", 42, True, [1, 2], object()):
+            with self.subTest(form=form):
+                self.assertFalse(should_stamp_success(form))
+
+    def test_empty_dict_does_not_stamp(self):
+        self.assertFalse(should_stamp_success({}))
+
+    def test_exception_reason_does_not_stamp(self):
+        """The analysis-exception path in _run_pdf_analysis
+        returns {success: False, reason: 'analysis_exception: …'}
+        — must not stamp regardless of other fields."""
+        summary = {"success": False, "failed_chunks": [],
+                   "total_chunks": 0,
+                   "reason": "analysis_exception: SDK died"}
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_pdf_open_failed_does_not_stamp(self):
+        """Early-fail path — PDF couldn't even be opened."""
+        summary = {"success": False, "failed_chunks": [],
+                   "total_chunks": 0,
+                   "reason": "pdf_open_failed: file not found"}
+        self.assertFalse(should_stamp_success(summary))
+
+
+class TestReviewerAskScenarios(unittest.TestCase):
+    """Verbatim from Lead's BOUNCE hq-wisp-b48kot:
+
+      failed/partial _run_pdf_analysis does NOT leave a
+      status='processed' row.
+
+    These tests capture the exact zero-loss regression the reviewer
+    flagged so a future rewrite fails loudly if the gating slips."""
+
+    def test_partial_failure_leaves_no_processed_row(self):
+        summary = {"success": False,
+                   "failed_chunks": [[3, 4], [5, 6]],
+                   "total_chunks": 8}
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_persistent_failure_leaves_no_processed_row(self):
+        summary = {"success": False, "failed_chunks": [[1, 8]],
+                   "total_chunks": 8,
+                   "reason": "retries exhausted"}
+        self.assertFalse(should_stamp_success(summary))
+
+    def test_pre_ak_bwe_return_none_leaves_no_processed_row(self):
+        """A caller that hasn't been migrated to the new return
+        contract (legacy) hands us None. Must NOT stamp — same
+        conservative default the pre-ak-bwe path had for the
+        UPDATE-only race."""
+        self.assertFalse(should_stamp_success(None))
 
 
 if __name__ == "__main__":
