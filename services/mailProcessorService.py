@@ -2058,30 +2058,40 @@ class MailProcessorService:
                     f"all transactions."
                 )
                 hdfc_mask = None
-                # ak-dby: when the detector misses (regex doesn't
-                # match any SAVINGS header — the exact pathology of
-                # the 2026 Vidish_Raj_ layout), the full-text
-                # fallback re-admits non-savings sub-account rows
-                # into the savings fileID. Mark the file so the
-                # /admin/stripFallbackRows endpoint (ak-ex2) picks it
-                # up on the next re-parse sweep. Same pattern as the
-                # ak-ifc-v3 file-level reconciliation fallback path,
-                # different trigger.
+                # ak-dby v2 (reviewer BOUNCE hq-wisp-*): the flag is
+                # only appropriate when the detector saw a
+                # combined-statement shape but MISSED the savings
+                # header specifically — i.e. non-savings sub-accounts
+                # WERE detected. A pure single-account statement (no
+                # section headers at all) also produces
+                # savings_spans==0 but shouldn't be flagged, because
+                # there's no non-savings contamination for the strip
+                # endpoint to clean up.
                 #
-                # Only mark when we have a preset_file_id — if the
-                # extractor is running against an ad-hoc PDF path
-                # (rare, non-pipeline), there's no fileDetails row
-                # to tag.
-                if preset_file_id:
+                # Compute non_savings_span_count from the same spans
+                # the mask computation returned.
+                from utils.statement_sections import SectionType
+                non_savings_span_count = sum(
+                    1 for s in spans
+                    if s.section not in (
+                        SectionType.SAVINGS,
+                        SectionType.UNKNOWN,
+                    )
+                )
+                if preset_file_id and non_savings_span_count >= 1:
                     try:
                         self.transaction_service.mark_reconciliation_fallback(
                             preset_file_id, user_id=user_id,
                         )
                         self.logger.info(
                             f"ak-dby: tagged fileID={preset_file_id!r} "
-                            f"reconciliation_fallback=True (savings_spans=0 "
-                            f"detector miss) so /admin/stripFallbackRows "
-                            f"can clean up leaked non-savings tx."
+                            f"reconciliation_fallback=True "
+                            f"(savings_spans=0 AND "
+                            f"non_savings_spans={non_savings_span_count} — "
+                            f"combined-statement layout whose savings "
+                            f"header regex missed) so "
+                            f"/admin/stripFallbackRows can clean up "
+                            f"leaked non-savings tx."
                         )
                     except Exception as e:  # pragma: no cover — defensive
                         self.logger.warning(
@@ -2090,6 +2100,18 @@ class MailProcessorService:
                             f"lands regardless; strip endpoint won't fire "
                             f"until the file is tagged manually."
                         )
+                else:
+                    # savings_spans=0 AND non_savings_spans=0 →
+                    # pure single-account statement (or full-doc
+                    # UNKNOWN). No contamination possible; nothing
+                    # to strip. Skip the tag.
+                    self.logger.info(
+                        f"ak-dby: NOT tagging fileID={preset_file_id!r} "
+                        f"(savings_spans=0, non_savings_spans="
+                        f"{non_savings_span_count}) — likely a "
+                        f"pure single-account statement with no "
+                        f"combined-layout contamination."
+                    )
 
         # Now pull the chunk's text, annotate each line with its
         # file-level line number so the LLM can echo the correct
