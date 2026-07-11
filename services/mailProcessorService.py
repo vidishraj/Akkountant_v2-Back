@@ -1620,12 +1620,204 @@ class MailProcessorService:
                 self.logger.warning(
                     f"Failed chunks (retry with only_chunks): {failed_chunks}"
                 )
+
+            # ── ak-ifc v3: file-level savings-summary reconciliation ──
+            # After ALL chunks have inserted, compare the aggregate
+            # extracted totals to the PDF's own savings summary. If
+            # they diverge, re-run every chunk with force_no_mask=True
+            # so partially-missed savings rows are recovered. This is
+            # the whole point of the ak-ifc effort — hoisting from
+            # v2's per-chunk gate (which only fired on ≤2 page files)
+            # to file scope means combined statements (always > 2
+            # pages) actually get protection.
+            if processing_mode == "text":
+                await self._run_hdfc_file_level_reconciliation(
+                    pdf_path, email, user_id, password,
+                    total_pages, file_id, chunks, text_mode_options,
+                )
         except Exception as e:
             self.logger.error(
                 f"PDF chunk processing error: {e}"
             )
         finally:
             pass  # query() manages its own lifecycle per chunk
+
+    async def _run_hdfc_file_level_reconciliation(
+        self, pdf_path, email, user_id, password,
+        total_pages, file_id, chunks, text_mode_options,
+    ):
+        """ak-ifc v3 MAJOR: file-scope reconciliation backstop.
+
+        Reviewer's proposal (BOUNCE ak-ifc-v3):
+
+          After all chunks of a text-mode HDFC_DEBIT run have inserted:
+            (a) Aggregate extracted savings totals from the DB
+                (all rows for this fileID+user).
+            (b) Parse the file's savings summary from the FULL raw
+                text (not chunk-scoped).
+            (c) check_hdfc_savings_reconciliation with default ₹1
+                tolerance.
+            (d) IF divergent:
+                - WARN with structured fields (fileID, extracted_*,
+                  stated_*, delta, num_chunks).
+                - Mark fileDetails.reconciliation_fallback = True so
+                  a follow-up sweep can flag the file for manual
+                  review of the acknowledged over-parse.
+                - Re-run every chunk with force_no_mask=True. The
+                  ak-8l5-v2 storage-layer backstop handles the
+                  redundant inserts (existing rows collapse via
+                  primary hash; missed rows land).
+            (e) IF summary missing: log SKIP, no fallback.
+            (f) IF clean: log OK, no action.
+
+        Skipped when detected_bank != HDFC_DEBIT — this backstop is
+        HDFC-specific and there's no BOI equivalent yet (BOI's own
+        combined-statement follow-up is tracked separately).
+        """
+        import fitz as _fitz
+        from services.bankFormatRules import get_bank_from_sender
+        from models.transactions import Transactions
+        from sqlalchemy import func as sa_func
+        from utils.statement_sections import (
+            check_hdfc_reconciliation_from_totals,
+            detect_hdfc_sections,
+            parse_hdfc_savings_summary,
+        )
+
+        detected_bank = email.get("_bank") or get_bank_from_sender(
+            email.get("sender", "")
+        )
+        if detected_bank != "HDFC_DEBIT":
+            return  # nothing to reconcile
+
+        # Read the full raw text (unmasked) to parse the summary and
+        # detect spans. This is a fresh open — cheaper than plumbing
+        # the earlier per-chunk doc reference.
+        try:
+            doc = _fitz.open(pdf_path)
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            full_lines = []
+            for pn in range(1, doc.page_count + 1):
+                # Marker line matches _compute_hdfc_section_keep_mask
+                # so span indices are consistent (defensive — we don't
+                # index across the two here, but keeps the shape).
+                full_lines.append(f"\f<PAGE:{pn}>")
+                page_text = doc[pn - 1].get_text("text")
+                full_lines.extend(page_text.split("\n"))
+            doc.close()
+        except Exception as e:
+            self.logger.warning(
+                f"ak-ifc file-reconciliation: could not read PDF for "
+                f"summary parse (file={file_id!r}): {e}. Skipping."
+            )
+            return
+
+        full_text = "\n".join(full_lines)
+        spans = detect_hdfc_sections(full_text)
+        summary = parse_hdfc_savings_summary(full_text, spans=spans)
+
+        # Aggregate extracted totals from the DB for this fileID+user.
+        # Portable pattern: two straight sum-filter queries, no
+        # dialect-specific CASE / IIF juggling.
+        db = self.transaction_service.db
+        try:
+            debit_sum = db.session.query(
+                sa_func.coalesce(sa_func.sum(Transactions.amount), 0)
+            ).filter(
+                Transactions.fileID == file_id,
+                Transactions.user == user_id,
+                Transactions.amount > 0,
+            ).scalar() or 0
+            credit_sum_signed = db.session.query(
+                sa_func.coalesce(sa_func.sum(Transactions.amount), 0)
+            ).filter(
+                Transactions.fileID == file_id,
+                Transactions.user == user_id,
+                Transactions.amount < 0,
+            ).scalar() or 0
+            # summary convention: credits as positive magnitude.
+            credit_sum = -float(credit_sum_signed or 0)
+            debit_sum = float(debit_sum or 0)
+        except Exception as e:
+            self.logger.warning(
+                f"ak-ifc file-reconciliation: could not aggregate "
+                f"extracted totals (file={file_id!r}): {e}. Skipping."
+            )
+            return
+
+        recon = check_hdfc_reconciliation_from_totals(
+            debit_sum, credit_sum, summary,
+        )
+
+        num_chunks = len(chunks) if chunks is not None else 0
+
+        if summary is None:
+            self.logger.info(
+                f"ak-ifc file-reconciliation: SKIPPED — HDFC savings "
+                f"summary not parseable from file {file_id!r} "
+                f"(num_chunks={num_chunks}). Extraction stands."
+            )
+            return
+
+        if not recon.diverged:
+            self.logger.info(
+                f"ak-ifc file-reconciliation: CLEAN — extracted totals "
+                f"within tolerance of PDF summary. "
+                f"file={file_id!r} num_chunks={num_chunks} "
+                f"debits: extracted={recon.extracted_debits} vs "
+                f"stated={recon.stated_debits}; "
+                f"credits: extracted={recon.extracted_credits} vs "
+                f"stated={recon.stated_credits}"
+            )
+            return
+
+        # DIVERGED — fallback.
+        self.logger.warning(
+            f"ak-ifc file-reconciliation: DIVERGED — masked extraction "
+            f"totals disagree with the PDF's savings summary at file "
+            f"level. file={file_id!r} bank={detected_bank} "
+            f"num_chunks={num_chunks} reason={recon.reason} "
+            f"checked={list(recon.checked_fields)}. "
+            f"Falling back to unfiltered extraction on ALL chunks "
+            f"(over-parse is recoverable via ak-8l5 dedup; under-parse "
+            f"is silent loss under Overseer's zero-loss constraint)."
+        )
+
+        # MINOR 1: mark the file for follow-up review.
+        try:
+            self.transaction_service.mark_reconciliation_fallback(
+                file_id, user_id=user_id,
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            self.logger.warning(
+                f"ak-ifc file-reconciliation: mark_reconciliation_fallback "
+                f"threw: {e}. Continuing with re-run regardless."
+            )
+
+        # Re-run each chunk in no-mask mode. ak-8l5-v2 dedup at the
+        # storage layer handles the redundant inserts — existing rows
+        # collapse via primary hash; previously-missed savings rows
+        # land. The final DB state reflects the union of both passes.
+        for start, end in chunks:
+            self.logger.info(
+                f"ak-ifc file-reconciliation: re-running chunk "
+                f"{start}-{end} with force_no_mask=True"
+            )
+            try:
+                await self._run_text_chunk(
+                    text_mode_options, pdf_path, email, user_id, password,
+                    page_start=start, page_end=end,
+                    total_pages=total_pages,
+                    preset_file_id=file_id,
+                    force_no_mask=True,
+                )
+            except Exception as e:  # pragma: no cover — defensive
+                self.logger.error(
+                    f"ak-ifc file-reconciliation: no-mask re-run of "
+                    f"chunk {start}-{end} failed: {e}. Data partial; "
+                    f"file is tagged for manual review."
+                )
 
     # JSON schema for structured output in text mode.
     # ak-8l5: adds bank_reference_id + line_position per row.
@@ -1670,6 +1862,95 @@ class MailProcessorService:
         "required": ["transactions"],
     }
 
+    def _compute_hdfc_section_keep_mask(self, doc):
+        """ak-ifc: identify the SAVINGS section(s) in an HDFC combined
+        statement and return a per-file-line keep mask.
+
+        HDFC monthly PDFs are combined statements containing 5 sub-
+        accounts (savings, credit card, fixed deposit, mutual fund,
+        recurring deposit / PPF, etc.). The pre-ak-ifc extractor
+        treated the whole file as one savings statement, letting
+        other sub-accounts leak into the savings fileID:
+          - Apr 2026: +₹292k over-parse (non-savings debits treated
+            as savings)
+          - May 2026: -₹50k / -₹109k under-parse
+          - All 12 HDFC files affected
+
+        Fix: detect section headers ("Statement of Account for :
+        SAVINGS ...") in the raw text, mark only savings-section
+        lines as kept, blank the rest.
+
+        Returns a tuple (full_lines, keep_mask, page_line_ranges,
+        spans):
+          - full_lines: list[str] of every line in the doc, in
+            reading order, with a synthetic '\f<PAGE:N>' marker line
+            preceding each page's raw text
+          - keep_mask: list[bool] parallel to full_lines
+          - page_line_ranges: dict[page_num → (start_idx, end_idx)]
+            into full_lines
+          - spans: list[SectionSpan] from utils.statement_sections
+            for logging + auditing
+
+        Line count is PRESERVED per page (non-savings lines are
+        blanked, not deleted) so the ak-8l5 [Ln] file-level markers
+        the chunker adds later still point at stable positions.
+        """
+        from utils.statement_sections import (
+            detect_hdfc_sections,
+            SectionType,
+        )
+
+        # Build a doc-wide line array with synthetic per-page markers
+        # (a form-feed char + page tag) so we can map full-doc line
+        # indices back to their originating page for the chunk slice.
+        # Form feed is chosen because real bank text never contains
+        # it; safe as a sentinel.
+        full_lines: list[str] = []
+        page_line_ranges: dict[int, tuple[int, int]] = {}
+        for pn in range(1, doc.page_count + 1):
+            marker_idx = len(full_lines)
+            full_lines.append(f"\f<PAGE:{pn}>")
+            page_start_idx = len(full_lines)
+            raw_page = doc[pn - 1].get_text("text")
+            for line in raw_page.split("\n"):
+                full_lines.append(line)
+            page_end_idx = len(full_lines) - 1
+            page_line_ranges[pn] = (page_start_idx, page_end_idx)
+
+        full_text = "\n".join(full_lines)
+        spans = detect_hdfc_sections(full_text)
+
+        keep_mask = [False] * len(full_lines)
+        savings_span_count = 0
+        for span in spans:
+            if span.section == SectionType.SAVINGS:
+                savings_span_count += 1
+                # end_line is inclusive, but clamp defensively.
+                stop = min(span.end_line + 1, len(keep_mask))
+                for i in range(span.start_line, stop):
+                    keep_mask[i] = True
+
+        # Also keep the page-marker lines themselves — they're
+        # invisible to the LLM (we don't include them in the chunk
+        # text) but callers may want to walk the mask directly.
+        return full_lines, keep_mask, page_line_ranges, spans, savings_span_count
+
+    @staticmethod
+    def _extract_masked_page_text(full_lines, page_line_ranges, keep_mask, pn):
+        """Reconstruct one page's raw text with non-kept lines
+        blanked to empty strings.
+
+        Line count is preserved so the [Ln] file-level annotator that
+        runs downstream still produces stable positions across chunk
+        re-reads.
+        """
+        start, end = page_line_ranges[pn]
+        kept = [
+            full_lines[i] if keep_mask[i] else ""
+            for i in range(start, end + 1)
+        ]
+        return "\n".join(kept)
+
     @staticmethod
     def _strip_page_header(page_text):
         """Strip the repeated HDFC Smart Statement header from a page.
@@ -1701,11 +1982,20 @@ class MailProcessorService:
 
     async def _run_text_chunk(self, options, pdf_path, email, user_id, password,
                               page_start, page_end, total_pages,
-                              preset_file_id=None):
+                              preset_file_id=None, *, force_no_mask=False):
         """Process a text-mode PDF chunk using query() + structured output.
 
         No MCP tools — Claude returns structured JSON via output_format,
         we parse and insert directly.
+
+        ak-ifc v2 (`force_no_mask`): when the reconciliation backstop
+        detects a divergence between extracted savings totals and the
+        PDF's own summary, this method calls ITSELF a second time with
+        `force_no_mask=True` — the recursive call bypasses the section
+        filter entirely so no savings row can be silently lost. The
+        recursion is bounded (the recursed call has hdfc_mask=None so
+        it can't recurse further).
+
         Returns dict with insert stats: {"called": bool, "inserted": int, "duplicates": int}
         """
         import fitz as _fitz
@@ -1733,13 +2023,59 @@ class MailProcessorService:
             # across pages so re-reads collapse identically.
             line_ptr += raw_page_text.count("\n") + 1
 
+        # ak-ifc: for HDFC combined statements, precompute a per-file-
+        # line mask that keeps only the SAVINGS section. Non-savings
+        # lines are blanked to empty strings so line counts stay stable
+        # (ak-8l5 [Ln] markers depend on that).
+        # ak-ifc v2: the reconciliation backstop may re-enter this
+        # method with force_no_mask=True; honor that flag by skipping
+        # the mask computation entirely.
+        hdfc_mask = None
+        hdfc_spans_for_reconciliation = None
+        hdfc_full_text_for_reconciliation = None
+        if detected_bank == "HDFC_DEBIT" and not force_no_mask:
+            (full_lines, keep_mask, page_line_ranges, spans,
+             savings_span_count) = self._compute_hdfc_section_keep_mask(doc)
+            hdfc_mask = (full_lines, keep_mask, page_line_ranges)
+            # ak-ifc v2: keep the spans + full text around so the
+            # reconciliation backstop can parse the savings summary
+            # from the same view of the doc without re-scanning it.
+            hdfc_spans_for_reconciliation = spans
+            hdfc_full_text_for_reconciliation = "\n".join(full_lines)
+            from utils.statement_sections import summarize_sections
+            self.logger.info(
+                f"HDFC combined-statement section split: "
+                f"{summarize_sections(spans)}; "
+                f"savings_spans={savings_span_count} "
+                f"(pages {page_start}-{page_end} of {doc.page_count})"
+            )
+            if savings_span_count == 0:
+                self.logger.warning(
+                    f"HDFC statement has 0 detected SAVINGS sections — "
+                    f"either not a combined-statement layout OR the "
+                    f"header regex missed. Falling back to full-text "
+                    f"extraction (pre-ak-ifc behavior) to avoid dropping "
+                    f"all transactions."
+                )
+                hdfc_mask = None
+
         # Now pull the chunk's text, annotate each line with its
         # file-level line number so the LLM can echo the correct
         # position onto each extracted tx.
         page_texts = []
         for pn in range(page_start, page_end + 1):
             page = doc[pn - 1]
-            text = page.get_text("text")
+            if hdfc_mask is not None:
+                # Masked text: non-savings lines are blanked so the
+                # LLM only sees savings-section rows. Line-count is
+                # preserved so downstream annotations stay stable
+                # (ak-8l5 [Ln] markers below depend on this).
+                full_lines, keep_mask, page_line_ranges = hdfc_mask
+                text = self._extract_masked_page_text(
+                    full_lines, page_line_ranges, keep_mask, pn,
+                )
+            else:
+                text = page.get_text("text")
             clean_text = self._strip_page_header(text)
             annotated_lines = []
             local_line = 0
@@ -1795,6 +2131,16 @@ class MailProcessorService:
             f"unique reference number and must be extracted separately.\n"
             f"Extract from the FIRST transaction on each page to the LAST. Do not stop early.\n"
             f"ONLY extract transactions that appear in the text. Do NOT invent any.\n"
+            f"\n"
+            f"### ak-ifc combined-statement caveat (HDFC)\n"
+            f"HDFC monthly statements bundle 5 sub-accounts (savings, "
+            f"credit card, fixed deposit, mutual fund, recurring deposit). "
+            f"The extractor pre-filters the raw text to keep ONLY the "
+            f"SAVINGS section before you see it — non-savings lines are "
+            f"replaced with blanks. So the only rows in the text below "
+            f"are legitimate savings-account transactions; extract them "
+            f"all. If you see a 'Statement of Account for : <non-savings>' "
+            f"header slip through, ignore the section under it.\n"
         )
 
         # Health probe (hq-wisp-wzagg): mailProcessor SDK call diagnostic so
@@ -1866,6 +2212,18 @@ class MailProcessorService:
         self.logger.info(
             f"Chunk {page_start}-{page_end}: Claude returned {len(transactions)} transactions, inserting..."
         )
+
+        # ak-ifc v3: the per-chunk reconciliation gate that lived
+        # here in v2 was hoisted to file level in
+        # _run_all_chunks_async._run_hdfc_file_level_reconciliation.
+        # Reason: v2's `page_start==1 AND page_end==total_pages` gate
+        # meant only HDFC files ≤ pages_per_chunk (default 2) actually
+        # exercised the backstop — the combined statements that the
+        # whole ak-ifc effort targets are always multi-chunk, so the
+        # backstop never fired on them. See ak-ifc-v3 BOUNCE from
+        # akkountant/crew/akkountant_lead.
+        # We keep `force_no_mask` so the file-level orchestrator can
+        # re-invoke each chunk in a no-mask mode.
 
         # Insert directly via the existing tool executor logic
         insert_args = {
