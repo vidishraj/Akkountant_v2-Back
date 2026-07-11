@@ -517,6 +517,314 @@ class TransactionService(BaseService):
                 pass
             return False
 
+    def _resolve_fallback_pdf_path(self, fd, user_id):
+        """ak-ex2-v2 MINOR 1: derive the PDF path server-side from
+        (fileDetails, user_id) — client never supplies a filesystem
+        string.
+
+        Resolution order:
+          1. processedEmails.pdf_filename joined with the standard
+             claude_statements/<user>/ dir (matches how
+             _save_pdf_to_persistent_storage stored it).
+          2. Glob claude_statements/<user>/**/{gmail_id}_* as a
+             fallback (matches reprocess_pdf's shape).
+
+        Returns the resolved absolute path or None on failure.
+        """
+        import glob as _glob
+        gmail_id = fd.gmail_message_id
+        if not gmail_id:
+            return None
+
+        base = os.path.join(os.getcwd(), "claude_statements", user_id)
+
+        # Preferred: use processedEmails.pdf_filename if we have it.
+        try:
+            from models.processedEmails import ProcessedEmails
+            pe = self.db.session.query(ProcessedEmails).filter_by(
+                gmail_id=gmail_id, user_id=user_id,
+            ).first()
+            if pe and pe.pdf_filename:
+                cand = os.path.join(base, pe.pdf_filename)
+                if os.path.exists(cand):
+                    return os.path.realpath(cand)
+        except Exception as e:
+            self.logger.debug(
+                f"ak-ex2 strip: processedEmails path lookup failed "
+                f"for gmail_id={gmail_id!r}: {e}"
+            )
+
+        # Fallback: glob by gmail_id prefix.
+        matches = _glob.glob(
+            os.path.join(base, "**", f"{gmail_id}_*"), recursive=True,
+        )
+        if matches:
+            return os.path.realpath(matches[0])
+        return None
+
+    def strip_non_savings_from_fallback_file(
+        self, fileId, user_id, password=None,
+    ):
+        """ak-ex2-v2: for a file previously tagged
+        reconciliation_fallback=True by the ak-ifc-v3 file-level
+        reconciliation, snapshot then remove non-savings sub-account
+        rows (credit card / fixed deposit / mutual fund / RD / PPF /
+        current) that the unfiltered fallback re-extraction
+        re-admitted into the savings fileID.
+
+        v2 changes (per reviewer BOUNCE ak-ex2-v2):
+          - MAJOR: snapshot every candidate row into
+            stripped_transactions_audit BEFORE the DELETE fires.
+            Manual restore path recovers via
+              INSERT INTO transactions SELECT ... FROM
+                stripped_transactions_audit WHERE stripped_file_id=?
+            Under Overseer's zero-loss constraint, heuristic-driven
+            deletes MUST have a restore path.
+          - MINOR 1: pdf_path is derived server-side from
+            fileDetails.gmail_message_id + processedEmails.pdf_filename
+            (or a claude_statements glob fallback). Callers no
+            longer supply a filesystem string.
+          - MINOR 3: FileDetails query is user-scoped so callers
+            can't probe another user's file state.
+
+        Returns a dict with:
+          - status: "stripped" | "skipped" | "error"
+          - reason: short explanation
+          - removed: count deleted
+          - kept: count classified SAVINGS
+          - unlocatable: count where we couldn't classify (skipped,
+            never deleted — conservative)
+          - total: total tx rows examined
+          - snapshot_count: count copied into
+            stripped_transactions_audit before delete (should equal
+            `removed` on success; a mismatch indicates partial
+            rollback and shows up in error logs)
+          - pdf_path: the server-derived path used (for audit trail)
+        """
+        import fitz as _fitz
+        from models.transactions import Transactions
+        from models.strippedTransactionsAudit import (
+            StrippedTransactionsAudit,
+        )
+        from utils.statement_sections import (
+            SectionType,
+            build_line_to_section_map,
+            classify_row_section,
+            detect_hdfc_sections,
+        )
+
+        def _err(reason, **extra):
+            base = {"status": "error", "reason": reason,
+                    "removed": 0, "kept": 0, "unlocatable": 0,
+                    "total": 0, "snapshot_count": 0, "pdf_path": None}
+            base.update(extra)
+            return base
+
+        def _skip(reason, **extra):
+            base = {"status": "skipped", "reason": reason,
+                    "removed": 0, "kept": 0, "unlocatable": 0,
+                    "total": 0, "snapshot_count": 0, "pdf_path": None}
+            base.update(extra)
+            return base
+
+        # MINOR 3: user-scoped FileDetails lookup.
+        try:
+            fd = self.db.session.query(FileDetails).filter_by(
+                fileID=fileId, user=user_id,
+            ).first()
+        except Exception as e:
+            self.logger.error(
+                f"ak-ex2 strip: FileDetails lookup failed for "
+                f"fileID={fileId!r} user={user_id!r}: {e}"
+            )
+            return _err(f"lookup failed: {e}")
+        if not fd:
+            return _skip("no fileDetails row for (fileID, user)")
+        if not getattr(fd, "reconciliation_fallback", False):
+            return _skip("reconciliation_fallback is not True")
+        if fd.bank != "HDFC_DEBIT":
+            # The current stripper is HDFC-specific — section
+            # detection recognizes HDFC layouts only. BOI equivalent
+            # deferred (per ak-ifc BOI follow-up TODO).
+            return _skip(f"bank={fd.bank!r} not supported by strip")
+
+        # MINOR 1: derive PDF path server-side.
+        pdf_path = self._resolve_fallback_pdf_path(fd, user_id)
+        if not pdf_path:
+            return _err(
+                "could not resolve pdf_path server-side; "
+                "check processedEmails.pdf_filename + claude_statements/"
+            )
+        if not os.path.exists(pdf_path):
+            return _err(f"resolved pdf_path missing on disk: {pdf_path}",
+                        pdf_path=pdf_path)
+
+        # Read the PDF text.
+        try:
+            doc = _fitz.open(pdf_path)
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            raw_lines = []
+            for pn in range(1, doc.page_count + 1):
+                # Same page-marker shape as detect_hdfc_sections' input
+                # so span indices align.
+                raw_lines.append(f"\f<PAGE:{pn}>")
+                for line in doc[pn - 1].get_text("text").split("\n"):
+                    raw_lines.append(line)
+            doc.close()
+        except Exception as e:
+            self.logger.error(
+                f"ak-ex2 strip: could not read PDF at {pdf_path!r} "
+                f"for fileID={fileId!r}: {e}"
+            )
+            return _err(f"PDF read failed: {e}", pdf_path=pdf_path)
+
+        raw_text = "\n".join(raw_lines)
+        spans = detect_hdfc_sections(raw_text)
+        section_by_line = build_line_to_section_map(spans, len(raw_lines))
+
+        # Load all tx rows for this file (user-scoped).
+        try:
+            rows = self.db.session.query(Transactions).filter(
+                Transactions.fileID == fileId,
+                Transactions.user == user_id,
+            ).all()
+        except Exception as e:
+            self.logger.error(
+                f"ak-ex2 strip: transaction query failed for "
+                f"fileID={fileId!r}: {e}"
+            )
+            return _err(f"transaction query failed: {e}",
+                        pdf_path=pdf_path)
+
+        to_delete_rows = []  # keep the Transactions objects for snapshotting
+        to_delete_refs = []  # referenceID list for the batch DELETE
+        kept = 0
+        unlocatable = 0
+        for row in rows:
+            try:
+                amount = float(row.amount)
+            except (TypeError, ValueError):
+                unlocatable += 1
+                continue
+            section = classify_row_section(
+                amount, row.details or "",
+                raw_lines, section_by_line,
+            )
+            if section == SectionType.SAVINGS:
+                kept += 1
+            elif section == SectionType.UNKNOWN:
+                # Ambiguous / not found → conservative KEEP
+                unlocatable += 1
+            else:
+                to_delete_rows.append(row)
+                to_delete_refs.append(row.referenceID)
+
+        removed = 0
+        snapshot_count = 0
+
+        if to_delete_rows:
+            # ── MAJOR: snapshot BEFORE delete ─────────────────────
+            # Every row about to be deleted is copied into
+            # stripped_transactions_audit so a manual restore path
+            # exists. This is the whole point of ak-ex2-v2 — under
+            # zero-loss, we can't hard-delete without a recovery
+            # trail.
+            try:
+                audit_rows = [
+                    StrippedTransactionsAudit.from_transaction(
+                        row,
+                        reason="ak-ex2 non-savings",
+                        file_id=fileId,
+                    )
+                    for row in to_delete_rows
+                ]
+                self.db.session.add_all(audit_rows)
+                # Flush (not commit) so the audit rows are visible
+                # in this transaction before the DELETE — one atomic
+                # commit at the end wraps snapshot + delete.
+                self.db.session.flush()
+                snapshot_count = len(audit_rows)
+            except Exception as e:
+                # Snapshot failure BLOCKS the delete. Better to leave
+                # the over-parse in place (recoverable via a later
+                # re-strip after the audit table is available) than
+                # to delete without a snapshot (irreversible loss).
+                self.logger.error(
+                    f"ak-ex2 strip: snapshot INSERT failed for "
+                    f"fileID={fileId!r}: {e}. ABORTING delete to "
+                    f"preserve recovery contract."
+                )
+                try:
+                    self.db.session.rollback()
+                except Exception:
+                    pass
+                return _err(f"snapshot failed: {e}",
+                            total=len(rows), pdf_path=pdf_path)
+
+            # ── Then the DELETE ─────────────────────────────────
+            try:
+                removed = self.db.session.query(Transactions).filter(
+                    Transactions.referenceID.in_(to_delete_refs),
+                    Transactions.user == user_id,
+                    Transactions.fileID == fileId,
+                ).delete(synchronize_session='fetch')
+                self.db.session.commit()
+
+                if removed != snapshot_count:
+                    # Log a warning — the snapshot succeeded but the
+                    # DELETE removed a different count (race with a
+                    # concurrent insert / delete). The extra snapshot
+                    # rows are harmless (audit only); the missing
+                    # delete rows survive live.
+                    self.logger.warning(
+                        f"ak-ex2 strip: snapshot/delete count mismatch "
+                        f"for fileID={fileId!r}: snapshot={snapshot_count} "
+                        f"removed={removed}. Investigate for a race."
+                    )
+
+                self.logger.warning(
+                    f"ak-ex2 strip: snapshotted={snapshot_count}, "
+                    f"removed={removed} non-savings row(s) from "
+                    f"fileID={fileId!r} (bank={fd.bank}, "
+                    f"user={user_id!r}). kept={kept} "
+                    f"unlocatable={unlocatable} total={len(rows)}. "
+                    f"Restore path: SELECT ... FROM "
+                    f"stripped_transactions_audit WHERE "
+                    f"stripped_file_id={fileId!r};"
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"ak-ex2 strip: DELETE failed for fileID={fileId!r} "
+                    f"AFTER successful snapshot (snapshot_count="
+                    f"{snapshot_count}): {e}. Rolling back both."
+                )
+                try:
+                    self.db.session.rollback()
+                except Exception:
+                    pass
+                return _err(f"delete failed: {e}",
+                            kept=kept, unlocatable=unlocatable,
+                            total=len(rows), snapshot_count=0,
+                            pdf_path=pdf_path)
+        else:
+            self.logger.info(
+                f"ak-ex2 strip: no non-savings rows to remove from "
+                f"fileID={fileId!r}. kept={kept} unlocatable={unlocatable} "
+                f"total={len(rows)}"
+            )
+
+        return {
+            "status": "stripped",
+            "reason": "ok",
+            "removed": removed,
+            "kept": kept,
+            "unlocatable": unlocatable,
+            "total": len(rows),
+            "snapshot_count": snapshot_count,
+            "pdf_path": pdf_path,
+        }
+
     def fetchFileDetails(self, page: int, filters: dict, user_id: str = None, page_size: int = 100):
         query = self.db.session.query(FileDetails).filter(FileDetails.deleted == False)
 

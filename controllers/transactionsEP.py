@@ -397,6 +397,70 @@ class TransactionController:
             return jsonify({"error": str(e)}), 500
 
     @Logger.standardLogger
+    def stripFallbackRows(self):
+        """ak-ex2-v2 admin endpoint: strip non-savings sub-account
+        rows from a file previously tagged reconciliation_fallback=
+        True. Non-savings rows are SNAPSHOTTED into
+        stripped_transactions_audit BEFORE the DELETE fires, so a
+        manual restore path exists.
+
+        POST /admin/stripFallbackRows
+        Body JSON:
+          {
+            "fileId":   "mail_pipeline_<user>_HDFC_DEBIT_<month>",
+            "password": "<optional PDF password>"
+          }
+
+        pdfPath is NOT accepted — the path is derived server-side
+        from fileDetails + processedEmails so a caller can never
+        point the stripper at an arbitrary file on disk (ak-ex2-v2
+        MINOR 1).
+
+        Called by infra during the ak-32o HDFC re-parse cycle — for
+        each divergent file where the ak-ifc-v3 fallback fired,
+        re-parsed unfiltered, and left non-savings contamination.
+
+        Returns:
+          200 { "status": "stripped"|"skipped", "removed": N,
+                "kept": M, "unlocatable": K, "total": T,
+                "snapshot_count": N, "pdf_path": <server-derived> }
+          400 on missing fileId
+          500 on internal error
+        """
+        try:
+            data = request.get_json(force=True) or {}
+            userId = g.get('firebase_id')
+            fileId = data.get('fileId')
+            password = data.get('password')
+
+            if not userId:
+                return jsonify({"error": "missing firebase_id (auth)"}), 400
+            if not fileId:
+                return jsonify({"error": "fileId is required"}), 400
+
+            # ak-ex2-v2 MINOR 1: any client-supplied pdfPath is
+            # silently ignored — the server derives its own from
+            # fileDetails + processedEmails.
+            if 'pdfPath' in data:
+                self.logger.warning(
+                    f"ak-ex2 strip: ignoring client-supplied pdfPath "
+                    f"(server derives path from fileDetails). "
+                    f"fileId={fileId!r} user={userId!r}"
+                )
+
+            self.logger.info(
+                f"ak-ex2 strip request: fileId={fileId!r} user={userId!r}"
+            )
+            result = self.TransactionService.strip_non_savings_from_fallback_file(
+                fileId=fileId, user_id=userId, password=password,
+            )
+            status = 200 if result.get("status") != "error" else 500
+            return jsonify(result), status
+        except Exception as e:
+            self.logger.error(f"ak-ex2 strip endpoint error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @Logger.standardLogger
     def getProcessingStats(self):
         userId = g.get('firebase_id')
         stats = self.TransactionService.getProcessingStats(userId)
