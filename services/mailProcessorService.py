@@ -842,6 +842,16 @@ class MailProcessorService:
                         password = None  # PDF is now unlocked
                 self._run_pdf_analysis(pdf_path, email, user_id, password, processing_mode)
 
+                # ak-bwe: stamp processedEmails BEFORE the persist
+                # path so _update_processed_email_pdf's UPDATE call
+                # below has a row to update. Idempotency for
+                # backfill re-runs — _filter_already_processed sees
+                # this row on the next pass and skips the file.
+                self._stamp_processed_email(
+                    email, user_id, category=email.get("_category", "bank_statement"),
+                    status="success",
+                )
+
                 # Only persist PDF after successful processing
                 try:
                     persist_path = self._persist_pdf(pdf_path, user_id, email, original_filename)
@@ -873,6 +883,67 @@ class MailProcessorService:
         self.logger.info(f"Persisted PDF: {dest_path}")
         # Return relative path (category/filename) for DB storage
         return os.path.join(category, dest_name)
+
+    def _stamp_processed_email(
+        self, email, user_id, *,
+        category="bank_statement",
+        status="success",
+        items_extracted=0,
+        extraction_summary=None,
+    ):
+        """ak-bwe: ensure a processedEmails row exists for `email`
+        after a successful text-mode / image-mode PDF ingest.
+
+        Pre-ak-bwe the row only landed if the LLM invoked the
+        report_result tool — text-mode structured-output path never
+        called that tool, so backfill re-runs saw the gmail_id as
+        "never processed" and re-ingested.
+
+        Uses the shared utils.processed_emails_upsert.upsert_processed_email
+        helper (same code path _handle_report_result uses on the LLM
+        side) so behavior is identical whether the LLM signals
+        completion or the service layer stamps it directly.
+
+        Non-critical: any failure is logged as WARNING; the
+        transactions have already landed and the primary goal
+        (idempotency) is best-effort — the next re-run may see the
+        file as unprocessed but ak-8l5's storage-layer dedup catches
+        the duplicate insertion.
+        """
+        try:
+            from models.processedEmails import ProcessedEmails
+            from utils.processed_emails_upsert import upsert_processed_email
+            session = self.transaction_service.db.session
+            if not session:
+                return
+            gmail_id = email.get("gmail_id") or email.get("message_id")
+            if not gmail_id:
+                return
+            result = upsert_processed_email(
+                session,
+                ProcessedEmails,
+                gmail_id=gmail_id,
+                user_id=user_id,
+                sender=email.get("sender"),
+                subject=email.get("subject"),
+                email_date=email.get("date"),
+                category=category,
+                processing_type=email.get("_processing_type", "pdf"),
+                status=status,
+                items_extracted=items_extracted,
+                extraction_summary=extraction_summary,
+            )
+            self.logger.info(
+                f"ak-bwe: processedEmails {result.get('status')} "
+                f"for gmail_id={gmail_id!r} user={user_id!r} "
+                f"(db_status={result.get('db_status')!r})"
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"ak-bwe: _stamp_processed_email failed for "
+                f"gmail_id={email.get('gmail_id')!r}: {e}. Idempotency "
+                f"may be reduced but ak-8l5 dedup catches duplicates."
+            )
 
     def _update_processed_email_pdf(self, gmail_id, user_id, pdf_filename):
         """Update the processedEmails row with the PDF filename."""
