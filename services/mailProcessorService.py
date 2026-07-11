@@ -168,11 +168,34 @@ class MailProcessorService:
         doc.close()
 
         if needs_pass and not password:
+            # ak-nyd: try the per-file override FIRST. Some PDFs are
+            # protected with a value that doesn't match the bank's
+            # personal-info strategy (e.g. F6 Jan-2026 HDFC, Overseer
+            # set a custom password). The per_file_passwords config
+            # is a JSON-backed dict keyed on gmail_id and/or fileID.
+            # Falls through cleanly if the config is absent or has no
+            # matching entry.
             try:
-                password = self._try_personal_info_passwords(user_id, pdf_path)
+                from utils.per_file_passwords import lookup_password
+                password = lookup_password(gmail_id=gmail_id)
+                if password:
+                    self.logger.info(
+                        f"ak-nyd: applying per-file password override "
+                        f"for gmail_id={gmail_id!r}"
+                    )
             except Exception as e:
-                self.logger.warning(f"Password lookup failed: {e}")
+                self.logger.warning(
+                    f"ak-nyd per-file password lookup failed: {e}"
+                )
                 password = None
+
+            # Fall back to the bank's personal-info strategy.
+            if not password:
+                try:
+                    password = self._try_personal_info_passwords(user_id, pdf_path)
+                except Exception as e:
+                    self.logger.warning(f"Password lookup failed: {e}")
+                    password = None
             if not password:
                 return {"error": "PDF is password-protected and no password could be determined"}
             # Pre-unlock
