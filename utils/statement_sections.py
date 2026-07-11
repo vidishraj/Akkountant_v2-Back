@@ -64,15 +64,27 @@ class SectionType(str, Enum):
 # left-to-right, but we use a list of individual patterns so ordering
 # is explicit + auditable.
 #
-# We tolerate:
-#   - "Statement of Account for :"
-#   - "Statement for :"
-#   - "STATEMENT OF ACCOUNT FOR :" (all caps)
-#   - Trailing account number, mask, or extra whitespace
+# Header phrasings tolerated per section (ak-dby broadening):
+#   1. "Statement of Account for : X"  (canonical, existing)
+#   2. "Statement for : X"              (elided "of Account")
+#   3. "X Account"                      (bare, e.g. "Savings Account")
+#   4. "X A/C" or "X Bank Account"     (abbreviated forms)
+#   5. "Account Type: X"                (typed line)
+#   6. "Account: <num> (X)"             (parenthetical, ak-dby)
 #
-# The header is matched case-insensitively but the SectionType we
-# emit is normalized.
+# Case-insensitive. The SectionType we emit is normalized.
+#
+# ak-dby: the pre-ak-dby regex only matched shape (1) / (2). The
+# Vidish_Raj_2026 monthly layout uses shape (3) / (4) plus tabular
+# banners without the "Statement for" prefix, so every 2026 file
+# came back with savings_spans=0 and triggered the full-text
+# fallback. Fallback IS correct for zero-loss BUT before ak-dby the
+# fallback didn't set reconciliation_fallback=True, so the strip
+# endpoint never ran and non-savings sub-accounts leaked into the
+# savings fileID. See mailProcessorService's savings_span_count==0
+# branch for the flag-setting fix.
 _HDFC_SECTION_PATTERNS: list[tuple[SectionType, re.Pattern[str]]] = [
+    # ── SAVINGS ────────────────────────────────────────────────
     (
         SectionType.SAVINGS,
         re.compile(
@@ -81,12 +93,56 @@ _HDFC_SECTION_PATTERNS: list[tuple[SectionType, re.Pattern[str]]] = [
         ),
     ),
     (
+        SectionType.SAVINGS,
+        # ak-dby: bare "Savings Account" / "Savings A/C" /
+        # "Savings Bank Account" banner. Anchored to line start
+        # (^\s*) so a narration line mentioning "savings account
+        # balance" mid-string can't false-positive.
+        re.compile(
+            r"^\s*savings\s+(?:bank\s+)?(?:account|a\s*/?\s*c)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        SectionType.SAVINGS,
+        # ak-dby: "Account Type : Savings" typed line.
+        re.compile(
+            r"^\s*account\s+type\s*[:\-]?\s*savings",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        SectionType.SAVINGS,
+        # ak-dby: parenthetical "Account: 50100XXXX (SAVINGS)"
+        # form some HDFC combined layouts use.
+        re.compile(
+            r"^\s*account\s*[:\-]?[^\n]{0,60}\(\s*savings\s*\)",
+            re.IGNORECASE,
+        ),
+    ),
+    # ── CURRENT ────────────────────────────────────────────────
+    (
         SectionType.CURRENT,
         re.compile(
             r"statement\s+(?:of\s+account\s+)?for\s*:?\s*current",
             re.IGNORECASE,
         ),
     ),
+    (
+        SectionType.CURRENT,
+        re.compile(
+            r"^\s*current\s+(?:bank\s+)?(?:account|a\s*/?\s*c)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        SectionType.CURRENT,
+        re.compile(
+            r"^\s*account\s+type\s*[:\-]?\s*current",
+            re.IGNORECASE,
+        ),
+    ),
+    # ── CREDIT_CARD ────────────────────────────────────────────
     (
         SectionType.CREDIT_CARD,
         re.compile(
@@ -95,12 +151,40 @@ _HDFC_SECTION_PATTERNS: list[tuple[SectionType, re.Pattern[str]]] = [
         ),
     ),
     (
+        SectionType.CREDIT_CARD,
+        re.compile(
+            # "Credit Card Account", "Credit Card A/C",
+            # "Credit Card Statement" — banner variants. Anchored to
+            # line start to avoid narration false-positives.
+            r"^\s*credit\s*card\s+(?:account|a\s*/?\s*c|statement)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    # ── RECURRING_DEPOSIT (before FIXED_DEPOSIT — substring guard) ──
+    (
         SectionType.RECURRING_DEPOSIT,
         re.compile(
             r"statement\s+(?:of\s+account\s+)?for\s*:?\s*recurring\s*deposit",
             re.IGNORECASE,
         ),
     ),
+    (
+        SectionType.RECURRING_DEPOSIT,
+        re.compile(
+            r"^\s*recurring\s*deposit\s+(?:account|a\s*/?\s*c)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        SectionType.RECURRING_DEPOSIT,
+        re.compile(
+            # "RD A/C" or "RD Account" — the RD abbreviation on
+            # combined layouts.
+            r"^\s*rd\s+(?:account|a\s*/?\s*c)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    # ── FIXED_DEPOSIT ──────────────────────────────────────────
     (
         SectionType.FIXED_DEPOSIT,
         re.compile(
@@ -109,6 +193,22 @@ _HDFC_SECTION_PATTERNS: list[tuple[SectionType, re.Pattern[str]]] = [
         ),
     ),
     (
+        SectionType.FIXED_DEPOSIT,
+        re.compile(
+            r"^\s*fixed\s*deposit\s+(?:account|a\s*/?\s*c)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        SectionType.FIXED_DEPOSIT,
+        re.compile(
+            # "FD A/C" or "FD Account" — the FD abbreviation.
+            r"^\s*fd\s+(?:account|a\s*/?\s*c)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    # ── MUTUAL_FUND ────────────────────────────────────────────
+    (
         SectionType.MUTUAL_FUND,
         re.compile(
             r"statement\s+(?:of\s+account\s+)?for\s*:?\s*mutual\s*fund",
@@ -116,9 +216,24 @@ _HDFC_SECTION_PATTERNS: list[tuple[SectionType, re.Pattern[str]]] = [
         ),
     ),
     (
+        SectionType.MUTUAL_FUND,
+        re.compile(
+            r"^\s*mutual\s*fund\s+(?:account|a\s*/?\s*c|folio)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    # ── PPF ────────────────────────────────────────────────────
+    (
         SectionType.PPF,
         re.compile(
             r"statement\s+(?:of\s+account\s+)?for\s*:?\s*(?:ppf|public\s+provident)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        SectionType.PPF,
+        re.compile(
+            r"^\s*(?:ppf|public\s+provident\s+fund)\s+(?:account|a\s*/?\s*c)\b",
             re.IGNORECASE,
         ),
     ),

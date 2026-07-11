@@ -707,6 +707,194 @@ class TestReconciliationEndToEnd(unittest.TestCase):
         self.assertIn("debits", recon.reason)
 
 
+# ── ak-dby: broadened HDFC section-header patterns ─────────────────
+#
+# The pre-ak-dby regex only matched "Statement of Account for : X".
+# The 2026 Vidish_Raj_ monthly layout uses bare / abbreviated banners
+# instead (Savings Account / Savings A/C / Account: … (SAVINGS)),
+# which broke section detection on every 2026 file — falling back to
+# unfiltered extraction WITHOUT setting reconciliation_fallback=True.
+# These tests pin down the expanded patterns so a future regression
+# on any of them is loud.
+
+
+class TestBroadenedSavingsHeaders(unittest.TestCase):
+    """ak-dby: alternate SAVINGS header forms observed in 2026
+    HDFC monthly layouts."""
+
+    def _first_span(self, text):
+        spans = detect_hdfc_sections(text)
+        # Skip the leading UNKNOWN span if present.
+        for s in spans:
+            if s.section != SectionType.UNKNOWN:
+                return s
+        return None
+
+    def test_savings_account_bare(self):
+        text = "Header line\nSAVINGS ACCOUNT\nrow"
+        span = self._first_span(text)
+        self.assertIsNotNone(span)
+        self.assertEqual(span.section, SectionType.SAVINGS)
+
+    def test_savings_ac_abbrev(self):
+        text = "Header\nSAVINGS A/C 50100XXXX\nrow"
+        span = self._first_span(text)
+        self.assertIsNotNone(span)
+        self.assertEqual(span.section, SectionType.SAVINGS)
+
+    def test_savings_bank_account(self):
+        text = "Header\nSavings Bank Account\nrow"
+        span = self._first_span(text)
+        self.assertIsNotNone(span)
+        self.assertEqual(span.section, SectionType.SAVINGS)
+
+    def test_account_type_savings(self):
+        text = "Header\nAccount Type : Savings\nrow"
+        span = self._first_span(text)
+        self.assertIsNotNone(span)
+        self.assertEqual(span.section, SectionType.SAVINGS)
+
+    def test_parenthetical_savings(self):
+        text = "Header\nAccount: 50100XXXXX (SAVINGS)\nrow"
+        span = self._first_span(text)
+        self.assertIsNotNone(span)
+        self.assertEqual(span.section, SectionType.SAVINGS)
+
+
+class TestBroadenedCreditCardHeaders(unittest.TestCase):
+    def _first_span(self, text):
+        spans = detect_hdfc_sections(text)
+        for s in spans:
+            if s.section != SectionType.UNKNOWN:
+                return s
+        return None
+
+    def test_credit_card_account(self):
+        text = "Header\nCREDIT CARD ACCOUNT\nrow"
+        span = self._first_span(text)
+        self.assertEqual(span.section, SectionType.CREDIT_CARD)
+
+    def test_credit_card_ac(self):
+        text = "Header\nCredit Card A/C\nrow"
+        span = self._first_span(text)
+        self.assertEqual(span.section, SectionType.CREDIT_CARD)
+
+    def test_credit_card_statement_banner(self):
+        text = "Header\nCredit Card Statement\nrow"
+        span = self._first_span(text)
+        self.assertEqual(span.section, SectionType.CREDIT_CARD)
+
+
+class TestBroadenedFixedRecurringHeaders(unittest.TestCase):
+    """Both bare and abbreviated forms — with the RECURRING-before-
+    FIXED ordering guard intact so RD substrings don't hijack FD."""
+
+    def _all_sections(self, text):
+        return [s.section for s in detect_hdfc_sections(text)
+                if s.section != SectionType.UNKNOWN]
+
+    def test_fd_abbrev(self):
+        text = "Header\nFD A/C 12345\nrow"
+        sections = self._all_sections(text)
+        self.assertIn(SectionType.FIXED_DEPOSIT, sections)
+        self.assertNotIn(SectionType.RECURRING_DEPOSIT, sections)
+
+    def test_rd_abbrev(self):
+        text = "Header\nRD Account 55555\nrow"
+        sections = self._all_sections(text)
+        self.assertIn(SectionType.RECURRING_DEPOSIT, sections)
+        self.assertNotIn(SectionType.FIXED_DEPOSIT, sections)
+
+    def test_recurring_deposit_bare(self):
+        text = "Header\nRECURRING DEPOSIT ACCOUNT\nrow"
+        sections = self._all_sections(text)
+        self.assertIn(SectionType.RECURRING_DEPOSIT, sections)
+
+    def test_fixed_deposit_bare(self):
+        text = "Header\nFIXED DEPOSIT A/C\nrow"
+        sections = self._all_sections(text)
+        self.assertIn(SectionType.FIXED_DEPOSIT, sections)
+
+
+class TestBroadenedRealisticMultiSection(unittest.TestCase):
+    """Emulate the 2026 Vidish_Raj_ layout: a combined statement
+    where every section uses bare banner headers (no "Statement of
+    Account for" prefix). Detector must find every section."""
+
+    def test_2026_style_layout(self):
+        text = "\n".join([
+            "HDFC Bank Combined Statement",
+            "SAVINGS ACCOUNT 50100XXXXX",  # bare banner
+            "01/04  Salary Credit  50,000.00",
+            "02/04  UPI Payment  1,234.56",
+            "CREDIT CARD A/C",              # abbrev banner
+            "03/04  Amazon Purchase  2,500.00",
+            "FD A/C 22345",                 # FD abbrev
+            "05/04  FD Interest  750.00",
+            "RD ACCOUNT 33345",             # RD abbrev
+            "06/04  RD Deposit  5,000.00",
+            "MUTUAL FUND FOLIO 44345",      # MF folio banner
+            "07/04  MF NAV  120.50",
+        ])
+        sections = [
+            s.section for s in detect_hdfc_sections(text)
+            if s.section != SectionType.UNKNOWN
+        ]
+        self.assertIn(SectionType.SAVINGS, sections)
+        self.assertIn(SectionType.CREDIT_CARD, sections)
+        self.assertIn(SectionType.FIXED_DEPOSIT, sections)
+        self.assertIn(SectionType.RECURRING_DEPOSIT, sections)
+        self.assertIn(SectionType.MUTUAL_FUND, sections)
+
+
+class TestNarrationDoesNotFalsePositive(unittest.TestCase):
+    """ak-dby's bare-banner patterns are anchored to line start so a
+    transaction narration mentioning "savings account" mid-line can't
+    trip them. This test locks that anchor guarantee."""
+
+    def test_narration_with_savings_account_mid_line(self):
+        text = "Some txn narration mentioning savings account balance"
+        spans = detect_hdfc_sections(text)
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0].section, SectionType.UNKNOWN)
+
+    def test_narration_with_credit_card_mid_line(self):
+        text = "Payment to Amazon via credit card A/C"
+        spans = detect_hdfc_sections(text)
+        self.assertEqual(spans[0].section, SectionType.UNKNOWN)
+
+    def test_narration_with_fd_mid_line(self):
+        text = "Interest posting from FD Account renewal"
+        spans = detect_hdfc_sections(text)
+        self.assertEqual(spans[0].section, SectionType.UNKNOWN)
+
+    def test_leading_whitespace_still_matches(self):
+        """Anchors allow leading whitespace — indentation on banner
+        lines shouldn't hide a real section header."""
+        text = "Header\n   SAVINGS ACCOUNT 50100XXXX\nrow"
+        spans = detect_hdfc_sections(text)
+        savings = [s for s in spans if s.section == SectionType.SAVINGS]
+        self.assertTrue(savings)
+
+
+class TestExistingPatternsStillMatch(unittest.TestCase):
+    """Belt-and-braces regression guard: the canonical "Statement of
+    Account for : X" phrasings — which the 47 pre-existing tests
+    already cover — still match after ak-dby's additions."""
+
+    def test_canonical_savings(self):
+        text = "Header\nStatement of Account for : SAVINGS ACCOUNT\nrow"
+        spans = detect_hdfc_sections(text)
+        savings = [s for s in spans if s.section == SectionType.SAVINGS]
+        self.assertTrue(savings, "canonical SAVINGS phrasing regressed")
+
+    def test_canonical_credit_card(self):
+        text = "Header\nStatement for : CREDIT CARD\nrow"
+        spans = detect_hdfc_sections(text)
+        cc = [s for s in spans if s.section == SectionType.CREDIT_CARD]
+        self.assertTrue(cc, "canonical CREDIT_CARD phrasing regressed")
+
+
 if __name__ == "__main__":
     print("ak-ifc statement-section detector regression tests")
     print("=" * 60)
