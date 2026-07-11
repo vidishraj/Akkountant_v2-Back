@@ -469,6 +469,54 @@ class TransactionService(BaseService):
             else:
                 self.db.session.commit()
 
+    def mark_reconciliation_fallback(self, fileId, user_id=None):
+        """ak-ifc v3 MINOR 1: mark a fileDetails row as having
+        triggered the savings-summary reconciliation fallback.
+
+        The row is tagged so a follow-up sweep can flag the file for
+        manual review of the acknowledged non-savings over-parse
+        that unfiltered extraction introduces.
+
+        Swallows ORM errors defensively so the fallback re-run still
+        lands the data even if the column isn't present yet — infra
+        needs to ALTER TABLE fileDetails ADD COLUMN
+        reconciliation_fallback BOOLEAN NOT NULL DEFAULT 0 before
+        this becomes observable.
+        """
+        try:
+            query = self.db.session.query(FileDetails).filter_by(fileID=fileId)
+            if user_id:
+                query = query.filter(FileDetails.user == user_id)
+            row = query.first()
+            if not row:
+                self.logger.warning(
+                    f"ak-ifc reconciliation-fallback tag: no fileDetails "
+                    f"row for fileID={fileId!r}"
+                )
+                return False
+            setattr(row, "reconciliation_fallback", True)
+            if isinstance(self.db, dict):
+                with self.db.session() as session:
+                    session.commit()
+            else:
+                self.db.session.commit()
+            self.logger.info(
+                f"ak-ifc reconciliation-fallback tag: marked fileID="
+                f"{fileId!r} for follow-up manual review"
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(
+                f"ak-ifc reconciliation-fallback tag: could not mark "
+                f"fileID={fileId!r}: {e}. Data lands regardless; run "
+                f"the ALTER TABLE migration to enable this tag."
+            )
+            try:
+                self.db.session.rollback()
+            except Exception:
+                pass
+            return False
+
     def fetchFileDetails(self, page: int, filters: dict, user_id: str = None, page_size: int = 100):
         query = self.db.session.query(FileDetails).filter(FileDetails.deleted == False)
 
