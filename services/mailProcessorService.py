@@ -2058,6 +2058,38 @@ class MailProcessorService:
                     f"all transactions."
                 )
                 hdfc_mask = None
+                # ak-dby: when the detector misses (regex doesn't
+                # match any SAVINGS header — the exact pathology of
+                # the 2026 Vidish_Raj_ layout), the full-text
+                # fallback re-admits non-savings sub-account rows
+                # into the savings fileID. Mark the file so the
+                # /admin/stripFallbackRows endpoint (ak-ex2) picks it
+                # up on the next re-parse sweep. Same pattern as the
+                # ak-ifc-v3 file-level reconciliation fallback path,
+                # different trigger.
+                #
+                # Only mark when we have a preset_file_id — if the
+                # extractor is running against an ad-hoc PDF path
+                # (rare, non-pipeline), there's no fileDetails row
+                # to tag.
+                if preset_file_id:
+                    try:
+                        self.transaction_service.mark_reconciliation_fallback(
+                            preset_file_id, user_id=user_id,
+                        )
+                        self.logger.info(
+                            f"ak-dby: tagged fileID={preset_file_id!r} "
+                            f"reconciliation_fallback=True (savings_spans=0 "
+                            f"detector miss) so /admin/stripFallbackRows "
+                            f"can clean up leaked non-savings tx."
+                        )
+                    except Exception as e:  # pragma: no cover — defensive
+                        self.logger.warning(
+                            f"ak-dby: mark_reconciliation_fallback failed "
+                            f"for fileID={preset_file_id!r}: {e}. Data "
+                            f"lands regardless; strip endpoint won't fire "
+                            f"until the file is tagged manually."
+                        )
 
         # Now pull the chunk's text, annotate each line with its
         # file-level line number so the LLM can echo the correct
