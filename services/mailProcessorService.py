@@ -2232,24 +2232,72 @@ class MailProcessorService:
             f"model={options.model} sys_prompt_sha={_sp_sha_text}"
         )
 
-        # Send query via run_query_collect — one-shot, structured output
+        # Send query via run_query_collect — one-shot, structured output.
+        # ak-wty: F12 "Fatal error in message reader" is transient on
+        # ~5-10% of chunk runs under production load. Backoff-retry up
+        # to MAX_RETRIES on a known-transient signature; if all
+        # attempts fail (or the error is non-retryable) fall through
+        # to the existing error-return path. A structured log records
+        # the fileID + chunk indices + attempt count so a follow-up
+        # sweep can find any file that exhausted its retry budget.
+        import asyncio as _asyncio
+        from utils.sdk_retry import (
+            MAX_RETRIES,
+            is_retryable_sdk_error,
+            retry_delay_seconds,
+        )
         run_result = await run_query_collect(
             agent="pdf.text", options=options, prompt=prompt_text,
         )
+        attempts_used = 1
+        while (
+            run_result.error
+            and is_retryable_sdk_error(run_result.error)
+            and attempts_used <= MAX_RETRIES
+        ):
+            delay = retry_delay_seconds(attempts_used - 1)
+            self.logger.warning(
+                f"ak-wty: transient SDK error on chunk "
+                f"{page_start}-{page_end} (file_id={preset_file_id!r}) "
+                f"attempt {attempts_used}/{MAX_RETRIES + 1}: "
+                f"{run_result.error!r}. Sleeping {delay}s and retrying."
+            )
+            await _asyncio.sleep(delay)
+            attempts_used += 1
+            run_result = await run_query_collect(
+                agent="pdf.text", options=options, prompt=prompt_text,
+            )
         structured_data = run_result.structured_output
         fallback_text = run_result.text
         error_msg = run_result.error
         self.logger.info(
             f"Chunk {page_start}-{page_end} run: "
             f"has_structured_output={structured_data is not None}, "
-            f"text_chars={len(fallback_text)}, error={bool(error_msg)}"
+            f"text_chars={len(fallback_text)}, error={bool(error_msg)}, "
+            f"attempts_used={attempts_used}"
         )
 
         if error_msg:
+            # ak-wty: retries exhausted (or non-retryable error).
+            # Log with all the observability fields so a follow-up
+            # sweep can find the file.
             self.logger.error(
-                f"Text chunk error (pages {page_start}-{page_end}): {error_msg}"
+                f"ak-wty: text chunk error unresolved after "
+                f"{attempts_used} attempt(s). "
+                f"file_id={preset_file_id!r} pages={page_start}-{page_end} "
+                f"retryable={is_retryable_sdk_error(error_msg)} "
+                f"error={error_msg!r}"
             )
-            return {"called": False, "inserted": 0, "duplicates": 0}
+            return {
+                "called": False,
+                "inserted": 0,
+                "duplicates": 0,
+                # ak-wty: expose the retry counts + failure signal to
+                # callers (e.g. _run_all_chunks_async) so they can
+                # tag the file / bump per-chunk failure counters.
+                "sdk_retry_attempts": attempts_used,
+                "sdk_error": error_msg,
+            }
 
         # Fallback: if structured_output is None, try parsing AssistantMessage text
         if structured_data is None and fallback_text:
