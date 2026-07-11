@@ -32,17 +32,63 @@ MAIL_PROCESSOR_TOOLS = [
                     "enum": ["Email", "Statement"],
                     "description": "Whether this came from an email alert or a PDF statement"
                 },
+                "bank_reference_id": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "ak-8l5: per-transaction bank-native identifier "
+                        "extracted from the narration/description. Used as "
+                        "the primary dedup key so chunk re-reads collapse "
+                        "while legitimate same-tuple tx stay distinct. "
+                        "Examples: HDFC UPI ref ('UPI-9876543210-P2M-…' → "
+                        "'9876543210'), IMPS ref, NEFT UTR, BOI MBSF "
+                        "number (middle numeric block of MBSF/…/…), "
+                        "cheque number. RETURN NULL if the row genuinely "
+                        "has no per-tx ref (cash deposit, interest post, "
+                        "monthly fee) — the positional fallback handles "
+                        "those. NEVER guess. Same tx across two chunks "
+                        "must extract to the same ref string."
+                    )
+                },
+                "line_position": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        "ak-8l5: 1-indexed line number within the RAW "
+                        "statement file text. Populate when source is "
+                        "Statement so ref-less rows can use the "
+                        "positional-fallback hash. Leave null for Email "
+                        "source (behavioral dedup handles that path)."
+                    )
+                },
                 "gmail_message_id": {
                     "type": "string",
                     "description": "Gmail message ID for deduplication (optional)"
                 },
             },
-            "required": ["date", "description", "amount", "bank", "source"]
+            # ak-8l5 M2: bank_reference_id + line_position are now
+            # required on the schema. Both accept null, but the field
+            # must be present in the payload — this makes the
+            # extractor's "did I forget to think about it" pathology
+            # visible instead of silent. Zero-loss is enforced at the
+            # insert-time backstop regardless, so this is defense-in-
+            # depth; a hallucinated non-null ref is caught by the
+            # backstop's (date, amount, desc)-differs check.
+            "required": [
+                "date", "description", "amount", "bank", "source",
+                "bank_reference_id", "line_position",
+            ]
         }
     },
     {
         "name": "insert_batch_transactions",
-        "description": "Insert multiple transactions at once (e.g. all transactions from a bank statement PDF). Each item follows the same schema as insert_transaction.",
+        "description": (
+            "Insert multiple transactions at once (e.g. all transactions from "
+            "a bank statement PDF). Each row must carry the ak-8l5 dedup "
+            "fields (bank_reference_id + line_position) — see the "
+            "insert_transaction docstring for extraction rules per bank. "
+            "Same tx read from two adjacent PDF chunks MUST emit the same "
+            "bank_reference_id and the same line_position so the second "
+            "insert becomes a no-op via the PK conflict path."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -55,8 +101,39 @@ MAIL_PROCESSOR_TOOLS = [
                             "description": {"type": "string"},
                             "amount": {"type": "number", "description": "Positive=debit, negative=credit"},
                             "bank": {"type": "string"},
+                            "bank_reference_id": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "ak-8l5 primary dedup key. Extract the "
+                                    "per-tx bank-native identifier from the "
+                                    "narration (UPI ref, IMPS ref, NEFT UTR, "
+                                    "MBSF number, cheque number). NULL is "
+                                    "correct for genuinely ref-less rows "
+                                    "(cash deposit / interest / fee) — the "
+                                    "positional fallback handles those. "
+                                    "Never guess. Same tx in adjacent "
+                                    "chunks MUST extract the same ref."
+                                )
+                            },
+                            "line_position": {
+                                "type": ["integer", "null"],
+                                "description": (
+                                    "ak-8l5 positional fallback key. "
+                                    "1-indexed line offset in the RAW file "
+                                    "text (add chunk base if the file is "
+                                    "chunked). Populate for every row so "
+                                    "ref-less rows can dedup by position."
+                                )
+                            },
                         },
-                        "required": ["date", "description", "amount"]
+                        # ak-8l5 M2: dedup fields are required (nullable)
+                        # on every batch row — same rationale as
+                        # insert_transaction. Makes extractor drift
+                        # visible; backstop enforces zero-loss.
+                        "required": [
+                            "date", "description", "amount",
+                            "bank_reference_id", "line_position",
+                        ]
                     },
                     "description": "Array of transaction objects to insert"
                 },
@@ -404,6 +481,59 @@ You will analyze financial PDFs from email attachments and extract all financial
   - For credit cards: billing cycles (e.g., 03/11/2024 to 02/12/2024)
   - Always include `period_start` and `period_end` when calling `insert_batch_transactions`
   - Format as DD/MM/YYYY (matching the transaction date format)
+
+### ak-8l5 per-transaction identifiers (bank_reference_id) — REQUIRED
+
+Every row you emit MUST carry both `bank_reference_id` (nullable) and
+`line_position` (1-indexed integer within the RAW statement text —
+add the chunk's base line offset if you're processing a chunk). These
+two fields drive the dedup engine: chunk re-reads of the same row
+must produce the same values so the second insert becomes a no-op
+via the PK conflict path, while distinct rows must produce different
+values.
+
+**bank_reference_id — extraction rules per bank.** Look for the
+per-transaction identifier bank writers put in the narration column.
+Return NULL if the row genuinely has no per-tx ref (cash deposit,
+interest post, monthly fee) — never guess.
+
+HDFC_DEBIT — search narration in this order:
+  - "UPI-<digits>-P2M-..." or "UPI-<digits>-P2A-..." → the digit block
+  - "UPI/<digits>/..." → the digit block
+  - "IMPS-P2A-<digits>-..." → the digit block
+  - "NEFT-<UTR>-..." → the UTR (12-16 alphanumeric)
+  - "ACH D-<ref>-..." / "ACH C-<ref>-..." → the ref segment
+  - "POS <terminal-id> <txn-ref>" → composite `<terminal>_<txn-ref>`
+  - "ATM WDL <machine-id> <txn-ref>" → composite `<machine>_<txn>`
+  - "CHQ PAID/<cheque-number>" → the cheque number
+  - "CASH DEP", "INT PD", "FEE", "MIN BAL CHG" → NULL (no per-tx ref)
+
+BOI — search narration in this order:
+  - "MBSF/<numeric>/<narration>" → the middle numeric block (this
+    is a stable per-tx ref, NOT the branch code)
+  - "Int:<start-date>/<end-date>" → composite `INT_<start>_<end>`
+    (interest posts have a date-window that's the ref)
+  - "LOAN COLL/<ref>" / "EMI/<ref>" / "SI/<ref>" → the trailing ref
+  - "SWEEP TRF/<numeric>" → the numeric block
+  - "BY CASH-<branch-code>-<location>" → NULL (branch code is NOT
+    per-tx unique — treat these as ref-less; positional fallback
+    engages)
+  - Cheque txns → the cheque number
+  - "Chg" / "Fee" / plain interest lines → NULL
+
+Other banks — same principle: extract only if the ref is
+per-transaction unique AND stable across chunk re-reads. If the
+candidate identifier is really a merchant ID or a branch code
+(same value for many transactions), return NULL and let the
+positional fallback engage.
+
+**line_position — 1-indexed line offset in the RAW statement text.**
+When the file is chunked, ADD the chunk's base offset to the local
+line number before emitting so the position stays stable across
+chunk boundaries. A tx that visually straddles pages 3-4 must emit
+the SAME line_position no matter which chunk sees it — the position
+is where the row's date/amount appear in the raw file text, not the
+page number.
 
 ### EPF Passbook
 - Extract all contribution entries: date, employee_deposit, employer_deposit, description

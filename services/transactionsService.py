@@ -250,7 +250,13 @@ class TransactionService(BaseService):
                     source=source,
                     user=userId,
                     processed_via=processing_method,
-                    gmail_message_id=gmail_message_id
+                    gmail_message_id=gmail_message_id,
+                    # ak-8l5: persist the LLM-extracted per-tx bank ref
+                    # alongside the derived PK so downstream tools
+                    # (audit, reprocess, inspection queries) can see
+                    # the identifier that drove the dedup without
+                    # re-reading the PDF.
+                    bank_reference_id=transaction.get('bank_reference_id'),
                 )
                 transaction_objects.append(transaction_obj)
             
@@ -317,9 +323,34 @@ class TransactionService(BaseService):
         return integrityErrors
 
     def _insert_transactions_individually(self, transaction_objects):
-        """Fallback method for individual transaction inserts when batch fails"""
+        """Fallback method for individual transaction inserts when batch fails.
+
+        ak-8l5 review MAJOR — code-level zero-loss backstop:
+
+        When an insert hits IntegrityError on the referenceID PK, we
+        no longer silently drop the row. The `utils.insert_backstop`
+        helper decides between:
+
+          - Silent drop (chunk-overlap dedup path; same content) —
+            the intended pre-ak-8l5 behavior.
+          - Suffix + retry (differing content) — extractor mapped two
+            distinct rows to the same ref; suffix disambiguator with
+            "-dupN" and retry so neither row is lost.
+
+        Overseer's hard requirement: "no transactions whatsoever lost".
+        Extraction perfection can't be guaranteed at the LLM layer, so
+        this is the safety net at the storage layer.
+
+        The Gmail-side dedup path (unique gmail_message_id) is
+        UNCHANGED — it existed pre-ak-8l5 and is not about ref
+        collisions.
+        """
+        from utils.reference_id import normalize_description_for_backstop
+        from utils.insert_backstop import apply_backstop_on_collision
+
         integrityErrors = 0
-        
+        disambiguated_count = 0
+
         for transaction_obj in transaction_objects:
             try:
                 if isinstance(self.db, dict):
@@ -329,15 +360,43 @@ class TransactionService(BaseService):
                 else:
                     self.db.session.add(transaction_obj)
                     self.db.session.commit()
+                continue  # inserted cleanly, next row
             except IntegrityError as e:
                 error_msg = str(e)
+                # Gmail-side dedup (unique gmail_message_id) — not a
+                # tx PK collision. Existing pre-ak-8l5 behavior.
                 if 'gmail_message_id' in error_msg and transaction_obj.gmail_message_id:
-                    self.logger.debug(f"Skipping duplicate email transaction (Gmail ID: {transaction_obj.gmail_message_id})")
-                else:
-                    self.logger.debug(f"Skipping duplicate transaction: {transaction_obj.referenceID}")
+                    self.logger.debug(
+                        f"Skipping duplicate email transaction "
+                        f"(Gmail ID: {transaction_obj.gmail_message_id})"
+                    )
+                    self.db.session.rollback()
+                    integrityErrors += 1
+                    continue
+                # PK collision. Roll back, then invoke the ak-8l5
+                # backstop.
                 self.db.session.rollback()
+
+            # ── ak-8l5 MAJOR backstop ──────────────────────────────
+            outcome = apply_backstop_on_collision(
+                session=self.db.session,
+                model_class=Transactions,
+                incoming=transaction_obj,
+                normalize_desc=normalize_description_for_backstop,
+                logger=self.logger,
+            )
+            if outcome == "disambiguated":
+                disambiguated_count += 1
+            elif outcome in ("dropped_matching", "dropped_missing", "retry_failed"):
                 integrityErrors += 1
-                
+
+        if disambiguated_count > 0:
+            self.logger.info(
+                f"ak-8l5 backstop applied to {disambiguated_count} tx(s) "
+                f"with colliding referenceID but differing content — "
+                f"both original and incoming preserved via suffix"
+            )
+
         return integrityErrors
 
     def fetchGmailTokenForUser(self, userID):
