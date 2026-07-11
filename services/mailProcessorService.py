@@ -218,10 +218,15 @@ class MailProcessorService:
             "_bank": bank,  # Override for bank detection
         }
 
-        # 4. Run analysis
+        # 4. Run analysis. ak-bwe v3 gave us a summary dict
+        # {"success", "failed_chunks", "total_chunks", "reason"}
+        # that ak-1rh (this fix) now consumes to build a structured
+        # return.
         self.logger.info(f"Reprocessing PDF {gmail_id} in {processing_mode} mode: {pdf_path}")
-        self._run_pdf_analysis(pdf_path, email, user_id, password=password,
-                               processing_mode=processing_mode, only_chunks=only_chunks)
+        analysis_summary = self._run_pdf_analysis(
+            pdf_path, email, user_id, password=password,
+            processing_mode=processing_mode, only_chunks=only_chunks,
+        )
 
         # 5. Check results — find the actual file_id from inserted transactions
         from models.transactions import Transactions
@@ -237,13 +242,33 @@ class MailProcessorService:
             Transactions.user == user_id,
         ).scalar()
 
-        return {
-            "status": "success",
-            "gmail_id": gmail_id,
-            "file_id": file_id,
-            "transactions_inserted": count,
-            "processing_mode": processing_mode,
-        }
+        # ── ak-1rh: structured return contract ─────────────────────
+        # Pre-ak-1rh returned {"status": "success", ...} unconditionally.
+        # ak-32o run 1 reported all 12 files "success" while files
+        # 4/7/8/9 silently produced 0 tx (chunks died with MySQL
+        # 1040 / SDK Fatal error). Callers had no way to detect
+        # failure without post-hoc DB counting. Now the status field
+        # differentiates success / partial / failed / empty so any
+        # caller can meaningfully assess correctness.
+        from utils.reprocess_status import summarize_reprocess_result
+        result = summarize_reprocess_result(
+            analysis_summary, transactions_inserted=count,
+        )
+        # Enrich with the fields callers depended on pre-ak-1rh so
+        # the diff to existing consumers stays compatible.
+        result["gmail_id"] = gmail_id
+        result["file_id"] = file_id
+        result["processing_mode"] = processing_mode
+
+        self.logger.info(
+            f"ak-1rh: reprocess_pdf finished gmail_id={gmail_id!r} "
+            f"status={result['status']!r} "
+            f"chunks_ok={result['chunks_ok']}/{result['chunks_total']} "
+            f"chunks_failed={result['chunks_failed']} "
+            f"transactions_inserted={result['transactions_inserted']} "
+            f"reason={result.get('analysis_reason')!r}"
+        )
+        return result
 
     def process_emails(self, user_id, date_from, date_to, processing_mode="image",
                        progress_callback=None):
