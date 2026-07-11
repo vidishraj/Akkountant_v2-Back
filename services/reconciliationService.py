@@ -46,73 +46,110 @@ class ReconciliationService(BaseService):
     ):
         """
         When a statement arrives for a bank+period:
-        1. Delete email-sourced transactions for that instrument+period
-        2. Delete overlapping statement-sourced transactions (period-based clean replace)
-           and clean up their orphaned file records
-        3. Record the statement period
-        Returns dict with counts.
+        1. MATCH-BEFORE-DELETE (ak-a0m v2) email-alert candidates
+           against statement rows in the same period. Delete only
+           those where a statement-side row for the SAME tx exists;
+           preserve the rest.
+        2. Record the statement period.
+
+        ak-a0m v1 removed the cross-file statement-delete that was
+        nuking rows from other files. That was necessary but not
+        sufficient: the email-side delete was still blanket, which
+        silently loses:
+          - alert-only tx (never appear on a statement)
+          - alerts under an under-parsed statement (statement missed
+            the row for some reason).
+
+        ak-a0m v2 (reviewer BOUNCE hq-wisp-35ufm6) adds symmetric
+        zero-loss on the email side: match each candidate against
+        the statement rows in the period. Primary match uses
+        bank_reference_id (ak-8l5's stable identity); fallback uses
+        (bank, date, amount, normalized-description). Rows with no
+        match are PRESERVED.
+
+        Cross-file protection (v1) still holds: statement rows are
+        never deleted here regardless of overlap. Chunk re-reads of
+        the same statement collapse via ak-8l5's referenceID PK
+        collision path at insert time.
+
+        Returns dict with counts:
+          email_transactions_deleted: number matched + deleted
+          email_transactions_preserved: number preserved (v2 added)
+          statement_transactions_deleted: 0 (retained for backward
+            compat with upstream loggers)
+          orphaned_files_deleted: 0 (same)
+          statement_period_recorded: True on success.
         """
         session = self.db.session
-        from models.fileDetails import FileDetails
-
-        # 1. Delete email transactions for this bank+period
-        email_deleted = session.query(Transactions).filter(
-            Transactions.user == user_id,
-            Transactions.bank == bank,
-            func.lower(Transactions.source) == 'email',
-            Transactions.date.between(period_start, period_end),
-        ).delete(synchronize_session='fetch')
-
-        self.logger.info(
-            f"Deleted {email_deleted} email transactions for {bank} "
-            f"({period_start} to {period_end})"
+        from utils.reconciliation_delete_policy import (
+            build_email_deletion_filters,
+            build_statement_lookup_filters,
+            build_statement_match_index,
+            is_email_matched_by_statement,
         )
 
-        # 2. Delete overlapping statement transactions for same bank+period
-        #    This prevents duplicates when re-processing or when statement periods overlap.
-        #    IMPORTANT: Exclude the current file_id so chunked PDFs don't delete
-        #    their own earlier chunks' transactions.
-        #    Collect affected fileIDs before deleting so we can clean up orphaned file records.
-        overlapping_file_ids = set()
-        overlap_filter = [
-            Transactions.user == user_id,
-            Transactions.bank == bank,
-            func.lower(Transactions.source) == 'statement',
-            Transactions.date.between(period_start, period_end),
-        ]
-        if file_id:
-            overlap_filter.append(Transactions.fileID != file_id)
+        # 1a. Load the email-alert CANDIDATES for the period.
+        #     ak-a0m v2: filter is sourced from the same policy
+        #     module as the pure predicate, so a SQL / Python
+        #     divergence can't slip in silently (v2 MINOR fix).
+        candidate_filter = build_email_deletion_filters(
+            Transactions, user_id, bank,
+            period_start, period_end, func=func,
+        )
+        candidates = session.query(Transactions).filter(
+            *candidate_filter
+        ).all()
 
-        overlapping_stmt_txns = session.query(Transactions).filter(*overlap_filter).all()
-        for txn in overlapping_stmt_txns:
-            if txn.fileID:
-                overlapping_file_ids.add(txn.fileID)
+        # 1b. Load the statement-side rows in the same period. Any
+        #     statement file for the (user, bank, period). The
+        #     statement we're about to record has already inserted
+        #     via the calling pipeline, so its rows are visible
+        #     here.
+        statement_filter = build_statement_lookup_filters(
+            Transactions, user_id, bank,
+            period_start, period_end, func=func,
+        )
+        statement_rows = session.query(Transactions).filter(
+            *statement_filter
+        ).all()
 
-        stmt_deleted = session.query(Transactions).filter(*overlap_filter).delete(synchronize_session='fetch')
+        # 1c. Build the match indexes ONCE per invocation.
+        #     O(n_stmt) build, O(1) lookup per candidate. Beats the
+        #     naive O(n_email × n_stmt) inner loop.
+        by_ref, by_tuple = build_statement_match_index(statement_rows)
 
-        if stmt_deleted > 0:
-            self.logger.info(
-                f"Overlap guard: deleted {stmt_deleted} prior statement transactions "
-                f"for {bank} ({period_start} to {period_end})"
-            )
-            if stmt_deleted > transaction_count > 0:
-                self.logger.warning(
-                    f"Overlap guard WARNING: new statement has {transaction_count} txns "
-                    f"but deleted {stmt_deleted} old ones — possible extraction regression"
-                )
+        # 1d. Match-before-delete: only mark candidates with a
+        #     matching statement-side row. Zero match → preserve.
+        to_delete_refs = []
+        preserved_count = 0
+        for c in candidates:
+            if is_email_matched_by_statement(c, by_ref, by_tuple):
+                to_delete_refs.append(c.referenceID)
+            else:
+                preserved_count += 1
 
-        # Soft-delete orphaned file records (files that now have zero transactions)
+        email_deleted = 0
+        if to_delete_refs:
+            email_deleted = session.query(Transactions).filter(
+                Transactions.referenceID.in_(to_delete_refs),
+                Transactions.user == user_id,
+            ).delete(synchronize_session='fetch')
+
+        self.logger.info(
+            f"ak-a0m v2: {email_deleted} email-alert(s) replaced by "
+            f"matching statement rows; {preserved_count} preserved "
+            f"(no matching statement row). "
+            f"bank={bank} period={period_start} to {period_end} "
+            f"file_id={file_id!r} statement_rows_in_period={len(statement_rows)} "
+            f"candidates={len(candidates)}"
+        )
+
+        # 2. ak-a0m v1: cross-file statement-delete REMOVED. Rows
+        #    from other statements are protected under the zero-loss
+        #    constraint. Chunk re-reads of the same statement dedup
+        #    at the storage layer via ak-8l5.
+        stmt_deleted = 0
         orphaned_files_deleted = 0
-        for old_file_id in overlapping_file_ids:
-            remaining = session.query(Transactions).filter(
-                Transactions.fileID == old_file_id,
-            ).count()
-            if remaining == 0:
-                old_file = session.query(FileDetails).filter_by(fileID=old_file_id).first()
-                if old_file:
-                    old_file.deleted = True
-                    orphaned_files_deleted += 1
-                    self.logger.info(f"Soft-deleted orphaned file record: {old_file_id}")
 
         # 3. Upsert statement period record
         existing = session.query(StatementPeriod).filter_by(
@@ -155,6 +192,10 @@ class ReconciliationService(BaseService):
 
         return {
             "email_transactions_deleted": email_deleted,
+            # ak-a0m v2: NEW observability field — how many candidate
+            # email alerts were preserved because no matching
+            # statement row existed.
+            "email_transactions_preserved": preserved_count,
             "statement_transactions_deleted": stmt_deleted,
             "orphaned_files_deleted": orphaned_files_deleted,
             "statement_period_recorded": True,
