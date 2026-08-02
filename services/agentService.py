@@ -11,7 +11,7 @@ import time
 import anyio
 from services.Base_Service import BaseService
 from services.agent_tools import get_agent_config
-from services.agent_tool_executor import execute_tool
+from services.agent_tool_executor import execute_tool, TOOL_ERROR_KEY
 from utils.logger import Logger
 from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
 import base64 as _base64  # ak-1x4 pass 2: encode attachment bytes for tool result
@@ -935,7 +935,22 @@ class AgentService(BaseService):
                     mail_processor=self.mail_processor,
                 )
 
-                # Track mutations
+                # ak-e7g: distinguish handler-layer validation failures
+                # (surfaced with is_error=True so the LLM can retry with
+                # the correct shape) from happy-path results. The
+                # TOOL_ERROR_KEY sentinel is the private contract between
+                # execute_tool and this handler — see
+                # services/agent_tool_executor.py.
+                if isinstance(result, dict) and result.get(TOOL_ERROR_KEY):
+                    return {
+                        "content": [{
+                            "type": "text",
+                            "text": result.get("message", "Tool validation error"),
+                        }],
+                        "is_error": True,
+                    }
+
+                # Track mutations (only on non-error results)
                 if _tn in MUTATION_TOOLS:
                     mutations.append(_tn)
 

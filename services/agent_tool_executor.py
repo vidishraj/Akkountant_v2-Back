@@ -12,6 +12,107 @@ from utils.logger import Logger
 logger = Logger(__name__).get_logger()
 
 
+# ak-e7g: sentinel key on the executor's return dict that the SDK-tool
+# handler (services/agentService.py::_build_sdk_tools) lifts into
+# is_error=True so the LLM sees the validation failure and can retry
+# with the correct shape. Keep this key name in sync with the check
+# there — the two are a private contract between the layers.
+TOOL_ERROR_KEY = "_tool_error"
+
+
+class ToolValidationError(Exception):
+    """Raised when an agent tool's input fails per-tool validation
+    before the underlying service is called. ak-e7g moved per-
+    service_type shape enforcement here after the top-level allOf
+    on insert_investment's input_schema was rejected by the Anthropic
+    API."""
+
+
+# Per-service_type required-field shape for insert_investment. Kept as
+# a module-level table (rather than inline in the executor branch) so
+# the test suite can import + drive it without spinning up the whole
+# execute_tool stack. Order matches the tool description in
+# services/agent_tools.py:insert_investment for grep-ability.
+INSERT_INVESTMENT_REQUIRED_FIELDS = {
+    "Mutual_Funds": ("schemeCode", "date", "quantity", "amount"),
+    "NPS":          ("schemeCode", "date", "quantity", "amount"),
+    "EPF":          ("date", "description", "employee_amount", "employer_amount"),
+    "PF":           ("date", "description", "amount"),
+    "Gold":         ("date", "description", "amount", "quantity", "goldType"),
+}
+
+
+def _missing_or_empty(data, fields):
+    """Return the subset of `fields` that are missing from `data` or
+    present but set to a value we treat as unfilled (None / empty string).
+    Zero and False are treated as PRESENT — only missing keys / None /
+    empty-string count as omissions."""
+    if not isinstance(data, dict):
+        return list(fields)
+    missing = []
+    for f in fields:
+        if f not in data:
+            missing.append(f)
+            continue
+        v = data[f]
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            missing.append(f)
+    return missing
+
+
+def _validate_insert_investment(tool_input):
+    """Per-service_type required-field enforcement for insert_investment.
+
+    ak-e7g (P0 hotfix): the JSON Schema top-level allOf that used to
+    enforce this shape was rejected by the Anthropic API, breaking the
+    Investment Assistant chat entirely. Moving the check here keeps
+    ak-bgc's protection intent: reject an EPF call missing the two-half
+    split BEFORE it hits EPFService (which still has a silent 50/50
+    split fallback for bare `amount` that we don't want to depend on).
+
+    Raises ToolValidationError with a descriptive message on failure.
+    Returns silently on success. Never returns a value — callers should
+    proceed to the service dispatch on a clean return.
+    """
+    if not isinstance(tool_input, dict):
+        raise ToolValidationError(
+            "insert_investment: tool_input must be an object"
+        )
+    stype = tool_input.get("service_type")
+    if stype not in INSERT_INVESTMENT_REQUIRED_FIELDS:
+        raise ToolValidationError(
+            "insert_investment: 'service_type' must be one of "
+            f"{sorted(INSERT_INVESTMENT_REQUIRED_FIELDS)} "
+            f"(got {stype!r})"
+        )
+    data = tool_input.get("data")
+    if not isinstance(data, dict):
+        raise ToolValidationError(
+            "insert_investment: 'data' must be an object with the "
+            f"required fields for service_type='{stype}' "
+            f"({list(INSERT_INVESTMENT_REQUIRED_FIELDS[stype])})"
+        )
+    required = INSERT_INVESTMENT_REQUIRED_FIELDS[stype]
+    missing = _missing_or_empty(data, required)
+    if missing:
+        hint = ""
+        # ak-bgc guard: EPF with bare `amount` (and no halves) was the
+        # original silent 50/50-split bug. Call it out explicitly so
+        # the LLM doesn't just retry by shuffling `amount` around.
+        if stype == "EPF" and (
+            "employee_amount" in missing or "employer_amount" in missing
+        ) and "amount" in data:
+            hint = (
+                " Note: EPF does NOT accept a single 'amount' field — "
+                "provide the two-half split as 'employee_amount' + "
+                "'employer_amount' (the total = employee + employer)."
+            )
+        raise ToolValidationError(
+            f"insert_investment for service_type='{stype}' requires "
+            f"{list(required)}. Missing/empty: {missing}.{hint}"
+        )
+
+
 def _resolve_service_type(raw_type: str):
     """Convert a string service type to the appropriate enum."""
     if raw_type in MSNENUM.__members__:
@@ -100,6 +201,14 @@ def execute_tool(agent_type, tool_name, tool_input, user_id,
         unwrapped = _unwrap_response(result)
         return _make_serializable(unwrapped)
 
+    except ToolValidationError as e:
+        # ak-e7g: surface handler-layer validation failures as tool_errors
+        # (is_error=True in the SDK response) so the LLM sees the error
+        # text and can retry with the correct shape. Distinguished from
+        # generic Exception below so we don't spam logs at ERROR level
+        # for what's really an expected-shape-mismatch retry path.
+        logger.info(f"Tool validation error [{agent_type}/{tool_name}]: {e}")
+        return {TOOL_ERROR_KEY: True, "message": str(e)}
     except Exception as e:
         logger.error(f"Tool execution error [{agent_type}/{tool_name}]: {e}")
         return {"error": str(e)}
@@ -140,6 +249,10 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
         return service.fetchSecuritySchemeRate(stype.value, tool_input["scheme_code"])
 
     elif tool_name == "insert_investment":
+        # ak-e7g: validate per-service_type shape BEFORE dispatch.
+        # Raises ToolValidationError which is caught in execute_tool and
+        # surfaced as is_error=True to the LLM.
+        _validate_insert_investment(tool_input)
         stype = _resolve_service_type(tool_input["service_type"])
         return service.insertSecurityPurchase(stype, user_id, tool_input["data"])
 

@@ -28,7 +28,7 @@ You have full access to the user's investment portfolio across 6 asset types:
 - `get_rate_freshness()` — When each rate file was last updated.
 
 ### Data Management
-- `insert_investment(service_type, data)` — Add new investment. Required fields are per-service-type — see the Purchase Assistant Guide below for the exact shape. Critical: EPF requires the **two-half split** (employee_amount + employer_amount), NOT a single `amount` — calling with bare `amount` is rejected by the schema. PF (=PPF) takes single `amount`.
+- `insert_investment(service_type, data)` — Add new investment. Required fields are per-service-type — see the Purchase Assistant Guide below for the exact shape. Critical: EPF requires the **two-half split** (employee_amount + employer_amount), NOT a single `amount` — calling with bare `amount` is rejected by the executor (is_error=True). PF (=PPF) takes single `amount`.
 - `delete_single_investment(service_type, buy_id)` — Delete one record.
 - `delete_all_investments(service_type)` — Delete ALL records of a type. DESTRUCTIVE.
 - `sync_kite_holdings()` — Sync Kite holdings to local DB. DESTRUCTIVE.
@@ -114,7 +114,7 @@ Collect all required fields one-by-one, validate as you go, and confirm before i
 
 ### EPF (Employee Provident Fund)
 - **Required**: date, description, **employee_amount**, **employer_amount** (both halves, ALWAYS split — never combine)
-- **CRITICAL — split must be explicit**: NEVER call `insert_investment` for EPF with a single `amount` field. The two halves are required and the schema rejects the call otherwise. There is no implicit 50/50 split anymore — previously the service silently halved `amount` and produced rows where employer == employee, which was a bug.
+- **CRITICAL — split must be explicit**: NEVER call `insert_investment` for EPF with a single `amount` field. The two halves are required and the executor rejects the call (is_error=True) otherwise. There is no implicit 50/50 split anymore — previously the service silently halved `amount` and produced rows where employer == employee, which was a bug.
 - **Flow**:
   1. Ask contribution month/year (MM/YYYY format)
   2. Ask employee contribution (12% of basic deducted from salary)
@@ -330,13 +330,16 @@ INVESTMENT_TOOLS = [
     },
     {
         "name": "insert_investment",
-        # ak-bgc fix: per-service_type required-field enforcement via
-        # JSON Schema `allOf` + `if/then`. Previously the schema only
-        # required {date, amount} which let the agent call EPF with
-        # bare `amount` and triggered the silent 50/50 split bug in
-        # EPFService. Now the SDK boundary rejects an EPF call missing
-        # employee_amount + employer_amount BEFORE it ever reaches the
-        # service layer.
+        # ak-e7g (P0 hotfix): the Anthropic API rejects a top-level `allOf`
+        # in input_schema ('input_schema does not support oneOf, allOf, or
+        # anyOf at the top level'), which broke the Investment Assistant
+        # chat entirely. Per-service_type required-field enforcement has
+        # been moved to the executor layer (see agent_tool_executor.
+        # _validate_insert_investment) which rejects malformed calls with
+        # is_error=True BEFORE the service layer runs. EPFService still
+        # has its own strict validation (ak-bgc), so this handler-level
+        # gate is belt-and-braces protection for the historical silent
+        # 50/50-split bug.
         "description": (
             "Insert a new investment purchase record. Required data fields differ per service_type:\n"
             "- Mutual_Funds: {schemeCode, date, quantity, amount}\n"
@@ -344,7 +347,9 @@ INVESTMENT_TOOLS = [
             "- EPF:           {date, description, employee_amount, employer_amount}  ← BOTH halves, NEVER 'amount' alone\n"
             "- PF (PPF):      {date, description, amount}\n"
             "- Gold:          {date, description, amount, quantity (grams), goldType (one of '18'/'22'/'24')}\n"
-            "Dates are dd-mm-YYYY. All numeric fields must be positive."
+            "Dates are dd-mm-YYYY. All numeric fields must be positive. "
+            "Per-service_type required-field shape is enforced by the executor — a call with the wrong shape "
+            "returns is_error=True with a descriptive message so you can retry with the correct fields."
         ),
         "input_schema": {
             "type": "object",
@@ -356,7 +361,7 @@ INVESTMENT_TOOLS = [
                 },
                 "data": {
                     "type": "object",
-                    "description": "Investment data — per-type required fields enforced via allOf below.",
+                    "description": "Investment data — per-service_type required fields enforced by the executor (see tool description).",
                     "properties": {
                         "schemeCode": {"type": "string", "description": "Scheme code (MF/NPS only)"},
                         "date": {"type": "string", "description": "Date in dd-mm-YYYY format"},
@@ -369,29 +374,7 @@ INVESTMENT_TOOLS = [
                     }
                 }
             },
-            "required": ["service_type", "data"],
-            "allOf": [
-                {
-                    "if": {"properties": {"service_type": {"const": "Mutual_Funds"}}, "required": ["service_type"]},
-                    "then": {"properties": {"data": {"required": ["schemeCode", "date", "quantity", "amount"]}}}
-                },
-                {
-                    "if": {"properties": {"service_type": {"const": "NPS"}}, "required": ["service_type"]},
-                    "then": {"properties": {"data": {"required": ["schemeCode", "date", "quantity", "amount"]}}}
-                },
-                {
-                    "if": {"properties": {"service_type": {"const": "EPF"}}, "required": ["service_type"]},
-                    "then": {"properties": {"data": {"required": ["date", "description", "employee_amount", "employer_amount"]}}}
-                },
-                {
-                    "if": {"properties": {"service_type": {"const": "PF"}}, "required": ["service_type"]},
-                    "then": {"properties": {"data": {"required": ["date", "description", "amount"]}}}
-                },
-                {
-                    "if": {"properties": {"service_type": {"const": "Gold"}}, "required": ["service_type"]},
-                    "then": {"properties": {"data": {"required": ["date", "description", "amount", "quantity", "goldType"]}}}
-                }
-            ]
+            "required": ["service_type", "data"]
         }
     },
     {

@@ -1,4 +1,6 @@
-"""Service-layer regression tests for ak-bgc strict-insert audit.
+"""Service-layer regression tests for ak-bgc strict-insert audit,
+plus ak-e7g P0-hotfix handler-layer enforcement + top-level schema
+combinator guard.
 
 Covers:
   - EPFService.insertDeposit: explicit employee+employer required,
@@ -11,8 +13,16 @@ Covers:
     {18/22/24}, positive quantity/amount.
   - NpsService.buySecurity: parity with MfService positive validation
     (NPS had none, MF did).
-  - JSON schema sanity: agent_tools.insert_investment per-service_type
-    required-field shape verified offline.
+  - JSON schema sanity: agent_tools.insert_investment has NO top-level
+    allOf/oneOf/anyOf (rejected by Anthropic API — ak-e7g).
+  - Handler-layer per-service_type shape enforcement in
+    agent_tool_executor._validate_insert_investment (ak-e7g move-from-
+    schema pivot; preserves ak-bgc protection intent at the executor
+    boundary before reaching EPFService).
+  - Regression guard: iterate ALL tool lists (INVESTMENT_TOOLS,
+    TRANSACTION_TOOLS, FREELANCE_TOOLS, MAIL_PROCESSOR_TOOLS) and assert
+    NONE have top-level oneOf/allOf/anyOf. Prevents this class from
+    recurring on any other tool.
 
 # Setup (v3 pivot — Lead bounce hq-wisp-tzkn1)
 
@@ -93,10 +103,18 @@ SKIP_REASON = (
 
 
 class TestInsertInvestmentSchema(unittest.TestCase):
-    """Verify the agent_tools.insert_investment JSON schema is shaped
-    such that the per-service_type required-field constraint is present.
-    The schema literal is the contract the SDK enforces, so a parser
-    can rely on the shape without us importing the heavy service stack."""
+    """ak-e7g P0 hotfix: the previous per-service_type shape enforcement
+    lived in the JSON Schema as a top-level allOf clause. Anthropic API
+    rejects top-level allOf/oneOf/anyOf in input_schema, which broke the
+    Investment Assistant chat entirely.
+
+    Post-hotfix invariants (source-text-inspection, no deps required):
+      1. NO top-level allOf/oneOf/anyOf on insert_investment.input_schema
+      2. Top-level `required` remains {service_type, data}
+      3. NO nested per-type required-field markers (they moved to the
+         handler — see agent_tool_executor._validate_insert_investment,
+         covered by TestInsertInvestmentHandlerEnforcement)
+    """
 
     def setUp(self):
         # Import agent_tools as a text-parse rather than as a module
@@ -112,54 +130,83 @@ class TestInsertInvestmentSchema(unittest.TestCase):
             source = fh.read()
         self.source = source
 
-    def test_per_service_type_required_present(self):
-        print("\n[insert_investment schema — per-service_type required-field constraints]")
-        # We don't parse the whole schema literal — just spot-check that
-        # each branch's required list contains its identifying fields,
-        # since a regression would silently re-open the EPF bare-amount
-        # bypass.
+    def _insert_investment_schema_block(self):
+        """Extract the source lines belonging to insert_investment's
+        tool dict (from the tool's `"name": "insert_investment"` header
+        until the next tool's `"name":`). Used to scope combinator
+        assertions to the correct tool without pulling in other tools'
+        schemas."""
+        import re
+        # Match from `"name": "insert_investment"` to the next top-level
+        # `"name":` in the same list. The stop-anchor makes the regex
+        # non-greedy across tool boundaries.
+        m = re.search(
+            r'"name":\s*"insert_investment".*?(?="name":\s*"(?!insert_investment))',
+            self.source,
+            re.DOTALL,
+        )
+        # Fall back to a wider slice if the stop-anchor didn't fire
+        # (e.g. insert_investment is the last tool in its list).
+        if not m:
+            m = re.search(
+                r'"name":\s*"insert_investment".*?\n\s*\]',
+                self.source,
+                re.DOTALL,
+            )
+        self.assertIsNotNone(
+            m,
+            "could not locate insert_investment tool block in source",
+        )
+        return m.group(0)
+
+    def test_no_top_level_combinators_on_insert_investment(self):
+        """ak-e7g P0: the crash root cause. Anthropic API rejects
+        input_schema with a top-level allOf/oneOf/anyOf. Regression
+        guard: assert the tool block contains none of them at the
+        input_schema top level."""
+        print("\n[insert_investment schema — NO top-level allOf/oneOf/anyOf]")
+        block = self._insert_investment_schema_block()
+        # These would all be regressions of the ak-e7g fix. We match on
+        # the JSON key form since the source is a Python literal — the
+        # exact quoted keys are what the SDK marshals to JSON.
+        for combinator in ('"allOf"', '"oneOf"', '"anyOf"'):
+            self.assertNotIn(
+                combinator, block,
+                f"insert_investment.input_schema must not contain "
+                f"top-level combinator {combinator} — Anthropic API "
+                f"rejects it and the Investment Assistant chat breaks.",
+            )
+        print("  ✓ no top-level allOf/oneOf/anyOf on insert_investment")
+
+    def test_top_level_required_is_service_type_and_data(self):
+        print("\n[insert_investment schema — top-level required unchanged]")
+        block = self._insert_investment_schema_block()
+        # The tool's outer required list is still {service_type, data}.
+        self.assertIn(
+            '"required": ["service_type", "data"]', block,
+            "top-level required must remain [service_type, data]",
+        )
+        print("  ✓ top-level required = [service_type, data]")
+
+    def test_per_service_type_markers_removed_from_schema(self):
+        """The old ak-bgc allOf embedded per-type required-field marker
+        lists (e.g. ["date", "description", "employee_amount",
+        "employer_amount"]) INSIDE the schema literal. Post-ak-e7g
+        pivot those markers must not appear in the schema block — they
+        live in the executor now."""
+        print("\n[insert_investment schema — per-type marker lists moved out]")
+        block = self._insert_investment_schema_block()
         for marker in (
             '["date", "description", "employee_amount", "employer_amount"]',
             '["schemeCode", "date", "quantity", "amount"]',
-            '["date", "description", "amount"]',
             '["date", "description", "amount", "quantity", "goldType"]',
         ):
-            self.assertIn(
-                marker, self.source,
-                f"schema missing per-type required marker {marker!r}",
+            self.assertNotIn(
+                marker, block,
+                f"per-type required marker {marker!r} still lives in "
+                f"the schema — it should have moved to the executor.",
             )
-        # And the old over-permissive ["date", "amount"] top-level
-        # required must NOT remain — it was the symptom we fixed.
-        self.assertNotIn(
-            '"required": ["date", "amount"]', self.source,
-            "old over-permissive top-level required-list still present",
-        )
-        print("  ✓ schema enforces per-service_type required fields")
-
-    def test_bare_amount_for_epf_rejected_by_jsonschema(self):
-        """If jsonschema is installed in the test environment, walk
-        the actual allOf clause against a bare-amount EPF payload and
-        assert it doesn't validate. Skipped if jsonschema is absent."""
-        try:
-            import jsonschema  # type: ignore
-        except ImportError:
-            self.skipTest("jsonschema not available offline; relying on text-marker test")
-            return
-        # Reconstruct the insert_investment schema's allOf via a tiny
-        # focused regex; if this fails we fall back to skip.
-        import re
-        m = re.search(
-            r'"insert_investment".*?"input_schema":\s*({.*?})\s*,\s*"description"|'
-            r'"insert_investment"[\s\S]*?"input_schema":\s*({[\s\S]*?\n\s*\}\s*\n\s*\})\s*\n',
-            self.source,
-        )
-        if not m:
-            self.skipTest("could not extract insert_investment schema literal")
-            return
-        # Don't actually try to JSON-parse a Python dict literal — just
-        # log the marker for code review; the spot-check above is the
-        # belt-and-braces guard.
-        print("  ✓ jsonschema available; manual run can validate the full schema offline")
+        print("  ✓ per-type markers no longer in schema block")
 
 
 # ── EPFService strict-insert tests ───────────────────────────────────────
@@ -540,11 +587,268 @@ class TestEPFTranscriptSmoke(unittest.TestCase):
         print("  ✓ confirm-dance is explicitly banned")
 
 
+# ── ak-e7g handler-layer per-service_type enforcement ───────────────────
+
+
+class TestInsertInvestmentHandlerEnforcement(unittest.TestCase):
+    """ak-e7g P0 hotfix: the shape check that used to live in the JSON
+    Schema now lives in agent_tool_executor._validate_insert_investment.
+    These tests drive that helper directly with the same payloads that
+    ak-bgc's schema-level allOf used to reject, plus a couple of happy-
+    path smokes.
+
+    No service-layer deps required — the helper is pure Python. We
+    import agent_tool_executor lazily inside setUpClass so a run on a
+    box missing flask etc. still doesn't hard-fail at collection.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # Some upstream imports touch flask.g at module load. Guard so
+        # a truly bare box still skips cleanly instead of erroring.
+        try:
+            from services.agent_tool_executor import (
+                _validate_insert_investment,
+                ToolValidationError,
+                INSERT_INVESTMENT_REQUIRED_FIELDS,
+                TOOL_ERROR_KEY,
+                execute_tool,
+            )
+        except Exception as e:  # pragma: no cover — env-dep skip
+            raise unittest.SkipTest(
+                f"agent_tool_executor unavailable in this env: {e}"
+            )
+        cls.validate = staticmethod(_validate_insert_investment)
+        cls.ToolValidationError = ToolValidationError
+        cls.required_fields = INSERT_INVESTMENT_REQUIRED_FIELDS
+        cls.TOOL_ERROR_KEY = TOOL_ERROR_KEY
+        cls.execute_tool = staticmethod(execute_tool)
+
+    # ── validator helper drive ─────────────────────────────────────────
+
+    def test_epf_bare_amount_rejected_before_service(self):
+        print("\n[handler — EPF bare 'amount' rejected before EPFService]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "EPF",
+                "data": {
+                    "date": "04-01-2026",
+                    "description": "Contribution for 04/2026",
+                    "amount": 12000,
+                },
+            })
+        msg = str(ctx.exception)
+        self.assertIn("EPF", msg)
+        self.assertIn("employee_amount", msg)
+        self.assertIn("employer_amount", msg)
+        # Sanity: the hint fires because `amount` is present but halves are not
+        self.assertIn("two-half split", msg)
+        print(f"  ✓ rejected: {msg[:120]}…")
+
+    def test_epf_employee_only_rejected(self):
+        print("\n[handler — EPF employee_amount alone rejected]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "EPF",
+                "data": {
+                    "date": "04-01-2026",
+                    "description": "Contribution",
+                    "employee_amount": 1800,
+                },
+            })
+        self.assertIn("employer_amount", str(ctx.exception))
+        print("  ✓ partial pair rejected")
+
+    def test_epf_happy_path_accepts(self):
+        print("\n[handler — EPF with both halves + date + description passes]")
+        self.validate({
+            "service_type": "EPF",
+            "data": {
+                "date": "04-01-2026",
+                "description": "Contribution for 04/2026",
+                "employee_amount": 1800,
+                "employer_amount": 550,
+            },
+        })
+        print("  ✓ happy path accepted")
+
+    def test_mf_missing_scheme_rejected(self):
+        print("\n[handler — Mutual_Funds missing schemeCode rejected]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "Mutual_Funds",
+                "data": {"date": "04-01-2026", "quantity": 10, "amount": 500},
+            })
+        self.assertIn("schemeCode", str(ctx.exception))
+        print("  ✓ MF missing schemeCode rejected")
+
+    def test_nps_missing_quantity_rejected(self):
+        print("\n[handler — NPS missing quantity rejected]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "NPS",
+                "data": {"schemeCode": "SC1", "date": "04-01-2026", "amount": 5000},
+            })
+        self.assertIn("quantity", str(ctx.exception))
+        print("  ✓ NPS missing quantity rejected")
+
+    def test_pf_missing_description_rejected(self):
+        print("\n[handler — PF (PPF) missing description rejected]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "PF",
+                "data": {"date": "04-01-2026", "amount": 5000},
+            })
+        self.assertIn("description", str(ctx.exception))
+        print("  ✓ PF missing description rejected")
+
+    def test_gold_missing_goldtype_rejected(self):
+        print("\n[handler — Gold missing goldType rejected]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "Gold",
+                "data": {
+                    "date": "04-01-2026", "description": "coin",
+                    "amount": 50000, "quantity": 5,
+                },
+            })
+        self.assertIn("goldType", str(ctx.exception))
+        print("  ✓ Gold missing goldType rejected")
+
+    def test_unknown_service_type_rejected(self):
+        print("\n[handler — unknown service_type rejected]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "Bitcoin",
+                "data": {"date": "04-01-2026", "amount": 1},
+            })
+        self.assertIn("service_type", str(ctx.exception))
+        print("  ✓ unknown service_type rejected")
+
+    def test_missing_data_object_rejected(self):
+        print("\n[handler — missing 'data' object rejected]")
+        with self.assertRaises(self.ToolValidationError):
+            self.validate({"service_type": "PF"})
+        with self.assertRaises(self.ToolValidationError):
+            self.validate({"service_type": "PF", "data": "not-an-object"})
+        print("  ✓ non-object data rejected")
+
+    def test_empty_string_treated_as_missing(self):
+        print("\n[handler — empty-string field treated as missing]")
+        with self.assertRaises(self.ToolValidationError) as ctx:
+            self.validate({
+                "service_type": "PF",
+                "data": {"date": "", "description": "Deposit", "amount": 5000},
+            })
+        self.assertIn("date", str(ctx.exception))
+        print("  ✓ empty-string field treated as missing")
+
+    def test_zero_amount_is_present_not_missing(self):
+        """Zero is a legitimate numeric value — the validator only rejects
+        None / missing / empty-string. Range checks (positive-value)
+        live in the service layer (ak-bgc)."""
+        print("\n[handler — zero amount is 'present', not 'missing']")
+        # PF requires date+description+amount; a 0 amount should pass
+        # the shape check even though the service layer will reject it.
+        self.validate({
+            "service_type": "PF",
+            "data": {"date": "04-01-2026", "description": "x", "amount": 0},
+        })
+        print("  ✓ zero-amount passes shape gate (service layer owns range check)")
+
+    # ── shape sanity for the exported required-fields table ────────────
+
+    def test_required_fields_table_covers_five_service_types(self):
+        print("\n[handler — required-field table matches enum]")
+        self.assertEqual(
+            set(self.required_fields.keys()),
+            {"Mutual_Funds", "NPS", "EPF", "PF", "Gold"},
+            "INSERT_INVESTMENT_REQUIRED_FIELDS must cover exactly the "
+            "five insert-supported service_types",
+        )
+        # EPF must NOT list bare 'amount' — that would re-open the bug.
+        self.assertNotIn("amount", self.required_fields["EPF"])
+        self.assertIn("employee_amount", self.required_fields["EPF"])
+        self.assertIn("employer_amount", self.required_fields["EPF"])
+        print("  ✓ table covers 5 types, EPF requires halves not bare amount")
+
+    def test_tool_error_key_is_stable_sentinel(self):
+        # Belt-and-braces: pin the sentinel so a rename in the executor
+        # doesn't silently drop the is_error surface in agentService.
+        self.assertEqual(self.TOOL_ERROR_KEY, "_tool_error")
+        print("  ✓ TOOL_ERROR_KEY sentinel pinned (agentService relies on it)")
+
+
+# ── ak-e7g regression guard: no top-level combinators on ANY tool ───────
+
+
+class TestNoTopLevelSchemaCombinators(unittest.TestCase):
+    """The Anthropic API rejects a top-level allOf/oneOf/anyOf on any
+    tool's input_schema. ak-e7g fixed one instance (insert_investment).
+    This guard iterates every tool list in the codebase and asserts the
+    invariant holds everywhere — so the same class of bug can't recur
+    silently on a different tool."""
+
+    @classmethod
+    def setUpClass(cls):
+        # These imports must load module-level for us to introspect the
+        # actual dicts. If flask/etc. aren't installed we skip cleanly.
+        try:
+            from services import agent_tools as at_mod
+            from services import mailProcessorTools as mp_mod
+        except Exception as e:  # pragma: no cover — env-dep skip
+            raise unittest.SkipTest(
+                f"tool modules unavailable in this env: {e}"
+            )
+        cls.tool_lists = (
+            ("INVESTMENT_TOOLS", at_mod.INVESTMENT_TOOLS),
+            ("TRANSACTION_TOOLS", at_mod.TRANSACTION_TOOLS),
+            ("FREELANCE_TOOLS", at_mod.FREELANCE_TOOLS),
+            ("MAIL_PROCESSOR_TOOLS", mp_mod.MAIL_PROCESSOR_TOOLS),
+        )
+
+    def test_no_top_level_allof_oneof_anyof_on_any_tool(self):
+        print("\n[regression guard — no top-level allOf/oneOf/anyOf on ANY tool]")
+        offenders = []
+        forbidden = ("allOf", "oneOf", "anyOf")
+        for list_name, tools in self.tool_lists:
+            for tool in tools:
+                schema = tool.get("input_schema") or {}
+                for key in forbidden:
+                    if key in schema:
+                        offenders.append(
+                            f"{list_name} / {tool.get('name')!r} → top-level {key!r}"
+                        )
+        self.assertEqual(
+            offenders, [],
+            "Anthropic API rejects top-level allOf/oneOf/anyOf on "
+            "input_schema. Move enforcement to the executor layer "
+            "(see agent_tool_executor._validate_insert_investment for "
+            "the pattern). Offenders:\n  - " + "\n  - ".join(offenders),
+        )
+        total_tools = sum(len(t) for _, t in self.tool_lists)
+        print(f"  ✓ {total_tools} tools across 4 lists — all clean")
+
+    def test_every_tool_has_object_typed_input_schema(self):
+        """Ancillary invariant: every tool's input_schema is an object.
+        A non-object top-level schema would also confuse the API, but
+        more subtly (e.g. via `type: array`)."""
+        print("\n[regression guard — every tool input_schema is {type: object}]")
+        bad = []
+        for list_name, tools in self.tool_lists:
+            for tool in tools:
+                schema = tool.get("input_schema") or {}
+                if schema.get("type") != "object":
+                    bad.append(f"{list_name} / {tool.get('name')!r} type={schema.get('type')!r}")
+        self.assertEqual(bad, [], "non-object top-level input_schema: " + ", ".join(bad))
+        print("  ✓ every tool input_schema is {type: object}")
+
+
 # ── Runner ───────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":
-    print("ak-bgc agent insert audit — offline unit tests")
+    print("ak-bgc + ak-e7g agent insert audit — offline unit tests")
     print("=" * 70)
     unittest.main(verbosity=0, exit=False)
     print("=" * 70)
