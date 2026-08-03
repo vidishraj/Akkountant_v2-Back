@@ -98,60 +98,135 @@ def compute_allowed_tools(agent_type, mcp_tool_names, has_attachments):
     return tools
 
 
-# Per-allowed-MIME content-block shape for the MCP tool result. Anthropic
-# accepts type=image source=base64 for raster images and type=document
-# source=base64 for PDFs in tool_result content arrays — Claude's vision
-# stack inspects them natively. Anything outside our upload allowlist
-# raises so the handler surfaces an isError tool result rather than
-# falling back to a text dump of the bytes.
+# Per-allowed-MIME content-block shape for the MCP tool result.
+#
+# ak-4tc P0 (2026-08-03): the SDK's MCP bridge
+# (claude_agent_sdk/__init__.py::create_sdk_mcp_server, call_tool
+# handler lines ~301-313) only handles two content-block shapes:
+#   * {type: 'text',  text: <str>}          → wrapped in TextContent
+#   * {type: 'image', data: <b64>, mimeType: <mime>}  → wrapped in ImageContent
+# Anything else (including Anthropic-API-native `{type: 'image',
+# source: {type: 'base64', media_type, data}}` and `{type: 'document',
+# ...}`) is SILENTLY DROPPED — the SDK builds an empty content list and
+# the LLM confabulates from thin air. This bug was live ~4 weeks from
+# ak-1x4 landing and produced fully fabricated investments (Overseer's
+# repro: BOI Consumption Fund screenshot → "HDFC Flexi Cap Fund" with
+# every field made up).
+#
+# Fix: return the MCP shape the SDK actually reads. PDFs get text-
+# extracted via PyMuPDF (fitz) as an MVP fallback — the SDK bridge has
+# no 'document' branch, so vision-native PDF handling requires a bigger
+# refactor (either per-page image render à la mailProcessorToolExecutor
+# ._handle_get_pdf_pages, or waiting for the SDK to add a document
+# branch). Text-extract is the immediate-ship option that stops the
+# hallucination class today.
 class _UnsupportedAttachmentMime(Exception):
     """Internal signal that _content_block_for got a MIME outside the
-    image / application-pdf families. Should be unreachable for any
-    attachment that came through save_upload (which enforces
-    ALLOWED_MIME + magic-byte sniffing + persists the validated type
-    via the sidecar). Raised so the read_attachment handler can return
-    isError instead of letting an unvalidated type reach the agent."""
+    image / application-pdf families, OR PDF extraction failed hard.
+    Should be unreachable for any attachment that came through
+    save_upload (which enforces ALLOWED_MIME + magic-byte sniffing +
+    persists the validated type via the sidecar). Raised so the
+    read_attachment handler can return isError instead of letting an
+    unvalidated / unrenderable type reach the agent."""
 
 
-def _content_block_for(content_type, data_bytes):
-    """Build the Anthropic content block for a given (mime, bytes) pair.
+# Cap PDF text extract at 200KB. The SDK's inbound JSON buffer is 1MB
+# (see mailProcessorToolExecutor._MAX_CONTENT_BYTES), and this is a
+# read_attachment tool _result_ so we want headroom for the envelope +
+# other content blocks. 200KB is roughly ~40k tokens — plenty for any
+# statement/screenshot text that a user would upload as a single file.
+_PDF_EXTRACT_MAX_CHARS = 200_000
 
-    Used by the read_attachment SdkMcpTool handler. Encoded inline so
-    the tool handler is a single round-trip — Claude receives the
-    actual bytes (vision-native for image + PDF), not just a description.
 
-    ak-1x4 pass 3 (reviewer hq-wisp-z1fyr MAJOR): fails closed instead
-    of degrading to a utf-8-replace text block. The text-fallback was a
-    prompt-injection channel because:
-      1. resolve() previously re-derived content_type from the user-
-         controlled filename extension; a real PDF saved as "blob"
-         resolved to application/octet-stream.
-      2. octet-stream hit the text branch here.
-      3. data_bytes.decode("utf-8", errors="replace") shoved the PDF
-         (potentially with embedded crafted ASCII) into the prompt
-         instruction channel as TEXT, bypassing Claude's vision sandbox.
-    With pass 3's sidecar persistence in agent_attachments.resolve()
-    the content_type that reaches us is guaranteed to be on
-    ALLOWED_MIME, so this raise is a defense-in-depth wall, not the
-    primary protection.
+def _content_block_for(content_type, data_bytes, *, filename=None):
+    """Build the MCP-shape content block for a given (mime, bytes) pair.
+
+    Used by the read_attachment SdkMcpTool handler. The returned dict
+    is consumed by claude_agent_sdk's MCP bridge, which only handles
+    two shapes (see module-level ak-4tc comment above). Anthropic-API-
+    native shapes with a nested `source: {...}` are dropped.
+
+    Image branch → {type: 'image', data: <b64>, mimeType: <mime>}
+    PDF branch   → {type: 'text',  text:  <fitz text-extract>}   (MVP fallback)
+
+    Raises _UnsupportedAttachmentMime for any other content_type OR
+    when PDF text extraction fails hard (unreadable/corrupt PDF).
+
+    ak-1x4 pass 3 (kept from prior fix) — fails closed instead of
+    degrading to a utf-8-replace text dump for unknown types, which
+    was a prompt-injection vector when content_type used to be
+    re-derived from the user-controlled filename extension. Sidecar
+    persistence in agent_attachments.resolve() makes the input MIME
+    trustworthy today; this raise is defense-in-depth.
     """
     if content_type and content_type.startswith("image/"):
+        # MCP shape — top-level `data` + `mimeType`. NO `source` nesting.
+        # This is the exact shape the SDK's call_tool ImageContent
+        # constructor reads (item['data'], item['mimeType']).
         return {
             "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": content_type,
-                "data": _base64.b64encode(data_bytes).decode("ascii"),
-            },
+            "data": _base64.b64encode(data_bytes).decode("ascii"),
+            "mimeType": content_type,
         }
     if content_type == "application/pdf":
+        # ak-4tc MVP: text-extract via PyMuPDF (already a required dep;
+        # used throughout mailProcessorService + parsers). The SDK bridge
+        # has no 'document' branch, so this is the fastest path to non-
+        # hallucinated PDF handling. Vision-native PDF (per-page render)
+        # is a follow-up if fidelity turns out to be insufficient — see
+        # mailProcessorToolExecutor._handle_get_pdf_pages for the pattern.
+        try:
+            import fitz  # PyMuPDF — imported lazily so unit tests can
+            # exercise the image branch without the fitz dep installed.
+        except ImportError as exc:
+            raise _UnsupportedAttachmentMime(
+                f"PDF text extraction unavailable "
+                f"(PyMuPDF/fitz import failed: {exc})"
+            )
+        try:
+            doc = fitz.open(stream=data_bytes, filetype="pdf")
+        except Exception as exc:
+            raise _UnsupportedAttachmentMime(
+                f"PDF could not be opened for text extraction: {exc}"
+            )
+        try:
+            page_chunks = []
+            for i, page in enumerate(doc, start=1):
+                try:
+                    body = page.get_text() or ""
+                except Exception:
+                    # Extraction failure on one page shouldn't kill the
+                    # whole file — mark it and continue.
+                    body = "(page extraction failed)"
+                page_chunks.append(f"--- Page {i} ---\n{body.strip()}")
+            extracted = "\n\n".join(page_chunks).strip()
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+        if not extracted:
+            # Common with image-only / scanned PDFs — text layer is empty.
+            # Return a clear signal instead of an empty string so the LLM
+            # doesn't try to summarize nothing.
+            extracted = (
+                "(no extractable text — this PDF appears to be image-based "
+                "or scanned; ask the user for a text-based PDF or a "
+                "screenshot instead)"
+            )
+        if len(extracted) > _PDF_EXTRACT_MAX_CHARS:
+            extracted = (
+                extracted[:_PDF_EXTRACT_MAX_CHARS]
+                + "\n\n[…truncated — PDF text exceeds "
+                f"{_PDF_EXTRACT_MAX_CHARS // 1000}KB cap]"
+            )
+        header_bits = ["[PDF text extract"]
+        if filename:
+            header_bits.append(f" — {filename}")
+        header_bits.append("]\n\n")
         return {
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": content_type,
-                "data": _base64.b64encode(data_bytes).decode("ascii"),
-            },
+            "type": "text",
+            "text": "".join(header_bits) + extracted,
         }
     raise _UnsupportedAttachmentMime(
         f"unsupported content_type for read_attachment: {content_type!r}"
@@ -186,6 +261,18 @@ def make_read_attachment_tool(user_id, attachment_records, logger=None):
 
     async def _handler(args):
         att_id = (args or {}).get("attachment_id")
+        # ak-4tc: structured log line for post-hoc detection of the
+        # hallucination class. If the LLM invented facts about an
+        # attachment, this log confirms whether it even called the
+        # read_attachment tool at all. Emitted BEFORE any early-exit
+        # branch so grepping `read_attachment_invoked` gives a
+        # complete audit trail per-turn.
+        if logger:
+            logger.info(
+                "read_attachment_invoked user=%s att_id=%r scope_size=%d",
+                user_id, att_id, len(scope),
+            )
+
         if not att_id or not isinstance(att_id, str):
             return {
                 "content": [{
@@ -237,6 +324,7 @@ def make_read_attachment_tool(user_id, attachment_records, logger=None):
             }
         path = current.get("path") or rec["path"]
         content_type = current.get("content_type") or rec.get("content_type")
+        filename = current.get("filename") or rec.get("filename")
 
         try:
             with open(path, "rb") as fh:
@@ -250,14 +338,19 @@ def make_read_attachment_tool(user_id, attachment_records, logger=None):
                 "isError": True,
             }
 
-        # ak-1x4 pass 3: _content_block_for now raises on any non-image /
-        # non-application-pdf MIME instead of degrading to a text dump
-        # of the raw bytes. With the sidecar-persisted content_type from
-        # save_upload reaching us here, this should be unreachable for
-        # any legitimate upload; but defense-in-depth surface an isError
-        # rather than crashing the turn if it does fire.
+        # ak-1x4 pass 3 + ak-4tc: _content_block_for returns MCP shape
+        # ({type,data,mimeType} for images, {type:text,text} for PDF
+        # text extract). Raises _UnsupportedAttachmentMime on hard
+        # extraction failure or a MIME outside the image / PDF families.
+        # With sidecar-persisted content_type from save_upload reaching
+        # us here, the MIME branch should be unreachable for any
+        # legitimate upload; PDF-extraction failure is possible on
+        # exotic files and surfaces as an isError tool result rather
+        # than crashing the turn.
         try:
-            block = _content_block_for(content_type, data_bytes)
+            block = _content_block_for(
+                content_type, data_bytes, filename=filename,
+            )
         except _UnsupportedAttachmentMime as exc:
             if logger:
                 logger.warning(
@@ -286,10 +379,12 @@ def make_read_attachment_tool(user_id, attachment_records, logger=None):
         description=(
             "Read a file the user attached to this message. Pass the "
             "attachment_id field shown in the [Attachments] block at "
-            "the end of the user's message. Returns the file contents "
-            "as a vision-native content block (image for image/* MIMEs, "
-            "document for application/pdf). Only attachments from this "
-            "chat turn are accessible."
+            "the end of the user's message. For image attachments "
+            "(PNG/JPEG/WebP/GIF) returns the file as a vision-native "
+            "image content block. For PDF attachments returns the "
+            "extracted text (ak-4tc MVP — SDK MCP bridge lacks a native "
+            "document branch, so PDF text is the reliable shape today). "
+            "Only attachments from this chat turn are accessible."
         ),
         input_schema={
             "type": "object",
