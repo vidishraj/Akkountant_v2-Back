@@ -127,8 +127,16 @@ class SetMFRate(BaseTask):
         if not hasattr(self, 'initialized'):  # Prevent multiple initializations
             super().__init__(title, priority)
             self.logger = Logger(__name__).get_logger()
-            # 4 hours
-            self.interval = 150
+            # ak-nl4 L1: interval is MINUTES per scheduler.py's
+            # `timedelta(minutes=interval)`. 150min = 2.5h self-
+            # reschedule cadence. Pre-fix comment said "4 hours" which
+            # matched neither the value (150) nor the cronAgent freshness
+            # contract (6h market / 18h outside — see cronAgent.py L43).
+            # Design rationale: self-reschedule at 2.5h gives at-most-
+            # 2.5h staleness inside business hours; cronAgent's 6h
+            # threshold provides the wider safety net for gaps caused
+            # by failed runs or missed ticks.
+            self.interval = 150  # minutes → 2.5h self-reschedule cadence
 
     def run(self):
         try:
@@ -269,7 +277,34 @@ class SetMFRate(BaseTask):
         # count-deviation diagnostic that catches the upstream regression.
         # dict.fromkeys() preserves the FIRST occurrence's order so retry
         # behavior in the fetch loop stays deterministic.
-        raw_urls = [f"{baseUrl}/{item.get('schemeCode')}" for item in data]
+        #
+        # ak-nl4 L3: normalize schemeCode to canonical string form at
+        # ingest so URLs and result_map keys use the same shape as
+        # getMFRate does at read. Malformed items are dropped with a
+        # WARN (per-item) — pre-fix `str(...)` would silently mis-key.
+        raw_urls = []
+        malformed_scheme_codes = 0
+        for item in data:
+            raw_code = item.get('schemeCode') if isinstance(item, dict) else None
+            try:
+                code = self.jsonService.normalize_scheme_code(raw_code)
+            except ValueError as exc:
+                malformed_scheme_codes += 1
+                if malformed_scheme_codes <= 5:
+                    # Cap the per-item WARN volume — if mfapi.in ever
+                    # returns a bad schema wave, we don't want to
+                    # spam thousands of lines.
+                    self.logger.warning(
+                        f"MF URL list: skipping malformed schemeCode "
+                        f"{raw_code!r}: {exc}"
+                    )
+                continue
+            raw_urls.append(f"{baseUrl}/{code}")
+        if malformed_scheme_codes > 5:
+            self.logger.warning(
+                f"MF URL list: total {malformed_scheme_codes} malformed "
+                f"schemeCodes skipped (first 5 detailed above)"
+            )
         urls = list(dict.fromkeys(raw_urls))
         dupes_removed = len(raw_urls) - len(urls)
         if dupes_removed > 0:
@@ -390,10 +425,11 @@ class SetMFRate(BaseTask):
         # First pass — full concurrency across the deduped URL list.
         # By definition pass 1 "recovers" its successes from zero.
         responses = await self._fetch_pass(urls)
-        self._process_responses(responses, result_map)
+        parse_stats = self._process_responses(responses, result_map)
         self._process_errors(
             responses, permanent_404_ids, permanent_4xx_ids, error_class_counts,
         )
+        self._log_malformed_if_any(parse_stats, pass_num=1)
         recovery_per_pass.append(len(result_map))
         self.logger.info(
             f"Pass 1 complete: {len(result_map)}/{len(urls)} schemes "
@@ -434,10 +470,11 @@ class SetMFRate(BaseTask):
             await asyncio.sleep(5 * (retry_pass + 1))
             concurrency = max(10, CONCURRENT_REQUESTS // (retry_pass + 2))
             responses = await self._fetch_pass(failed_urls, concurrency=concurrency)
-            self._process_responses(responses, result_map)
+            parse_stats = self._process_responses(responses, result_map)
             self._process_errors(
                 responses, permanent_404_ids, permanent_4xx_ids, error_class_counts,
             )
+            self._log_malformed_if_any(parse_stats, pass_num=retry_pass + 2)
             # ak-iwj M4: recovery = new successes minus prior successes.
             # still_failing = previous_missing - recovered (excludes any
             # schemes that JUST became permanent-skip in this pass; they
@@ -483,6 +520,21 @@ class SetMFRate(BaseTask):
 
         return result_map, permanent_404_ids, permanent_4xx_ids, error_class_counts
 
+    def _log_malformed_if_any(self, parse_stats, *, pass_num):
+        """ak-nl4 L2: fire a WARN log only if the pass saw at least
+        one malformed response. Silent on clean runs (avoids noise —
+        the vast majority of passes have 0 skipped)."""
+        if parse_stats["skipped"] == 0:
+            return
+        reasons_str = " ".join(
+            f"{k}={v}" for k, v in sorted(parse_stats["reasons"].items())
+        )
+        self.logger.warning(
+            f"MF rate pass {pass_num}: parsed={parse_stats['parsed']} "
+            f"skipped_malformed={parse_stats['skipped']} "
+            f"skipped_reasons={{{reasons_str}}}"
+        )
+
     def _process_errors(self, responses, permanent_404_ids,
                         permanent_4xx_ids, error_class_counts):
         """ak-5jq H3 + v2 + v3: walk responses looking for classified
@@ -524,16 +576,51 @@ class SetMFRate(BaseTask):
         return await self.make_requests(urls, concurrency=concurrency)
 
     def _process_responses(self, responses, result_map):
-        """Parse successful responses into result_map, skip failures."""
+        """Parse successful responses into result_map, skip failures.
+
+        ak-nl4 L2: returns a MalformedStats dict so _fetch_all_passes
+        can log per-pass "parsed=X skipped_malformed=Y skipped_reasons"
+        when Y > 0. Pre-fix silently dropped any response with an
+        unexpected shape (mfapi.in schema drift, missing keys,
+        wrong-type data) — invisible degradation. The dict is:
+          {"parsed": int, "skipped": int, "reasons": {reason: count}}
+        Callers fire the log only if skipped > 0 (no clean-run noise).
+
+        Error-marker responses from fetch_scheme (dicts with
+        _ERROR_KEY) are NOT counted as malformed here — they're
+        already tallied by _process_errors. Only genuine
+        schema-shape-mismatches are counted (missing 'data' where
+        no error marker present, non-list nav_data, KeyError/IndexError
+        during entry construction, etc.).
+        """
+        stats = {"parsed": 0, "skipped": 0, "reasons": defaultdict(int)}
         for response in responses:
             if not isinstance(response, tuple):
+                stats["skipped"] += 1
+                stats["reasons"]["non_tuple_response"] += 1
                 continue
             scheme_id, data = response
-            if not isinstance(data, dict) or 'data' not in data:
+            if not isinstance(data, dict):
+                stats["skipped"] += 1
+                stats["reasons"]["non_dict_payload"] += 1
+                continue
+            # Error markers from fetch_scheme are counted by
+            # _process_errors, not here — skip silently.
+            if _ERROR_KEY in data:
+                continue
+            if 'data' not in data:
+                stats["skipped"] += 1
+                stats["reasons"]["missing_data_key"] += 1
                 continue
             try:
                 nav_data = data['data']
-                if not nav_data or not isinstance(nav_data, list):
+                if not nav_data:
+                    stats["skipped"] += 1
+                    stats["reasons"]["empty_nav_data"] += 1
+                    continue
+                if not isinstance(nav_data, list):
+                    stats["skipped"] += 1
+                    stats["reasons"]["non_list_nav_data"] += 1
                     continue
                 entry = {
                     "date": nav_data[0]['date'],
@@ -549,8 +636,12 @@ class SetMFRate(BaseTask):
                     entry["lastDate"] = nav_data[1]['date']
                     entry["lastNav"] = nav_data[1]['nav']
                 result_map[scheme_id] = entry
+                stats["parsed"] += 1
             except (KeyError, IndexError, TypeError) as ex:
+                stats["skipped"] += 1
+                stats["reasons"][f"exception_{type(ex).__name__}"] += 1
                 self.logger.debug(f"Skipping scheme {scheme_id}: {ex}")
+        return stats
 
     async def make_requests(self, urls: list, concurrency=CONCURRENT_REQUESTS, **kwargs):
         semaphore = asyncio.Semaphore(concurrency)

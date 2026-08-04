@@ -36,6 +36,63 @@ class JSONDownloadService:
             self.initialized = True
             self.logger = Logger(__name__).get_logger()
 
+    @staticmethod
+    def normalize_scheme_code(code):
+        """ak-nl4 L3: canonical string form of an mfapi.in schemeCode.
+
+        mfapi.in returns schemeCode as an int today. URLs are strings.
+        result_map keys are strings. getMFRate compares stringified
+        keys. All of that worked while mfapi.in stayed on the current
+        shape — but if it ever returned a leading-zero string
+        (``'000100027'``), a float (``100027.0``), or a
+        whitespace-padded value, the string coercion via
+        ``str(code)`` would silently mis-key the row so the lookup
+        fails invisibly downstream.
+
+        Canonical form guarantees a single well-known representation
+        both writers and readers agree on. Rules:
+          * ``None`` / empty / whitespace-only → ValueError.
+          * bool → ValueError (Python bool is int-derived; we don't
+            want ``str(True) == '1'`` to silently key anything).
+          * int → str form (no float artifacts).
+          * float → str(int(x)) if ``x.is_integer()``, else ValueError
+            (mfapi.in scheme codes are integer-valued IDs).
+          * str → ``str.strip()`` (drops whitespace; leaves alnum
+            content untouched to preserve any leading zeros an
+            upstream schema change might introduce).
+          * Anything else → ValueError.
+
+        Applied at ingest (SetMfRate.buildJsonForMF) so URL construction
+        and result_map keying always use the canonical form. Applied at
+        read (getMFRate) so the caller's argument gets the same
+        treatment before comparison.
+        """
+        if code is None:
+            raise ValueError("scheme code is None")
+        if isinstance(code, bool):
+            # Must check bool BEFORE int (bool is a subclass of int in
+            # Python — isinstance(True, int) → True).
+            raise ValueError(f"scheme code is bool: {code!r}")
+        if isinstance(code, int):
+            return str(code)
+        if isinstance(code, float):
+            if code != code:  # NaN
+                raise ValueError("scheme code is NaN")
+            if code.is_integer():
+                return str(int(code))
+            raise ValueError(
+                f"scheme code has fractional part: {code!r}"
+            )
+        if isinstance(code, str):
+            stripped = code.strip()
+            if not stripped:
+                raise ValueError("scheme code is empty/whitespace")
+            return stripped
+        raise ValueError(
+            f"scheme code has unsupported type "
+            f"{type(code).__name__}: {code!r}"
+        )
+
     """ Stocks methods """
 
     def getStockList(self):
@@ -165,11 +222,22 @@ class JSONDownloadService:
         with open(filepath, 'r') as f:
             jsonData = json.load(f)
         rateList = jsonData['data']
-        scheme_str = str(schemeCode)
+        # ak-nl4 L3: normalize the incoming schemeCode to the same
+        # canonical form ingest uses. Pre-fix `str(schemeCode)` would
+        # miss ``100027.0`` (would compare against ``'100027'`` from
+        # storage as ``'100027.0'`` → mis-key). Malformed inputs now
+        # log + return {} instead of silently returning nothing.
+        try:
+            scheme_str = self.normalize_scheme_code(schemeCode)
+        except ValueError as exc:
+            self.logger.warning(
+                f"MF rate lookup: malformed schemeCode {schemeCode!r}: {exc}"
+            )
+            return {}
         for item in rateList:
             if str(item['scheme_id']) == scheme_str:
                 return item
-        self.logger.warning(f"MF rate not found for scheme: {schemeCode}")
+        self.logger.warning(f"MF rate not found for scheme: {scheme_str}")
         return {}
 
     """ PPF methods """

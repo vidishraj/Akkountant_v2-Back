@@ -29,8 +29,15 @@ class SetMFDetails(BaseTask):
             super().__init__(title, priority)
 
             self.logger = Logger(__name__).get_logger()
-            # 4 hours
-            self.interval = 600
+            # ak-nl4 L1: interval is MINUTES per scheduler.py's
+            # `timedelta(minutes=interval)`. 600min = 10h self-
+            # reschedule cadence. Pre-fix comment said "4 hours" which
+            # matched neither the value nor the cronAgent freshness
+            # contract (24h — see cronAgent.py L46). Rationale: MF
+            # scheme list changes rarely (a few adds/delists per week),
+            # so 10h cadence is generous inside cronAgent's 24h
+            # staleness envelope.
+            self.interval = 600  # minutes → 10h self-reschedule cadence
 
     def run(self):
         try:
