@@ -56,8 +56,31 @@ class SetMFRate(BaseTask):
         with open(listPath, 'r') as file:
             data = json.load(file)
         data = data['data']
-        urls = [f"{baseUrl}/{item.get('schemeCode')}" for item in data]
-        self.logger.info(f"API URL list built for MF. {len(urls)}")
+
+        # ak-lp6 IMMEDIATE fix: dedupe URLs, preserving encounter order.
+        # Background: on 2026-08-03 the SetMFDetails file ballooned from
+        # 37,713 → 113,139 schemes (exactly ~3× — clean-multiple smell of
+        # duplicated entries, not real MF universe growth). Every
+        # SetMFRate run since has taken the raw list, hit each URL once,
+        # and been SIGKILLed at ~41min because it was fetching 3× the
+        # work. Deduping here breaks that class regardless of what's
+        # feeding dupes into the list — see SetMFDetails.py for the
+        # count-deviation diagnostic that catches the upstream regression.
+        # dict.fromkeys() preserves the FIRST occurrence's order so retry
+        # behavior in the fetch loop stays deterministic.
+        raw_urls = [f"{baseUrl}/{item.get('schemeCode')}" for item in data]
+        urls = list(dict.fromkeys(raw_urls))
+        dupes_removed = len(raw_urls) - len(urls)
+        if dupes_removed > 0:
+            self.logger.warning(
+                f"MF URL list: raw={len(raw_urls)} deduped={len(urls)} "
+                f"dupes_removed={dupes_removed}"
+            )
+        else:
+            self.logger.info(
+                f"MF URL list: raw={len(raw_urls)} deduped={len(urls)} "
+                f"dupes_removed=0"
+            )
 
         start_time = time.time()
         result_map = {}  # scheme_id -> parsed data
