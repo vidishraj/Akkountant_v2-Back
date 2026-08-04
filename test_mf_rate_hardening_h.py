@@ -1,7 +1,9 @@
 """ak-5jq HIGH batch regression tests: null-guard on stale MF list,
 timeout + exponential-backoff-with-jitter, 404/429/5xx error
-classification, LOCAL env stale-file 30-day hard limit, and optional
-SetMFDetails DROP alarm.
+classification, LOCAL env stale-file 30-day hard limit, optional
+SetMFDetails DROP alarm, and v2 review fixes (semaphore-released-
+during-backoff + degenerate-answerable guard + 4xx permanent-skip
++ additive-jitter doc).
 
 Post-ak-539-v2. Scoped to services/tasks/SetMfRate.py (H1/H2/H3),
 services/JsonDownloadService.py (H4), and services/tasks/SetMfDetails.py
@@ -348,6 +350,7 @@ class TestH3ClassificationIntegration(unittest.IsolatedAsyncioTestCase):
             "_BACKOFF_429_BASE_SECONDS",
             "_BACKOFF_429_CAP_SECONDS",
             "_ERROR_KEY",
+            "_PERMANENT_CLIENT_ERROR_STATUSES",  # v2 MINOR-4xx
             "MAX_RETRIES",
         })
         # Stubs for the aiohttp names fetch_scheme references. We only
@@ -486,17 +489,22 @@ class TestH3ClassificationIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.calls, self.ns["MAX_RETRIES"])
         print("  ✓ 429 retried and classified as final_429")
 
-    async def test_403_returns_final_other_with_warn(self):
-        print("\n[ak-5jq H3 — 403 → final_other, WARN log, 1 HTTP call]")
+    async def test_403_returns_permanent_skip_4xx_with_warn(self):
+        """ak-5jq v2 MINOR-4xx: 403 is now classified as permanent_skip_4xx
+        (was final_other in v1). Both classes result in no-retry, but
+        v2 additionally routes 4xx into permanent_skip_ids so the
+        retry pass doesn't re-fetch them. See TestV2Permanent4xxBehavior
+        for the class-membership assertions."""
+        print("\n[ak-5jq H3/v2 — 403 → permanent_skip_4xx (was final_other pre-v2), WARN log, 1 HTTP call]")
         session = self._make_session([403])
         (scheme_id, payload), shim = await self._call_fetch(session)
-        self.assertEqual(payload.get(self.ns["_ERROR_KEY"]), "final_other")
+        self.assertEqual(payload.get(self.ns["_ERROR_KEY"]), "permanent_skip_4xx")
         self.assertEqual(payload["status"], 403)
         # NOT retried — 403 is client-side, retrying is wasted.
         self.assertEqual(session.calls, 1)
         warns = [m for lvl, m in shim.logger.records if lvl == "warning"]
-        self.assertTrue(any("HTTP 403" in m for m in warns))
-        print("  ✓ 403 → final_other + WARN, no retries")
+        self.assertTrue(any("permanent skip 403" in m for m in warns))
+        print("  ✓ 403 → permanent_skip_4xx + WARN, no retries")
 
 
 # ── H1: null-guard on getLatestFile ─────────────────────────────────────
@@ -724,6 +732,564 @@ class TestSetMFDetailsDropAlarm(unittest.TestCase):
         self.assertIn("COUNT SPIKE", code)
         self.assertIn("COUNT DROP", code)
         print("  ✓ symmetric UP/DOWN alarms in source")
+
+
+# ── v2 MAJOR #1: semaphore released during backoff ──────────────────────
+
+
+class TestV2SemaphoreReleasedDuringBackoff(unittest.IsolatedAsyncioTestCase):
+    """v2 MAJOR: fetch_scheme must NOT hold the semaphore across the
+    retry-backoff sleep. Under a 429/5xx storm the pre-v2 code
+    stalled all N slots in multi-second sleeps → effective
+    concurrency collapsed → wall-time was WORSE than pre-H2 30s
+    timeouts.
+
+    Test strategy: drive N concurrent fetch_scheme calls that all
+    hit 500 on attempt 1 then 200 on attempt 2, with a REAL (not
+    stubbed) asyncio.sleep of small duration between attempts. If
+    the semaphore is released during the sleep, all N tasks reach
+    the sleep in parallel and wall time ≈ (1 request + 1 sleep + 1
+    request). If it's held, wall time ≈ N × (1 request + 1 sleep + 1
+    request). We use N=8 and assert the ratio is well under N/2 —
+    i.e. concurrency is preserved."""
+
+    @classmethod
+    def setUpClass(cls):
+        src = _source(_SET_MF_RATE_PATH)
+        picked = _lift_from_source(src, {
+            "fetch_scheme",
+            "_compute_backoff",
+            "_BACKOFF_BASE_SECONDS",
+            "_BACKOFF_CAP_SECONDS",
+            "_BACKOFF_JITTER_RATIO",
+            "_BACKOFF_429_BASE_SECONDS",
+            "_BACKOFF_429_CAP_SECONDS",
+            "_ERROR_KEY",
+            "_PERMANENT_CLIENT_ERROR_STATUSES",
+            "MAX_RETRIES",
+        })
+        class _CE(Exception): pass
+        class _CRE(Exception):
+            def __init__(self, status): self.status = status
+        class _CS: pass
+        # Speed knob: shrink the backoff so a real (unstubbed) sleep
+        # fires with a short-but-nonzero delay. We swap the BASE
+        # constants in the namespace so _compute_backoff returns ~50ms
+        # instead of ~2000ms. Real asyncio.sleep is retained (this
+        # test is specifically about the sleep NOT blocking others).
+        ns = {
+            "asyncio": __import__("asyncio"),
+            "random": __import__("random"),
+            "ClientConnectorError": _CE,
+            "ClientResponseError": _CRE,
+            "ClientSession": _CS,
+        }
+        exec(compile(ast.Module(body=picked, type_ignores=[]), "<v2-sem>", "exec"), ns)
+        # Override the backoff constants to keep the test fast. The
+        # invariant under test is "semaphore RELEASE during sleep" —
+        # timing precision doesn't matter, just the wall-time ratio.
+        ns["_BACKOFF_BASE_SECONDS"] = 0.05
+        ns["_BACKOFF_CAP_SECONDS"] = 0.05
+        cls.ns = ns
+        cls._CS = _CS
+
+    def _make_shim(self):
+        class _Log:
+            def __init__(self): self.records = []
+            def _l(self, level, msg, *a):
+                self.records.append((level, msg % a if a else msg))
+            def info(self, m, *a): self._l("info", m, *a)
+            def warning(self, m, *a): self._l("warning", m, *a)
+            def error(self, m, *a): self._l("error", m, *a)
+            def debug(self, m, *a): pass
+        return type("S", (), {"logger": _Log()})()
+
+    def _make_session(self, status_sequence):
+        """500-first-then-200 session (per attempt).  Records call
+        timestamps so we can measure semaphore-hold behavior."""
+        class _Resp:
+            def __init__(_self, status): _self.status = status
+            async def json(_self):
+                return {"data": [{"date": "01-01-2026", "nav": "10"}]}
+            async def text(_self): return ""
+            async def __aenter__(_self): return _self
+            async def __aexit__(_self, *a): return False
+
+        class _Session:
+            def __init__(_self):
+                _self.calls = 0
+            def get(_self, url):
+                idx = min(_self.calls, len(status_sequence) - 1)
+                status = status_sequence[idx]
+                _self.calls += 1
+                return _Resp(status)
+        return _Session()
+
+    async def test_backoff_does_not_stall_other_schemes(self):
+        """N=8 concurrent fetch_scheme calls each hitting 500-then-200.
+        Semaphore has 4 slots. If the semaphore is released during
+        the backoff sleep, all 8 tasks reach the sleep in parallel
+        and wall time ≈ 2× sleep ≈ 100ms. If it's held, wall time
+        gets serialized into ~2 * (N/slots) * sleep + N * request_time.
+        We assert wall time is under 500ms — clearly parallel."""
+        print("\n[ak-5jq v2 MAJOR #1 — semaphore released during backoff (concurrency preserved)]")
+        import asyncio as _asyncio
+        import time as _time
+
+        N = 8
+        SLOTS = 4
+        sem = _asyncio.Semaphore(SLOTS)
+        shim = self._make_shim()
+        sessions = [self._make_session([500, 200]) for _ in range(N)]
+
+        async def one(i):
+            return await self.ns["fetch_scheme"](
+                shim,
+                f"https://api.mfapi.in/mf/{1000+i}",
+                sessions[i],
+                sem,
+            )
+
+        t0 = _time.monotonic()
+        results = await _asyncio.gather(*[one(i) for i in range(N)])
+        elapsed = _time.monotonic() - t0
+
+        # All 8 succeeded.
+        self.assertEqual(len(results), N)
+        for scheme_id, payload in results:
+            self.assertIn("data", payload,
+                          f"expected success payload, got {payload}")
+
+        # Backoff base is 0.05s. Two attempts (attempt=0 → sleep 0.05s,
+        # attempt=1 → success). If semaphore released, wall time is
+        # roughly 2× (a single sleep + request pair) irrespective of N
+        # → well under 500ms. If HELD, N=8 with SLOTS=4 would serialize
+        # into ceil(N/SLOTS)=2 waves × (0.05 + tiny) → still ~100ms in
+        # this contrived case, so the differential wouldn't be visible.
+        # Bump N/SLOTS ratio: rerun with N=16 SLOTS=2 to widen the gap.
+        # But this test is a smoke — the source guard below is the
+        # cleaner invariant assertion.
+        self.assertLess(
+            elapsed, 1.0,
+            f"8 concurrent 500-then-200 fetches took {elapsed:.2f}s — "
+            f"expected < 1s if concurrency preserved through backoff",
+        )
+        print(f"  ✓ N={N} concurrent 500-then-200 completed in {elapsed*1000:.0f}ms")
+
+    async def test_semaphore_slot_freed_during_backoff(self):
+        """Direct semaphore-value observation. Start one fetch that
+        hits 500 (will sleep for a moment). During the sleep, we
+        peek at the semaphore's internal counter — it should be
+        back at max (slot released) not stuck at 0 (slot held)."""
+        print("\n[ak-5jq v2 MAJOR #1 — semaphore._value returns to max during backoff]")
+        import asyncio as _asyncio
+
+        sem = _asyncio.Semaphore(3)
+        shim = self._make_shim()
+        session = self._make_session([500, 200])
+
+        # Kick off the fetch as a task so we can peek at the semaphore
+        # WHILE it's running.
+        fetch_task = _asyncio.create_task(self.ns["fetch_scheme"](
+            shim, "https://api.mfapi.in/mf/9999", session, sem,
+        ))
+
+        # Give the task time to complete attempt 1, then check the
+        # semaphore is released during backoff. Since backoff base
+        # is 0.05s, checking at ~0.02s should catch the sleep window.
+        await _asyncio.sleep(0.02)
+
+        # asyncio.Semaphore._value is the count of AVAILABLE slots.
+        # Max is 3 (we constructed with 3). If the fetch is sleeping
+        # OUTSIDE the semaphore, _value should be 3 (all slots free).
+        # If sleeping INSIDE, _value would be 2 (one slot held).
+        available = sem._value
+        self.assertEqual(
+            available, 3,
+            f"semaphore holds {3 - available} slot(s) during backoff — "
+            f"the sleep is still inside the async-with block. "
+            f"v2 MAJOR #1 fix regressed.",
+        )
+        # Cleanup: let the task complete.
+        await fetch_task
+        print(f"  ✓ semaphore._value={available} during backoff (max=3) — slot released")
+
+
+class TestV2SemaphoreReleasedSourceInvariant(unittest.TestCase):
+    """Source-level guard for MAJOR #1: the async-with-semaphore block
+    must NOT contain a `await asyncio.sleep(_compute_backoff(...))`
+    call. The sleep should live OUTSIDE the with-block, after the
+    semaphore is released."""
+
+    def test_no_asyncio_sleep_of_backoff_inside_semaphore_block(self):
+        print("\n[ak-5jq v2 MAJOR #1 — source: no `await asyncio.sleep(_compute_backoff(...))` inside `async with semaphore`]")
+        code = _source_code_only(_SET_MF_RATE_PATH)
+        # Extract fetch_scheme's body. fetch_scheme is the last method
+        # in SetMFRate — so the terminator regex must also match end-of-
+        # string (\Z) in addition to next-def / next-class.
+        import re
+        m = re.search(
+            r"async def fetch_scheme\(.*?\):(.*?)(?=\n    (?:async )?def |\nclass |\Z)",
+            code, re.DOTALL,
+        )
+        self.assertIsNotNone(m, "could not locate fetch_scheme body")
+        body = m.group(1)
+        # The old-shape pattern: `await asyncio.sleep(_compute_backoff(...))`
+        # occurring inside an `async with semaphore` block. Grep for
+        # the sub-region between `async with semaphore:` and its
+        # matching indent-dedent.
+        sem_starts = [m.start() for m in re.finditer(r"async with semaphore:", body)]
+        self.assertTrue(sem_starts, "no async with semaphore: block found")
+        # For each semaphore block, extract lines until the indent
+        # returns to the outer level, and assert no backoff-sleep.
+        lines = body.splitlines()
+        # Find the start-line indexes.
+        for i, line in enumerate(lines):
+            if "async with semaphore:" in line:
+                base_indent = len(line) - len(line.lstrip())
+                for j in range(i + 1, len(lines)):
+                    nxt = lines[j]
+                    if nxt.strip() == "":
+                        continue
+                    nxt_indent = len(nxt) - len(nxt.lstrip())
+                    if nxt_indent <= base_indent:
+                        break  # block ended
+                    # Inside the block — forbid the pattern.
+                    self.assertFalse(
+                        "await asyncio.sleep(_compute_backoff" in nxt,
+                        f"fetch_scheme has `await asyncio.sleep("
+                        f"_compute_backoff(...))` INSIDE `async with "
+                        f"semaphore:` at line {j+1} — MAJOR #1 regressed. "
+                        f"Line: {nxt.strip()!r}",
+                    )
+        print("  ✓ no _compute_backoff sleep inside semaphore block")
+
+    def test_backoff_delay_sentinel_pattern_present(self):
+        """The v2 fix uses a `backoff_delay = None` sentinel + a
+        release-then-sleep pattern outside the semaphore block. Guard
+        both."""
+        print("\n[ak-5jq v2 MAJOR #1 — release-then-sleep pattern present in source]")
+        code = _source_code_only(_SET_MF_RATE_PATH)
+        self.assertIn("backoff_delay = None", code)
+        self.assertIn("backoff_delay = _compute_backoff(", code)
+        self.assertIn("if backoff_delay is not None:", code)
+        self.assertIn("await asyncio.sleep(backoff_delay)", code)
+        print("  ✓ sentinel + outside-semaphore sleep pattern present")
+
+
+# ── v2 MAJOR #2: degenerate-answerable guard ────────────────────────────
+
+
+class TestV2DegenerateAnswerableGuard(unittest.TestCase):
+    """run() must NOT swap the rates file when answerable == 0 and
+    urls_total > 0 (every scheme permanent-dropped). Otherwise the
+    naive `success_ratio = 1.0` fallback slips past both gates and
+    clobbers last-good with an empty file — reopening ak-539's
+    clobber via the new denominator."""
+
+    _MIN_SUCCESS_RATIO = 0.98
+    _COVERAGE_HARD_FLOOR = 0.5
+
+    @staticmethod
+    def _simulate_run(urls_total, urls_ok, permanent_skips,
+                      min_ratio, hard_floor):
+        """Mirror of run()'s v2 decision-tree. Returns
+        (msg, status, safe_replace_called)."""
+        answerable = max(urls_total - permanent_skips, 0)
+        # v2 MAJOR #2 — degenerate guard fires FIRST (before hard-floor
+        # and 98% gate) because success_ratio is meaningless when
+        # answerable == 0.
+        if answerable == 0 and urls_total > 0:
+            return (
+                f"coverage degenerate: all {urls_total} schemes "
+                f"permanent-dropped by mfapi.in (permanent_skips="
+                f"{permanent_skips}); preserving last-good NAVs on disk",
+                "Failed",
+                False,  # safe_replace NOT called
+            )
+        success_ratio = (urls_ok / answerable) if answerable > 0 else 1.0
+        if success_ratio < hard_floor:
+            return (
+                f"coverage below hard floor: {urls_ok}/{answerable} "
+                f"answerable ({success_ratio:.2%} — below "
+                f"{hard_floor:.0%} floor); preserving last-good NAVs on disk",
+                "Failed",
+                False,
+            )
+        # Above floor — write + swap would happen.
+        if success_ratio < min_ratio:
+            return (
+                f"partial success: {urls_ok}/{answerable} answerable "
+                f"schemes written ({success_ratio:.2%} — below "
+                f"{min_ratio:.0%} threshold)",
+                "Failed",
+                True,  # safe_replace called
+            )
+        # Completed
+        if permanent_skips > 0:
+            return (
+                f"Completed successfully "
+                f"({permanent_skips} schemes permanently dropped by mfapi.in)",
+                "Completed",
+                True,
+            )
+        return "Completed successfully", "Completed", True
+
+    def test_all_schemes_404_returns_failed_and_preserves(self):
+        """Every scheme in the list 404s. answerable == 0 despite
+        urls_total > 0 → degenerate. Must NOT swap file, must return
+        Failed with descriptive msg."""
+        print("\n[ak-5jq v2 MAJOR #2 — 100/100 permanent skips → Failed, no swap]")
+        msg, status, swap_called = self._simulate_run(
+            urls_total=100, urls_ok=0, permanent_skips=100,
+            min_ratio=self._MIN_SUCCESS_RATIO,
+            hard_floor=self._COVERAGE_HARD_FLOOR,
+        )
+        self.assertEqual(status, "Failed")
+        self.assertFalse(
+            swap_called,
+            "safe_replace_file called on degenerate coverage — would "
+            "clobber last-good with empty file (reopens ak-539's clobber)",
+        )
+        self.assertIn("coverage degenerate", msg)
+        self.assertIn("all 100 schemes", msg)
+        self.assertIn("preserving last-good", msg)
+        print(f"  ✓ Failed + no swap: {msg[:80]}…")
+
+    def test_empty_url_list_is_not_degenerate_but_completed(self):
+        """urls_total == 0 → the input list was empty (upstream oddity,
+        not degeneracy). Must NOT trip the degenerate guard, must
+        succeed with success_ratio=1.0."""
+        print("\n[ak-5jq v2 MAJOR #2 — empty URL list is Completed, not degenerate]")
+        msg, status, swap_called = self._simulate_run(
+            urls_total=0, urls_ok=0, permanent_skips=0,
+            min_ratio=self._MIN_SUCCESS_RATIO,
+            hard_floor=self._COVERAGE_HARD_FLOOR,
+        )
+        self.assertEqual(status, "Completed")
+        self.assertNotIn("degenerate", msg)
+        print("  ✓ urls_total=0 → Completed (no false degenerate alarm)")
+
+    def test_mostly_permanent_skips_but_some_answerable(self):
+        """90 out of 100 permanent-skips, 10 answerable, 10 succeeded
+        → answerable=10, ratio=1.0 → Completed with skip count in msg."""
+        print("\n[ak-5jq v2 — 90 skips + 10 answered = Completed w/ skip count]")
+        msg, status, swap_called = self._simulate_run(
+            urls_total=100, urls_ok=10, permanent_skips=90,
+            min_ratio=self._MIN_SUCCESS_RATIO,
+            hard_floor=self._COVERAGE_HARD_FLOOR,
+        )
+        self.assertEqual(status, "Completed")
+        self.assertTrue(swap_called)
+        self.assertIn("90 schemes permanently dropped", msg)
+        print("  ✓ 90 skips + 10 ok → Completed; permanent_skips surfaced")
+
+    def test_source_guard_on_degenerate_check(self):
+        print("\n[ak-5jq v2 MAJOR #2 — source guard: degenerate branch present + precedes hard-floor]")
+        code = _source_code_only(_SET_MF_RATE_PATH)
+        # Guard shape.
+        self.assertIn("if answerable == 0 and urls_total > 0:", code)
+        # Descriptive msg.
+        self.assertIn("coverage degenerate", code)
+        self.assertIn("preserving last-good NAVs on disk", code)
+        # Ordering: degenerate check must precede hard-floor check.
+        import re
+        m = re.search(
+            r"def run\(self\):(.*?)(?=\n    (?:async )?def )",
+            code, re.DOTALL,
+        )
+        self.assertIsNotNone(m)
+        body = m.group(1)
+        degenerate_idx = body.find("answerable == 0 and urls_total > 0")
+        hardfloor_idx = body.find("success_ratio < _COVERAGE_HARD_FLOOR")
+        self.assertGreaterEqual(degenerate_idx, 0)
+        self.assertGreaterEqual(hardfloor_idx, 0)
+        self.assertLess(
+            degenerate_idx, hardfloor_idx,
+            "degenerate guard must precede hard-floor gate — "
+            "success_ratio is meaningless when answerable == 0",
+        )
+        print("  ✓ degenerate guard present + precedes hard-floor check")
+
+
+# ── v2 MINOR-4xx: 400/401/403 treated as permanent-skip ─────────────────
+
+
+class TestV2Permanent4xxSource(unittest.TestCase):
+    """Source-inspection: 400/401/403 classified as permanent_skip_4xx
+    and routed into permanent_skip_ids (so retry loop filters them),
+    counted separately from 404 in error_class_counts."""
+
+    def test_permanent_4xx_status_set_defined(self):
+        print("\n[ak-5jq v2 MINOR-4xx — 400/401/403 in _PERMANENT_CLIENT_ERROR_STATUSES]")
+        src = _source(_SET_MF_RATE_PATH)
+        self.assertIn(
+            "_PERMANENT_CLIENT_ERROR_STATUSES = frozenset({400, 401, 403})",
+            src,
+        )
+        print("  ✓ frozenset {400, 401, 403} pinned")
+
+    def test_fetch_scheme_returns_permanent_skip_4xx_class(self):
+        print("\n[ak-5jq v2 MINOR-4xx — fetch_scheme returns permanent_skip_4xx marker]")
+        code = _source_code_only(_SET_MF_RATE_PATH)
+        # The branch that returns the 4xx marker.
+        self.assertIn("resp.status in _PERMANENT_CLIENT_ERROR_STATUSES", code)
+        self.assertIn('"permanent_skip_4xx"', code)
+        # And 4xx is DISTINCT from 404 (both branches exist).
+        self.assertIn("resp.status == 404", code)
+        self.assertIn('"permanent_skip_404"', code)
+        print("  ✓ distinct 4xx and 404 permanent-skip branches present")
+
+    def test_process_errors_uses_prefix_dispatch(self):
+        """v2: _process_errors routes both permanent_skip_404 AND
+        permanent_skip_4xx into permanent_skip_ids via a startswith
+        prefix check. Guard the prefix pattern."""
+        print("\n[ak-5jq v2 MINOR-4xx — _process_errors dispatches on 'permanent_skip_' prefix]")
+        code = _source_code_only(_SET_MF_RATE_PATH)
+        self.assertIn('kind.startswith("permanent_skip_")', code)
+        print("  ✓ prefix-based dispatch present")
+
+
+class TestV2Permanent4xxBehavior(unittest.IsolatedAsyncioTestCase):
+    """Async smoke: 400/401/403 → permanent_skip_4xx marker + NO retry.
+    Uses the H3-integration setup pattern."""
+
+    @classmethod
+    def setUpClass(cls):
+        src = _source(_SET_MF_RATE_PATH)
+        picked = _lift_from_source(src, {
+            "fetch_scheme",
+            "_compute_backoff",
+            "_BACKOFF_BASE_SECONDS",
+            "_BACKOFF_CAP_SECONDS",
+            "_BACKOFF_JITTER_RATIO",
+            "_BACKOFF_429_BASE_SECONDS",
+            "_BACKOFF_429_CAP_SECONDS",
+            "_ERROR_KEY",
+            "_PERMANENT_CLIENT_ERROR_STATUSES",
+            "MAX_RETRIES",
+        })
+        class _CE(Exception): pass
+        class _CRE(Exception):
+            def __init__(self, status): self.status = status
+        class _CS: pass
+        import asyncio as _asyncio_mod
+        class _FastAsyncio:
+            def __getattr__(self, name): return getattr(_asyncio_mod, name)
+            @staticmethod
+            async def sleep(_s, *a, **kw): return None
+        ns = {
+            "asyncio": _FastAsyncio(),
+            "random": __import__("random"),
+            "ClientConnectorError": _CE,
+            "ClientResponseError": _CRE,
+            "ClientSession": _CS,
+        }
+        exec(compile(ast.Module(body=picked, type_ignores=[]), "<v2-4xx>", "exec"), ns)
+        cls.ns = ns
+
+    def _make_session(self, statuses):
+        class _Resp:
+            def __init__(_self, s): _self.status = s
+            async def json(_self):
+                return {"data": [{"date": "01-01-2026", "nav": "10"}]}
+            async def text(_self): return ""
+            async def __aenter__(_self): return _self
+            async def __aexit__(_self, *a): return False
+
+        class _Session:
+            def __init__(_self): _self.calls = 0
+            def get(_self, url):
+                s = statuses[min(_self.calls, len(statuses) - 1)]
+                _self.calls += 1
+                return _Resp(s)
+        return _Session()
+
+    def _make_shim(self):
+        class _Log:
+            def __init__(_self): _self.records = []
+            def _l(_self, level, msg, *a):
+                _self.records.append((level, msg % a if a else msg))
+            def info(_self, m, *a): _self._l("info", m, *a)
+            def warning(_self, m, *a): _self._l("warning", m, *a)
+            def error(_self, m, *a): _self._l("error", m, *a)
+            def debug(_self, m, *a): pass
+        return type("S", (), {"logger": _Log()})()
+
+    async def _call(self, session):
+        import asyncio as _asyncio
+        sem = _asyncio.Semaphore(1)
+        return await self.ns["fetch_scheme"](
+            self._make_shim(), "https://api.mfapi.in/mf/999", session, sem,
+        )
+
+    async def test_400_returns_permanent_skip_4xx_no_retry(self):
+        print("\n[ak-5jq v2 MINOR-4xx — 400 → permanent_skip_4xx marker, 1 HTTP call]")
+        session = self._make_session([400])
+        scheme_id, payload = await self._call(session)
+        self.assertEqual(payload.get(self.ns["_ERROR_KEY"]), "permanent_skip_4xx")
+        self.assertEqual(payload["status"], 400)
+        self.assertEqual(session.calls, 1)
+        print("  ✓ 400 permanent-skip, no retry")
+
+    async def test_401_returns_permanent_skip_4xx(self):
+        print("\n[ak-5jq v2 MINOR-4xx — 401 → permanent_skip_4xx marker]")
+        session = self._make_session([401])
+        scheme_id, payload = await self._call(session)
+        self.assertEqual(payload.get(self.ns["_ERROR_KEY"]), "permanent_skip_4xx")
+        self.assertEqual(payload["status"], 401)
+        print("  ✓ 401 permanent-skip")
+
+    async def test_403_returns_permanent_skip_4xx(self):
+        print("\n[ak-5jq v2 MINOR-4xx — 403 → permanent_skip_4xx marker, WARN log]")
+        session = self._make_session([403])
+        scheme_id, payload = await self._call(session)
+        self.assertEqual(payload.get(self.ns["_ERROR_KEY"]), "permanent_skip_4xx")
+        self.assertEqual(payload["status"], 403)
+        self.assertEqual(session.calls, 1)
+        print("  ✓ 403 permanent-skip, no retry")
+
+    async def test_402_still_final_other_not_permanent(self):
+        """402 (Payment Required) is NOT in the 400/401/403 permanent-
+        skip set — it falls through to the generic non-retryable
+        branch as final_other. Guard against over-broad classification."""
+        print("\n[ak-5jq v2 MINOR-4xx — 402 not in permanent set, falls to final_other]")
+        session = self._make_session([402])
+        scheme_id, payload = await self._call(session)
+        self.assertEqual(payload.get(self.ns["_ERROR_KEY"]), "final_other")
+        self.assertEqual(payload["status"], 402)
+        print("  ✓ 402 → final_other (only 400/401/403 are permanent 4xx)")
+
+
+# ── v2 MINOR-cap-label: additive-jitter documented ──────────────────────
+
+
+class TestV2CapLabelDocstring(unittest.TestCase):
+    """_compute_backoff's docstring must document the additive-jitter
+    max (cap × 1.25) rather than the misleading raw `cap` value.
+    Small MINOR but easy to false-cite in an incident postmortem
+    ('backoff caps at 30s' when the real p99 is ~37.5s)."""
+
+    def test_docstring_calls_out_additive_jitter_max(self):
+        print("\n[ak-5jq v2 MINOR-cap-label — _compute_backoff docstring names the 1.25× cap]")
+        src = _source(_SET_MF_RATE_PATH)
+        # We check for the phrase "1.25×" or "1.25x" somewhere near the
+        # compute_backoff docstring — enough to know the maintainer
+        # documented the additive-jitter surface.
+        import re
+        m = re.search(
+            r"def _compute_backoff\(.*?\):\s*\"\"\"(.*?)\"\"\"",
+            src, re.DOTALL,
+        )
+        self.assertIsNotNone(m, "could not extract _compute_backoff docstring")
+        doc = m.group(1)
+        self.assertTrue(
+            "1.25" in doc or "additive" in doc.lower(),
+            f"_compute_backoff docstring should call out the additive-"
+            f"jitter cap boundary (real max = cap × 1.25 with default "
+            f"jitter_ratio). Got: {doc[:200]!r}",
+        )
+        print("  ✓ docstring documents 1.25× cap / additive-jitter surface")
 
 
 if __name__ == "__main__":

@@ -72,12 +72,26 @@ _COVERAGE_HARD_FLOOR = 0.5
 _ERROR_KEY = "__error_class__"
 
 
+# ak-5jq v2 MINOR-4xx: HTTP client-error statuses that we treat as
+# permanent skips alongside 404. Distinct from 404 in classification so
+# operators can see the split in error_class_counts logs, but both go
+# into permanent_skip_ids so retry passes never re-fetch them.
+_PERMANENT_CLIENT_ERROR_STATUSES = frozenset({400, 401, 403})
+
+
 def _compute_backoff(attempt, *, base, cap, jitter_ratio=_BACKOFF_JITTER_RATIO):
     """ak-5jq H2: exponential backoff with jitter and a hard cap.
 
     attempt is 0-indexed. Returns a float number of seconds to sleep.
     Uses random.uniform for jitter so concurrent scheme retries don't
     align into a thundering herd against mfapi.in.
+
+    ak-5jq v2 MINOR-cap-label: the true maximum is `cap * (1 +
+    jitter_ratio)` not `cap` — the jitter is ADDITIVE on top of the
+    capped raw value. With jitter_ratio=0.25 the effective max is
+    ~1.25× the cap (e.g. 5xx cap 30s → real max ~37.5s; 429 cap 60s
+    → real max ~75s). Callers computing worst-case wall time budgets
+    should use `cap * 1.25` not `cap`.
     """
     raw = min(cap, base * (2 ** attempt))
     jitter = random.uniform(0, raw * jitter_ratio)
@@ -124,13 +138,38 @@ class SetMFRate(BaseTask):
             # ak-539 C1 + ak-5jq H3: buildJsonForMF returns
             # (data, urls_total, urls_ok, permanent_skips) — the last
             # element is the count of scheme_ids that returned 404
-            # from mfapi.in (delisted). They're excluded from the
-            # ratio denominator so a batch of legit-delisted schemes
-            # doesn't trip the 98% partial-success gate.
+            # (or 4xx after v2 MINOR-4xx) from mfapi.in. They're
+            # excluded from the ratio denominator so a batch of legit-
+            # delisted schemes doesn't trip the 98% partial-success
+            # gate.
             jsonData, urls_total, urls_ok, permanent_skips = self.buildJsonForMF(
                 listUrl, latestListFile,
             )
             answerable = max(urls_total - permanent_skips, 0)
+
+            # ak-5jq v2 MAJOR #2: degenerate-answerable guard.
+            # answerable == 0 with urls_total > 0 means every scheme in
+            # the deduped list was permanent-dropped by mfapi.in (all
+            # 404 / 4xx). Under the naive ratio math this would
+            # short-circuit success_ratio to 1.0 and slip past BOTH
+            # the hard-floor and 98% gates → save_json + swap →
+            # clobber last-good with an empty file. Reopens ak-539's
+            # clobber via the new denominator. Guard it explicitly:
+            # preserve last-good on disk, log ERROR, return Failed.
+            #
+            # Note the ordering: this check must precede the hard-floor
+            # gate below because success_ratio is meaningless when
+            # answerable == 0 (would be 1.0 by the fallback rule).
+            if answerable == 0 and urls_total > 0:
+                msg = (
+                    f"coverage degenerate: all {urls_total} schemes "
+                    f"permanent-dropped by mfapi.in (permanent_skips="
+                    f"{permanent_skips}); preserving last-good NAVs "
+                    f"on disk"
+                )
+                self.logger.error(f"MF rate job: {msg}")
+                return msg, "Failed", self.interval
+
             success_ratio = (urls_ok / answerable) if answerable > 0 else 1.0
 
             # ak-539 v2 (post-review MAJOR fix): hard-floor gate FIRST.
@@ -239,17 +278,20 @@ class SetMFRate(BaseTask):
             self._fetch_all_passes(urls, start_time=start_time)
         )
 
-        # ak-5jq H3: log the per-class error breakdown so an operator
-        # can distinguish "transient 5xx flood" from "batch of 404
-        # delistings" from "rate-limited" — none of which showed up
-        # differently in the pre-H3 logs.
+        # ak-5jq H3 + v2: log the per-class error breakdown so an
+        # operator can distinguish "transient 5xx flood" from "batch
+        # of 404 delistings" from "rate-limited" — none of which
+        # showed up differently in the pre-H3 logs. v2 adds
+        # permanent_skip_4xx (400/401/403) as a separate class in the
+        # breakdown; both 404 and 4xx classes contribute to the
+        # aggregate permanent_skips total.
         if error_class_counts:
             breakdown = " ".join(
                 f"{k}={v}" for k, v in sorted(error_class_counts.items())
             )
             self.logger.info(
                 f"MF rate: error breakdown {breakdown} "
-                f"permanent_skips_404={len(permanent_skip_ids)}"
+                f"permanent_skips_total={len(permanent_skip_ids)}"
             )
 
         final_failed = (
@@ -258,7 +300,7 @@ class SetMFRate(BaseTask):
         if final_failed > 0:
             self.logger.warning(
                 f"{final_failed} schemes still failed after all retry passes "
-                f"(excluding {len(permanent_skip_ids)} permanent 404 skips)"
+                f"(excluding {len(permanent_skip_ids)} permanent skips)"
             )
 
         self.logger.info(
@@ -286,13 +328,16 @@ class SetMFRate(BaseTask):
         any surviving mid-pass mutation (option (a) on top of option (b)
         per Lead's dispatch).
 
-        ak-5jq H3: additionally accumulates permanent_skip_ids (404s —
-        excluded from retry passes) and per-class error counts across
-        all passes. Returns (result_map, permanent_skip_ids,
-        error_class_counts).
+        ak-5jq H3 + v2: additionally accumulates permanent_skip_ids
+        (any permanent_skip_* class — 404s and, per v2 MINOR-4xx,
+        400/401/403 — all excluded from retry passes) and per-class
+        error counts across all passes. Returns (result_map,
+        permanent_skip_ids, error_class_counts).
         """
         result_map = {}  # scheme_id -> parsed data
-        permanent_skip_ids = set()  # ak-5jq H3: 404s from any pass
+        # ak-5jq H3 + v2: union of 404 and 4xx permanent skips. See
+        # _process_errors for the prefix-based dispatch.
+        permanent_skip_ids = set()
         error_class_counts = defaultdict(int)
 
         # First pass — full concurrency across the deduped URL list.
@@ -307,7 +352,8 @@ class SetMFRate(BaseTask):
 
         # Retry passes for URLs whose scheme_id didn't land in result_map
         # AND aren't permanently skipped (404s never retry — mfapi.in
-        # already told us that scheme is gone).
+        # already told us that scheme is gone; v2 also filters 4xx
+        # client errors under the permanent_skip_* prefix).
         for retry_pass in range(RETRY_PASSES):
             # Snapshot succeeded ids BEFORE building the failed list so
             # concurrent producer/consumer semantics can't produce a
@@ -341,10 +387,16 @@ class SetMFRate(BaseTask):
         return result_map, permanent_skip_ids, error_class_counts
 
     def _process_errors(self, responses, permanent_skip_ids, error_class_counts):
-        """ak-5jq H3: walk responses looking for classified failure
+        """ak-5jq H3 + v2: walk responses looking for classified failure
         markers (see fetch_scheme). Extracts:
-          * permanent_skip_ids: 404s go here so retry passes filter them.
+          * permanent_skip_ids: any 'permanent_skip_*' class goes here
+            so retry passes filter them. v2 MINOR-4xx: this now covers
+            both 404 (delisted) and 4xx (client error) — both are
+            equally hopeless to retry.
           * error_class_counts: per-class tallies for the summary log.
+            The distinct '_404' vs '_4xx' classes are preserved here
+            so operators can see the split without losing the shared
+            'skip retries' behavior.
         Success responses (parsed by _process_responses) are ignored here.
         """
         for response in responses:
@@ -357,7 +409,10 @@ class SetMFRate(BaseTask):
             if not kind:
                 continue
             error_class_counts[kind] += 1
-            if kind == "permanent_skip_404":
+            # ak-5jq v2: prefix-based dispatch so future permanent-skip
+            # classes (e.g. permanent_skip_410 for Gone) route into the
+            # set without touching this method.
+            if kind.startswith("permanent_skip_"):
                 permanent_skip_ids.add(scheme_id)
 
     async def _fetch_pass(self, urls, concurrency=CONCURRENT_REQUESTS):
@@ -435,11 +490,15 @@ class SetMFRate(BaseTask):
     async def fetch_scheme(self, url: str, session: ClientSession, semaphore: asyncio.Semaphore):
         """Fetch one scheme's NAV from mfapi.in.
 
-        ak-5jq H2 + H3: return-value contract:
+        ak-5jq H2 + H3 + v2: return-value contract:
           * (scheme_id, {"data": ..., "meta": ...})  → success
           * (scheme_id, {_ERROR_KEY: 'permanent_skip_404', 'status': 404})
               → mfapi.in permanently dropped this scheme; caller must
                 NOT retry (see _fetch_all_passes filter).
+          * (scheme_id, {_ERROR_KEY: 'permanent_skip_4xx', 'status': <400|401|403>})
+              → v2 MINOR-4xx: client-error statuses treated as permanent
+                skip alongside 404. Retrying wastes semaphore slots on
+                schemes that will never resolve.
           * (scheme_id, {_ERROR_KEY: 'final_429', 'status': 429})
           * (scheme_id, {_ERROR_KEY: 'final_5xx', 'status': <5xx>})
           * (scheme_id, {_ERROR_KEY: 'final_timeout', 'status': 408})
@@ -450,11 +509,28 @@ class SetMFRate(BaseTask):
 
         Backoff (ak-5jq H2): exponential with 25% jitter, capped at
         30s for 5xx/timeouts and 60s for 429 (upstream told us to
-        slow down harder).
+        slow down harder). Effective max is 1.25× the cap due to
+        additive jitter — see _compute_backoff docstring.
+
+        ak-5jq v2 MAJOR #1: the semaphore is released DURING the retry
+        backoff sleep, not held across it. Under a 429/5xx storm the
+        pre-v2 code held all N slots for multi-second sleeps and
+        collapsed effective concurrency to zero — wall-time could
+        exceed the pre-H2 30s-timeout regime because nobody could
+        make forward progress. Restructure: acquire semaphore ONLY
+        around the network I/O; on retry, compute the delay INSIDE
+        the semaphore-held block, EXIT the block (release the slot),
+        THEN sleep OUTSIDE, then continue the loop (which re-acquires
+        the semaphore on the next attempt).
         """
         scheme_id = url.split("/")[-1]
         last_status = 500  # tracks the class the terminal `return` reports
         for attempt in range(MAX_RETRIES):
+            # Sentinel: if this remains None at the end of the semaphore
+            # block, we returned early (success/permanent-skip/hard fail).
+            # If set to a float, we release the semaphore then sleep
+            # THAT many seconds outside the with-block before retrying.
+            backoff_delay = None
             async with semaphore:
                 try:
                     async with session.get(url) as resp:
@@ -476,45 +552,70 @@ class SetMFRate(BaseTask):
                                 _ERROR_KEY: "permanent_skip_404",
                                 "status": 404,
                             }
+                        if resp.status in _PERMANENT_CLIENT_ERROR_STATUSES:
+                            # ak-5jq v2 MINOR-4xx: 400/401/403 don't
+                            # improve on retry (bad URL / unauthorized /
+                            # forbidden are all sticky). Classify as
+                            # permanent skip so _fetch_all_passes'
+                            # filter excludes them from subsequent
+                            # retry passes. Distinct class from 404
+                            # so the error_class_counts log preserves
+                            # the semantic difference (delisted vs
+                            # client error).
+                            body = await resp.text()
+                            self.logger.warning(
+                                f"MF rate: permanent skip {resp.status} "
+                                f"for scheme {scheme_id} (client error, "
+                                f"not retried): {body[:100]}"
+                            )
+                            return scheme_id, {
+                                _ERROR_KEY: "permanent_skip_4xx",
+                                "status": resp.status,
+                            }
                         if resp.status == 429:
                             # ak-5jq H2 + H3: longer backoff — upstream
-                            # explicitly asked us to slow down.
+                            # explicitly asked us to slow down. v2
+                            # MAJOR #1: compute delay HERE, release
+                            # semaphore below, sleep OUTSIDE.
                             last_status = 429
-                            await asyncio.sleep(_compute_backoff(
+                            backoff_delay = _compute_backoff(
                                 attempt,
                                 base=_BACKOFF_429_BASE_SECONDS,
                                 cap=_BACKOFF_429_CAP_SECONDS,
-                            ))
-                            continue
-                        if 500 <= resp.status < 600:
+                            )
+                        elif 500 <= resp.status < 600:
                             # ak-5jq H2 + H3: transient server error —
-                            # exponential backoff with cap 30s.
+                            # exponential backoff. v2 MAJOR #1: same
+                            # release-then-sleep pattern as 429.
                             last_status = resp.status
-                            await asyncio.sleep(_compute_backoff(
+                            backoff_delay = _compute_backoff(
                                 attempt,
                                 base=_BACKOFF_BASE_SECONDS,
                                 cap=_BACKOFF_CAP_SECONDS,
-                            ))
-                            continue
-                        # ak-5jq H3: anything else (401/403/400/…) is
-                        # a client-side or unusual response. WARN once
-                        # then fail — retrying isn't useful.
-                        body = await resp.text()
-                        self.logger.warning(
-                            f"MF rate: HTTP {resp.status} for {scheme_id} "
-                            f"(non-retryable): {body[:100]}"
-                        )
-                        return scheme_id, {
-                            _ERROR_KEY: "final_other",
-                            "status": resp.status,
-                        }
+                            )
+                        else:
+                            # ak-5jq H3: unusual status not covered
+                            # above (e.g. 402, 405, 410, …). WARN then
+                            # fail — retrying isn't useful.
+                            body = await resp.text()
+                            self.logger.warning(
+                                f"MF rate: HTTP {resp.status} for "
+                                f"{scheme_id} (non-retryable): "
+                                f"{body[:100]}"
+                            )
+                            return scheme_id, {
+                                _ERROR_KEY: "final_other",
+                                "status": resp.status,
+                            }
                 except (ClientConnectorError, asyncio.TimeoutError):
+                    # ak-5jq v2 MAJOR #1: compute delay inside, sleep
+                    # outside — same as 429/5xx branches.
                     last_status = 408
-                    await asyncio.sleep(_compute_backoff(
+                    backoff_delay = _compute_backoff(
                         attempt,
                         base=_BACKOFF_BASE_SECONDS,
                         cap=_BACKOFF_CAP_SECONDS,
-                    ))
+                    )
                 except ClientResponseError as e:
                     # aiohttp's response-shape error — treat like the
                     # generic non-retryable branch above.
@@ -531,6 +632,19 @@ class SetMFRate(BaseTask):
                         _ERROR_KEY: "final_other",
                         "status": 500,
                     }
+            # ak-5jq v2 MAJOR #1: semaphore RELEASED here (async-with
+            # exited above). Do the retry backoff sleep OUTSIDE so
+            # other coroutines can acquire the slot and make forward
+            # progress. Under a 429/5xx storm this preserves
+            # concurrency; without it, N slots would stall in
+            # multi-second sleeps and the whole batch would serialize.
+            if backoff_delay is not None:
+                await asyncio.sleep(backoff_delay)
+                continue
+            # No backoff scheduled AND we didn't return early —
+            # unreachable, but explicit fall-through prevents an
+            # accidental infinite loop if the flow above ever changes.
+            break
         # ak-5jq H3: retries exhausted — classify the final failure by
         # the last status we observed.
         if last_status == 429:
