@@ -291,7 +291,9 @@ class TestH3ErrorClassificationSource(unittest.TestCase):
         self.assertIn("permanent_skip_union = permanent_404_ids | permanent_4xx_ids", code)
         self.assertIn("sid not in permanent_skip_union", code)
         # ak-539 C3 snapshot pattern still present.
-        self.assertIn("succeeded = set(result_map)", code)
+        # ak-iwj M4 renamed `succeeded` → `succeeded_before` to
+        # disambiguate from the recovery calculation.
+        self.assertIn("succeeded_before = set(result_map)", code)
         print("  ✓ union filter (404 | 4xx) present + snapshot preserved")
 
     def test_process_errors_helper_present_and_wired(self):

@@ -588,7 +588,9 @@ class TestSingleEventLoopAndAsyncSleep(unittest.TestCase):
         print("\n[ak-539 C3 + ak-5jq v3 — retry loop snapshots succeeded + filters union of 404|4xx]")
         src = _source()
         # ak-539 C3: snapshot pattern.
-        self.assertIn("succeeded = set(result_map)", src)
+        # ak-iwj M4 renamed `succeeded` → `succeeded_before` to
+        # disambiguate from the recovery calculation added there.
+        self.assertIn("succeeded_before = set(result_map)", src)
         # ak-5jq v3: filter uses the UNION of both permanent-skip sets.
         self.assertIn("not in succeeded", src)
         self.assertIn("permanent_skip_union = permanent_404_ids | permanent_4xx_ids", src)

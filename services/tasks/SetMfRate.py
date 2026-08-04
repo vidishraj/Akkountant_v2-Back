@@ -378,13 +378,23 @@ class SetMFRate(BaseTask):
         permanent_404_ids = set()
         permanent_4xx_ids = set()
         error_class_counts = defaultdict(int)
+        # ak-iwj M4: retry-effectiveness metrics — per-pass "how many
+        # previously-missing schemes did this pass recover" plus a job-
+        # end summary. Enables data-driven tuning of RETRY_PASSES: if
+        # pass 3 consistently recovers 0 schemes, drop it. If pass 2
+        # is still recovering meaningful volume, we may need pass 4.
+        # Pre-M4 there was no way to answer this without grepping raw
+        # completion counts across log lines.
+        recovery_per_pass = []  # index i = schemes recovered by pass i+1
 
         # First pass — full concurrency across the deduped URL list.
+        # By definition pass 1 "recovers" its successes from zero.
         responses = await self._fetch_pass(urls)
         self._process_responses(responses, result_map)
         self._process_errors(
             responses, permanent_404_ids, permanent_4xx_ids, error_class_counts,
         )
+        recovery_per_pass.append(len(result_map))
         self.logger.info(
             f"Pass 1 complete: {len(result_map)}/{len(urls)} schemes "
             f"in {time.time() - start_time:.2f}s "
@@ -401,18 +411,22 @@ class SetMFRate(BaseTask):
             # concurrent producer/consumer semantics can't produce a
             # partial view. Even inside a single event loop this is a
             # cheap defense-in-depth on top of the single-loop guarantee.
-            succeeded = set(result_map)
+            succeeded_before = set(result_map)
             # v3: filter against the UNION of both permanent-skip sets.
             permanent_skip_union = permanent_404_ids | permanent_4xx_ids
             failed_urls = [
                 u for u in urls
-                if (sid := u.split("/")[-1]) not in succeeded
+                if (sid := u.split("/")[-1]) not in succeeded_before
                 and sid not in permanent_skip_union
             ]
             if not failed_urls:
                 break
+            # ak-iwj M4: snapshot the pre-pass failed count so we can
+            # report exactly how many schemes THIS pass recovered vs
+            # rolled forward.
+            previous_missing = len(failed_urls)
             self.logger.info(
-                f"Retry pass {retry_pass + 2}: {len(failed_urls)} schemes to retry"
+                f"Retry pass {retry_pass + 2}: {previous_missing} schemes to retry"
             )
             # Back off concurrency + async-sleep between passes. Sync
             # time.sleep would block the event loop and stall other
@@ -424,12 +438,48 @@ class SetMFRate(BaseTask):
             self._process_errors(
                 responses, permanent_404_ids, permanent_4xx_ids, error_class_counts,
             )
+            # ak-iwj M4: recovery = new successes minus prior successes.
+            # still_failing = previous_missing - recovered (excludes any
+            # schemes that JUST became permanent-skip in this pass; they
+            # aren't really "still failing", they're diagnosed).
+            recovered = len(result_map) - len(succeeded_before)
+            newly_permanent = (
+                (permanent_skip_union ^ (permanent_404_ids | permanent_4xx_ids))
+            )
+            still_failing = previous_missing - recovered - len(newly_permanent)
+            recovery_per_pass.append(recovered)
+            # M4 signature log — grep-friendly key=value form so infra
+            # can chart pass-by-pass recovery over time.
+            self.logger.info(
+                f"MF rate: retry_pass={retry_pass + 2} "
+                f"previous_missing={previous_missing} "
+                f"recovered={recovered} "
+                f"still_failing={still_failing} "
+                f"(permanent_404={len(permanent_404_ids)} "
+                f"permanent_4xx={len(permanent_4xx_ids)})"
+            )
             self.logger.info(
                 f"Pass {retry_pass + 2} complete: {len(result_map)}/{len(urls)} "
                 f"schemes in {time.time() - start_time:.2f}s "
                 f"(permanent_404={len(permanent_404_ids)} "
                 f"permanent_4xx={len(permanent_4xx_ids)})"
             )
+
+        # ak-iwj M4: job-end summary — one grep-able line with per-pass
+        # recovery counts. Enables data-driven RETRY_PASSES tuning: if
+        # pass_3_recovered is consistently 0, drop it.
+        unrecovered = (
+            len(urls) - len(result_map)
+            - len(permanent_404_ids) - len(permanent_4xx_ids)
+        )
+        summary_parts = [
+            f"pass_{i+1}_recovered={n}" for i, n in enumerate(recovery_per_pass)
+        ]
+        self.logger.info(
+            f"MF rate: RETRY_PASSES={RETRY_PASSES} "
+            + " ".join(summary_parts)
+            + f" unrecovered={unrecovered}"
+        )
 
         return result_map, permanent_404_ids, permanent_4xx_ids, error_class_counts
 
