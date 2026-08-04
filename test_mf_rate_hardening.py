@@ -411,33 +411,36 @@ class TestPartialSuccessSourceInvariants(unittest.TestCase):
         print("  ✓ threshold pinned at 0.98")
 
     def test_buildJsonForMF_returns_expected_tuple(self):
-        """ak-539 C1 required (data, total, ok); ak-5jq H3 extended it
-        to (data, total, ok, permanent_skips). This test tracks the
-        current contract — data + counts + permanent_skips."""
-        print("\n[ak-539 C1 + ak-5jq H3 — buildJsonForMF returns 4-tuple w/ permanent_skips]")
+        """ak-539 C1 required (data, total, ok); ak-5jq H3 extended to
+        (data, total, ok, permanent_skips); ak-5jq v3 MINOR-B split
+        permanent_skips into permanent_404 + permanent_4xx →
+        5-tuple. This test tracks the current v3 contract."""
+        print("\n[ak-539 C1 + ak-5jq v3 — buildJsonForMF returns 5-tuple w/ split skip counts]")
         src = _source()
-        # Structural: 4-element tuple with the last element being the
-        # permanent-skip count. We check the distinctive final piece.
-        self.assertIn("len(permanent_skip_ids),", src)
+        # Structural: 5-element tuple with the last two being the split
+        # permanent-skip counts.
+        self.assertIn("len(permanent_404_ids),", src)
+        self.assertIn("len(permanent_4xx_ids),", src)
         self.assertIn('{"data": list(result_map.values())}', src)
-        print("  ✓ 4-tuple return shape (data + total + ok + permanent_skips)")
+        print("  ✓ 5-tuple return shape (data + total + ok + permanent_404 + permanent_4xx)")
 
     def test_run_unpacks_tuple_and_gates_on_ratio(self):
-        """ak-539 C1 unpacked (data, total, ok); ak-5jq H3 unpacks
-        the 4-tuple with permanent_skips as the 4th name."""
-        print("\n[ak-539 C1 + ak-5jq H3 — run() unpacks 4-tuple + ratio gate]")
+        """ak-539 C1 unpacked (data, total, ok); ak-5jq H3 → 4-tuple;
+        ak-5jq v3 → 5-tuple with split 404/4xx. Denominator uses
+        only permanent_404 per v3 MINOR-B."""
+        print("\n[ak-539 C1 + ak-5jq v3 — run() unpacks 5-tuple + 404-only denominator]")
         src = _source()
         self.assertIn(
-            "jsonData, urls_total, urls_ok, permanent_skips = self.buildJsonForMF",
+            "jsonData, urls_total, urls_ok, permanent_404, permanent_4xx = (",
             src,
         )
-        # ak-5jq H3: denominator now excludes permanent skips, so the
-        # ratio math references `answerable` not raw urls_total.
-        self.assertIn("answerable = max(urls_total - permanent_skips, 0)", src)
+        # v3: denominator excludes permanent_404 ONLY (not 4xx). 4xx
+        # stays in denominator so client-side breakage waves are visible.
+        self.assertIn("answerable = max(urls_total - permanent_404, 0)", src)
         self.assertIn("success_ratio = (urls_ok / answerable)", src)
         self.assertIn("success_ratio < _MIN_SUCCESS_RATIO", src)
         self.assertIn('"Failed", self.interval', src)
-        print("  ✓ 4-name unpack + answerable-denominator ratio + Failed gate present")
+        print("  ✓ 5-name unpack + 404-only denominator + Failed gate present")
 
     def test_v2_hard_floor_constant_is_050(self):
         print("\n[ak-539 v2 — _COVERAGE_HARD_FLOOR constant = 0.5]")
@@ -579,18 +582,18 @@ class TestSingleEventLoopAndAsyncSleep(unittest.TestCase):
         guarantee. Its removal would leave us relying only on the
         single-loop invariant — thinner defense.
 
-        ak-5jq H3 additionally filters permanent_skip_ids from the
-        failed_urls list — 404s never retry. Both invariants must
-        hold together."""
-        print("\n[ak-539 C3 + ak-5jq H3 — retry loop snapshots succeeded + filters permanent skips]")
+        ak-5jq H3 + v3 additionally filters permanent skips from the
+        failed_urls list — 404s AND 4xx never retry. v3 uses the
+        union of the two split sets in the filter."""
+        print("\n[ak-539 C3 + ak-5jq v3 — retry loop snapshots succeeded + filters union of 404|4xx]")
         src = _source()
         # ak-539 C3: snapshot pattern.
         self.assertIn("succeeded = set(result_map)", src)
-        # ak-5jq H3: filter now excludes BOTH succeeded and permanent
-        # skips. The exact walrus-based comprehension we ship.
+        # ak-5jq v3: filter uses the UNION of both permanent-skip sets.
         self.assertIn("not in succeeded", src)
-        self.assertIn("sid not in permanent_skip_ids", src)
-        print("  ✓ snapshot + succeeded filter + permanent_skip_ids filter all present")
+        self.assertIn("permanent_skip_union = permanent_404_ids | permanent_4xx_ids", src)
+        self.assertIn("sid not in permanent_skip_union", src)
+        print("  ✓ snapshot + succeeded filter + union (404|4xx) filter all present")
 
     def test_asyncio_sleep_not_time_sleep_between_passes(self):
         """C4: the inter-pass sleep MUST be asyncio.sleep now that the

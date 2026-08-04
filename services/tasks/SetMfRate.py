@@ -79,6 +79,23 @@ _ERROR_KEY = "__error_class__"
 _PERMANENT_CLIENT_ERROR_STATUSES = frozenset({400, 401, 403})
 
 
+def _completed_msg(permanent_404, permanent_4xx):
+    """ak-5jq v3 MINOR-A: build the run() Completed message with the
+    permanent-skip counts split by class. Pre-v3 lumped both under
+    'permanently dropped by mfapi.in' which was inaccurate — 4xx is
+    OUR bad request, not their delisting. Distinct sub-strings so an
+    operator can quickly triage the two failure classes.
+    """
+    parts = []
+    if permanent_404 > 0:
+        parts.append(f"{permanent_404} delisted by mfapi.in (404)")
+    if permanent_4xx > 0:
+        parts.append(f"{permanent_4xx} client-error (4xx)")
+    if parts:
+        return f"Completed successfully ({' + '.join(parts)})"
+    return "Completed successfully"
+
+
 def _compute_backoff(attempt, *, base, cap, jitter_ratio=_BACKOFF_JITTER_RATIO):
     """ak-5jq H2: exponential backoff with jitter and a hard cap.
 
@@ -135,37 +152,43 @@ class SetMFRate(BaseTask):
                 self.logger.error(f"MF rate job: {msg}")
                 return msg, "Failed", self.interval
 
-            # ak-539 C1 + ak-5jq H3: buildJsonForMF returns
-            # (data, urls_total, urls_ok, permanent_skips) — the last
-            # element is the count of scheme_ids that returned 404
-            # (or 4xx after v2 MINOR-4xx) from mfapi.in. They're
-            # excluded from the ratio denominator so a batch of legit-
-            # delisted schemes doesn't trip the 98% partial-success
-            # gate.
-            jsonData, urls_total, urls_ok, permanent_skips = self.buildJsonForMF(
-                listUrl, latestListFile,
+            # ak-539 C1 + ak-5jq H3 + v3 MINOR-B: buildJsonForMF returns
+            # (data, urls_total, urls_ok, permanent_404, permanent_4xx).
+            # The two skip counts are tracked separately per v3 MINOR-B:
+            #   * permanent_404 (delisted by mfapi.in) IS excluded from
+            #     the ratio denominator — genuinely no longer part of
+            #     the answerable universe.
+            #   * permanent_4xx (client-error 400/401/403 — OUR bad
+            #     requests) stays IN the denominator so a systematic
+            #     client-side breakage wave visibly drags ratio down
+            #     and trips the hard-floor / 98% gate. Excluding them
+            #     from denominator (v2) hid a fixable bug class.
+            jsonData, urls_total, urls_ok, permanent_404, permanent_4xx = (
+                self.buildJsonForMF(listUrl, latestListFile)
             )
-            answerable = max(urls_total - permanent_skips, 0)
+            answerable = max(urls_total - permanent_404, 0)
 
-            # ak-5jq v2 MAJOR #2: degenerate-answerable guard.
-            # answerable == 0 with urls_total > 0 means every scheme in
-            # the deduped list was permanent-dropped by mfapi.in (all
-            # 404 / 4xx). Under the naive ratio math this would
-            # short-circuit success_ratio to 1.0 and slip past BOTH
-            # the hard-floor and 98% gates → save_json + swap →
-            # clobber last-good with an empty file. Reopens ak-539's
-            # clobber via the new denominator. Guard it explicitly:
-            # preserve last-good on disk, log ERROR, return Failed.
+            # ak-5jq v2 MAJOR #2 + v3: degenerate-answerable guard.
+            # v3 broadens the guard from `answerable == 0 and urls_total
+            # > 0` to just `answerable == 0` — reviewer flagged that
+            # the v2 shape still let urls_total == 0 slip through the
+            # `success_ratio = 1.0` fallback and clobber last-good with
+            # an empty file (SetMFDetails writing {data: []} on a
+            # transient mfapi.in hiccup or parse glitch would trigger
+            # this silently). The MF universe is never legitimately
+            # empty, so preserving last-good on urls_total==0 is
+            # strictly safe on every path including first run (H1's
+            # None-guard fires before we get here on true first run).
             #
             # Note the ordering: this check must precede the hard-floor
             # gate below because success_ratio is meaningless when
             # answerable == 0 (would be 1.0 by the fallback rule).
-            if answerable == 0 and urls_total > 0:
+            if answerable == 0:
                 msg = (
-                    f"coverage degenerate: all {urls_total} schemes "
-                    f"permanent-dropped by mfapi.in (permanent_skips="
-                    f"{permanent_skips}); preserving last-good NAVs "
-                    f"on disk"
+                    f"coverage degenerate: answerable=0 "
+                    f"(urls_total={urls_total} permanent_404={permanent_404} "
+                    f"permanent_4xx={permanent_4xx}); preserving last-good "
+                    f"NAVs on disk"
                 )
                 self.logger.error(f"MF rate job: {msg}")
                 return msg, "Failed", self.interval
@@ -180,6 +203,12 @@ class SetMFRate(BaseTask):
             # tmp write AND the swap so the previous good file stays
             # on disk exactly as-is, and callers keep serving the last
             # known NAVs until the next run recovers.
+            #
+            # v3 MINOR-B: `answerable` denominator now includes 4xx
+            # (client-error) schemes so a systematic client-side
+            # breakage wave visibly drags the ratio down and reaches
+            # this gate. Pre-v3, 4xx were excluded from denominator
+            # and a bad-encoding wave (X% 400s) silently completed.
             if success_ratio < _COVERAGE_HARD_FLOOR:
                 msg = (
                     f"coverage below hard floor: {urls_ok}/{answerable} "
@@ -214,17 +243,13 @@ class SetMFRate(BaseTask):
                 self.logger.warning(f"MF rate job: {msg}")
                 return msg, "Failed", self.interval
 
-            # ak-5jq H3: Completed msg surfaces the permanent-skip
-            # count when there are any, so operators can see the
-            # attrition rate without grepping logs. Silent 0-skips
-            # cases still get the plain 'Completed successfully'.
-            if permanent_skips > 0:
-                return (
-                    f"Completed successfully "
-                    f"({permanent_skips} schemes permanently dropped by mfapi.in)",
-                    "Completed", self.interval,
-                )
-            return 'Completed successfully', "Completed", self.interval
+            # ak-5jq H3 + v3 MINOR-A: Completed msg surfaces the
+            # permanent-skip counts when there are any. v3 splits the
+            # message into distinct 404 (delisted by mfapi.in) and 4xx
+            # (client-error — OUR bad requests) portions so operators
+            # can distinguish "MFAPI's daily attrition" from "we're
+            # sending malformed requests / lost auth".
+            return _completed_msg(permanent_404, permanent_4xx), "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
 
@@ -274,50 +299,60 @@ class SetMFRate(BaseTask):
         # in-flight retry). Swapped to asyncio.sleep() as part of the
         # single-loop move so the shape is correct going forward.
         start_time = time.time()
-        result_map, permanent_skip_ids, error_class_counts = asyncio.run(
+        result_map, permanent_404_ids, permanent_4xx_ids, error_class_counts = asyncio.run(
             self._fetch_all_passes(urls, start_time=start_time)
         )
 
-        # ak-5jq H3 + v2: log the per-class error breakdown so an
+        # ak-5jq H3 + v2 + v3: log the per-class error breakdown so an
         # operator can distinguish "transient 5xx flood" from "batch
         # of 404 delistings" from "rate-limited" — none of which
-        # showed up differently in the pre-H3 logs. v2 adds
-        # permanent_skip_4xx (400/401/403) as a separate class in the
-        # breakdown; both 404 and 4xx classes contribute to the
-        # aggregate permanent_skips total.
+        # showed up differently in the pre-H3 logs. v3 splits
+        # permanent_skips into 404 vs 4xx in the summary so the
+        # bad-encoding-wave class is grep-able without cross-
+        # correlating with error_class_counts.
         if error_class_counts:
             breakdown = " ".join(
                 f"{k}={v}" for k, v in sorted(error_class_counts.items())
             )
             self.logger.info(
                 f"MF rate: error breakdown {breakdown} "
-                f"permanent_skips_total={len(permanent_skip_ids)}"
+                f"permanent_404={len(permanent_404_ids)} "
+                f"permanent_4xx={len(permanent_4xx_ids)}"
             )
 
+        # Total permanent skips = 404 + 4xx (union). Retry loop already
+        # filters both; here we just report the totals for context.
+        permanent_total = len(permanent_404_ids) + len(permanent_4xx_ids)
         final_failed = (
-            len(urls) - len(result_map) - len(permanent_skip_ids)
+            len(urls) - len(result_map) - permanent_total
         )
         if final_failed > 0:
             self.logger.warning(
                 f"{final_failed} schemes still failed after all retry passes "
-                f"(excluding {len(permanent_skip_ids)} permanent skips)"
+                f"(excluding {permanent_total} permanent skips: "
+                f"{len(permanent_404_ids)} 404 + {len(permanent_4xx_ids)} 4xx)"
             )
 
         self.logger.info(
             f"MF rate fetch complete: {len(result_map)} schemes in "
             f"{time.time() - start_time:.2f}s "
-            f"(permanent_skips={len(permanent_skip_ids)})"
+            f"(permanent_404={len(permanent_404_ids)} "
+            f"permanent_4xx={len(permanent_4xx_ids)})"
         )
-        # ak-539 C1 + ak-5jq H3: return (data, urls_total, urls_ok,
-        # permanent_skips). run() adjusts the denominator for the ratio
-        # math and surfaces the permanent-skip count in the Completed
-        # msg. Callers depending on the old shape will TypeError on
-        # unpack — intentional; there is only one internal caller.
+        # ak-539 C1 + ak-5jq H3 + v3 MINOR-B: return
+        # (data, urls_total, urls_ok, permanent_404, permanent_4xx).
+        # Splitting the two permanent-skip categories lets run()
+        # adjust the ratio denominator with 404 only (delisted →
+        # legitimately excluded) while keeping 4xx in denominator
+        # (OUR bad requests → visibility of fixable bugs preserved).
+        # Callers depending on the old shape TypeError on unpack —
+        # intentional; there is only one internal caller.
         return (
             {"data": list(result_map.values())},
             len(urls),
             len(result_map),
-            len(permanent_skip_ids),
+            len(permanent_404_ids),
+            len(permanent_4xx_ids),
         )
 
     async def _fetch_all_passes(self, urls, *, start_time):
@@ -328,42 +363,51 @@ class SetMFRate(BaseTask):
         any surviving mid-pass mutation (option (a) on top of option (b)
         per Lead's dispatch).
 
-        ak-5jq H3 + v2: additionally accumulates permanent_skip_ids
-        (any permanent_skip_* class — 404s and, per v2 MINOR-4xx,
-        400/401/403 — all excluded from retry passes) and per-class
+        ak-5jq H3 + v2 + v3: additionally accumulates
+        permanent_404_ids and permanent_4xx_ids (both excluded from
+        retry passes via union, but tracked separately so run() can
+        include only 404 in the ratio denominator) and per-class
         error counts across all passes. Returns (result_map,
-        permanent_skip_ids, error_class_counts).
+        permanent_404_ids, permanent_4xx_ids, error_class_counts).
         """
         result_map = {}  # scheme_id -> parsed data
-        # ak-5jq H3 + v2: union of 404 and 4xx permanent skips. See
-        # _process_errors for the prefix-based dispatch.
-        permanent_skip_ids = set()
+        # ak-5jq H3 + v3 MINOR-B: split permanent skips by class.
+        # 404 (delisted by mfapi.in) → denominator exclusion in run().
+        # 4xx (OUR bad request) → stays in denominator so systematic
+        # client-side breakage visibly trips the ratio gates.
+        permanent_404_ids = set()
+        permanent_4xx_ids = set()
         error_class_counts = defaultdict(int)
 
         # First pass — full concurrency across the deduped URL list.
         responses = await self._fetch_pass(urls)
         self._process_responses(responses, result_map)
-        self._process_errors(responses, permanent_skip_ids, error_class_counts)
+        self._process_errors(
+            responses, permanent_404_ids, permanent_4xx_ids, error_class_counts,
+        )
         self.logger.info(
             f"Pass 1 complete: {len(result_map)}/{len(urls)} schemes "
             f"in {time.time() - start_time:.2f}s "
-            f"(permanent_skips={len(permanent_skip_ids)})"
+            f"(permanent_404={len(permanent_404_ids)} "
+            f"permanent_4xx={len(permanent_4xx_ids)})"
         )
 
         # Retry passes for URLs whose scheme_id didn't land in result_map
         # AND aren't permanently skipped (404s never retry — mfapi.in
-        # already told us that scheme is gone; v2 also filters 4xx
-        # client errors under the permanent_skip_* prefix).
+        # already told us that scheme is gone; 4xx also skipped —
+        # sticky client-side errors won't improve on retry).
         for retry_pass in range(RETRY_PASSES):
             # Snapshot succeeded ids BEFORE building the failed list so
             # concurrent producer/consumer semantics can't produce a
             # partial view. Even inside a single event loop this is a
             # cheap defense-in-depth on top of the single-loop guarantee.
             succeeded = set(result_map)
+            # v3: filter against the UNION of both permanent-skip sets.
+            permanent_skip_union = permanent_404_ids | permanent_4xx_ids
             failed_urls = [
                 u for u in urls
                 if (sid := u.split("/")[-1]) not in succeeded
-                and sid not in permanent_skip_ids
+                and sid not in permanent_skip_union
             ]
             if not failed_urls:
                 break
@@ -377,26 +421,31 @@ class SetMFRate(BaseTask):
             concurrency = max(10, CONCURRENT_REQUESTS // (retry_pass + 2))
             responses = await self._fetch_pass(failed_urls, concurrency=concurrency)
             self._process_responses(responses, result_map)
-            self._process_errors(responses, permanent_skip_ids, error_class_counts)
+            self._process_errors(
+                responses, permanent_404_ids, permanent_4xx_ids, error_class_counts,
+            )
             self.logger.info(
                 f"Pass {retry_pass + 2} complete: {len(result_map)}/{len(urls)} "
                 f"schemes in {time.time() - start_time:.2f}s "
-                f"(permanent_skips={len(permanent_skip_ids)})"
+                f"(permanent_404={len(permanent_404_ids)} "
+                f"permanent_4xx={len(permanent_4xx_ids)})"
             )
 
-        return result_map, permanent_skip_ids, error_class_counts
+        return result_map, permanent_404_ids, permanent_4xx_ids, error_class_counts
 
-    def _process_errors(self, responses, permanent_skip_ids, error_class_counts):
-        """ak-5jq H3 + v2: walk responses looking for classified failure
-        markers (see fetch_scheme). Extracts:
-          * permanent_skip_ids: any 'permanent_skip_*' class goes here
-            so retry passes filter them. v2 MINOR-4xx: this now covers
-            both 404 (delisted) and 4xx (client error) — both are
-            equally hopeless to retry.
+    def _process_errors(self, responses, permanent_404_ids,
+                        permanent_4xx_ids, error_class_counts):
+        """ak-5jq H3 + v2 + v3: walk responses looking for classified
+        failure markers (see fetch_scheme). Extracts:
+          * permanent_404_ids: schemes returning 404 (delisted).
+            Retry-skipped AND excluded from denominator in run() —
+            they're genuinely no longer part of the answerable universe.
+          * permanent_4xx_ids: schemes returning 400/401/403 (our bad
+            request). Retry-skipped BUT stays in denominator — a
+            systematic client-side breakage wave should visibly drag
+            the ratio down and trigger the hard-floor / 98% gate.
           * error_class_counts: per-class tallies for the summary log.
-            The distinct '_404' vs '_4xx' classes are preserved here
-            so operators can see the split without losing the shared
-            'skip retries' behavior.
+            Distinct '_404' vs '_4xx' classes preserved.
         Success responses (parsed by _process_responses) are ignored here.
         """
         for response in responses:
@@ -409,11 +458,13 @@ class SetMFRate(BaseTask):
             if not kind:
                 continue
             error_class_counts[kind] += 1
-            # ak-5jq v2: prefix-based dispatch so future permanent-skip
-            # classes (e.g. permanent_skip_410 for Gone) route into the
-            # set without touching this method.
-            if kind.startswith("permanent_skip_"):
-                permanent_skip_ids.add(scheme_id)
+            # ak-5jq v3: route by exact class to the correct bucket.
+            # Both are permanent-skip (retry loop filters both) but
+            # only 404 is excluded from the ratio denominator.
+            if kind == "permanent_skip_404":
+                permanent_404_ids.add(scheme_id)
+            elif kind == "permanent_skip_4xx":
+                permanent_4xx_ids.add(scheme_id)
 
     async def _fetch_pass(self, urls, concurrency=CONCURRENT_REQUESTS):
         """Wrapper around make_requests kept for parity with the pre-

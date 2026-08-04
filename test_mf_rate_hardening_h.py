@@ -282,55 +282,81 @@ class TestH3ErrorClassificationSource(unittest.TestCase):
 
     def test_fetch_all_passes_filters_permanent_skips_from_retries(self):
         """Structural: the retry-loop failed_urls filter must exclude
-        both succeeded ids AND permanent_skip_ids. Otherwise 404s get
-        retried MAX_RETRIES × RETRY_PASSES = 12 wasted times each."""
-        print("\n[ak-5jq H3 — retry loop excludes permanent_skip_ids from failed_urls]")
+        both succeeded ids AND permanent skips (union of 404 + 4xx
+        per v3). Otherwise 404s get retried
+        MAX_RETRIES × RETRY_PASSES = 12 wasted times each."""
+        print("\n[ak-5jq H3 + v3 — retry loop excludes permanent-skip union from failed_urls]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        # The exact filter shape we ship.
-        self.assertIn("sid not in permanent_skip_ids", code)
-        # And the snapshot pattern from ak-539 C3 is still present.
+        # v3: union of the two split sets in the filter.
+        self.assertIn("permanent_skip_union = permanent_404_ids | permanent_4xx_ids", code)
+        self.assertIn("sid not in permanent_skip_union", code)
+        # ak-539 C3 snapshot pattern still present.
         self.assertIn("succeeded = set(result_map)", code)
-        print("  ✓ failed_urls filter excludes both succeeded + permanent skips")
+        print("  ✓ union filter (404 | 4xx) present + snapshot preserved")
 
     def test_process_errors_helper_present_and_wired(self):
-        print("\n[ak-5jq H3 — _process_errors helper called after each pass]")
+        """v3 signature: _process_errors(responses, permanent_404_ids,
+        permanent_4xx_ids, error_class_counts)."""
+        print("\n[ak-5jq H3 + v3 — _process_errors helper (4-arg) called after each pass]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        self.assertIn("def _process_errors(", code)
+        self.assertIn("def _process_errors(self, responses, permanent_404_ids,", code)
         # Called at least twice (init + retry passes).
         self.assertGreaterEqual(
-            code.count("self._process_errors(responses"), 2,
+            code.count("self._process_errors("), 2,
             "_process_errors must be called after each fetch pass",
         )
         print("  ✓ helper defined + called after every pass")
 
-    def test_buildJsonForMF_returns_four_tuple_with_permanent_skips(self):
-        print("\n[ak-5jq H3 — buildJsonForMF returns 4-tuple w/ permanent_skips]")
+    def test_buildJsonForMF_returns_five_tuple_with_split_permanent_skips(self):
+        """v3 MINOR-B split: buildJsonForMF now returns
+        (data, urls_total, urls_ok, permanent_404, permanent_4xx).
+        Two skip counts kept separate so run() can include only 404
+        in the ratio denominator while surfacing both in msgs/logs."""
+        print("\n[ak-5jq v3 — buildJsonForMF returns 5-tuple w/ split 404 + 4xx counts]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        # The exact final-return shape.
-        self.assertIn("len(permanent_skip_ids),", code)
-        # run() unpacks all four names.
+        # The exact final-return shape (split).
+        self.assertIn("len(permanent_404_ids),", code)
+        self.assertIn("len(permanent_4xx_ids),", code)
+        # run() unpacks all five names.
         self.assertIn(
-            "jsonData, urls_total, urls_ok, permanent_skips = self.buildJsonForMF",
+            "jsonData, urls_total, urls_ok, permanent_404, permanent_4xx = (",
             code,
         )
-        print("  ✓ 4-tuple return + 4-name unpack in run()")
+        print("  ✓ 5-tuple return + 5-name unpack in run()")
 
-    def test_ratio_denominator_excludes_permanent_skips(self):
-        """404 permanent skips are not real failures — a batch of them
-        must not push success_ratio below the 98% gate."""
-        print("\n[ak-5jq H3 — ratio denominator = urls_total - permanent_skips]")
+    def test_ratio_denominator_excludes_only_404(self):
+        """v3 MINOR-B: 404 permanent skips are legit-delisted, excluded
+        from denominator. 4xx (client-error) stays IN denominator so a
+        systematic client-side breakage wave visibly drags ratio down."""
+        print("\n[ak-5jq v3 MINOR-B — ratio denominator = urls_total - permanent_404 (NOT - permanent_4xx)]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        self.assertIn("answerable = max(urls_total - permanent_skips, 0)", code)
+        # New denominator uses ONLY 404 count.
+        self.assertIn("answerable = max(urls_total - permanent_404, 0)", code)
         self.assertIn("success_ratio = (urls_ok / answerable)", code)
-        print("  ✓ denominator excludes 404 permanent skips")
+        # And v2's old shape (single 'permanent_skips') is gone.
+        self.assertNotIn("urls_total - permanent_skips", code)
+        print("  ✓ denominator excludes 404 only; 4xx stays in denominator")
 
-    def test_completed_msg_surfaces_permanent_skip_count(self):
-        print("\n[ak-5jq H3 — Completed msg names the permanent-skip count when > 0]")
+    def test_completed_msg_uses_split_helper(self):
+        """v3 MINOR-A: Completed msg via _completed_msg helper that
+        renders '404 delisted' and '4xx client-error' as distinct
+        parts, joined by '+' when both present. Old lumped wording
+        ('permanently dropped by mfapi.in') is removed from run()."""
+        print("\n[ak-5jq v3 MINOR-A — Completed msg via _completed_msg helper, split by class]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        self.assertIn("permanently dropped by mfapi.in", code)
-        # Only surfaces when > 0 (silent 0-skip runs get the plain msg).
-        self.assertIn("if permanent_skips > 0:", code)
-        print("  ✓ Completed msg gated on permanent_skips > 0")
+        # Helper defined.
+        self.assertIn("def _completed_msg(permanent_404, permanent_4xx):", code)
+        # Called from run().
+        self.assertIn("_completed_msg(permanent_404, permanent_4xx)", code)
+        # New granular sub-strings.
+        self.assertIn("delisted by mfapi.in (404)", code)
+        self.assertIn("client-error (4xx)", code)
+        # Old lumped wording removed from run() (may still appear in
+        # a comment explaining v3 rationale — the important thing is
+        # that the RUN CODE doesn't inline the pre-v3 msg string).
+        # We assert that the specific old exec f-string is gone.
+        self.assertNotIn("permanently dropped by mfapi.in)", code)
+        print("  ✓ _completed_msg helper wired; granular 404 + 4xx wording")
 
 
 class TestH3ClassificationIntegration(unittest.IsolatedAsyncioTestCase):
@@ -991,19 +1017,20 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
     _COVERAGE_HARD_FLOOR = 0.5
 
     @staticmethod
-    def _simulate_run(urls_total, urls_ok, permanent_skips,
+    def _simulate_run(urls_total, urls_ok, permanent_404, permanent_4xx,
                       min_ratio, hard_floor):
-        """Mirror of run()'s v2 decision-tree. Returns
-        (msg, status, safe_replace_called)."""
-        answerable = max(urls_total - permanent_skips, 0)
-        # v2 MAJOR #2 — degenerate guard fires FIRST (before hard-floor
-        # and 98% gate) because success_ratio is meaningless when
-        # answerable == 0.
-        if answerable == 0 and urls_total > 0:
+        """Mirror of run()'s v3 decision-tree with split 404/4xx counts.
+        Returns (msg, status, safe_replace_called). Only 404 excluded
+        from ratio denominator per v3 MINOR-B."""
+        answerable = max(urls_total - permanent_404, 0)
+        # v3 broadened guard — no urls_total > 0 clause; catches
+        # empty-input silent-clobber too.
+        if answerable == 0:
             return (
-                f"coverage degenerate: all {urls_total} schemes "
-                f"permanent-dropped by mfapi.in (permanent_skips="
-                f"{permanent_skips}); preserving last-good NAVs on disk",
+                f"coverage degenerate: answerable=0 "
+                f"(urls_total={urls_total} permanent_404={permanent_404} "
+                f"permanent_4xx={permanent_4xx}); preserving last-good "
+                f"NAVs on disk",
                 "Failed",
                 False,  # safe_replace NOT called
             )
@@ -1016,34 +1043,39 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
                 "Failed",
                 False,
             )
-        # Above floor — write + swap would happen.
         if success_ratio < min_ratio:
             return (
                 f"partial success: {urls_ok}/{answerable} answerable "
                 f"schemes written ({success_ratio:.2%} — below "
                 f"{min_ratio:.0%} threshold)",
                 "Failed",
-                True,  # safe_replace called
-            )
-        # Completed
-        if permanent_skips > 0:
-            return (
-                f"Completed successfully "
-                f"({permanent_skips} schemes permanently dropped by mfapi.in)",
-                "Completed",
                 True,
             )
-        return "Completed successfully", "Completed", True
+        # Completed — v3 MINOR-A granular msg.
+        parts = []
+        if permanent_404 > 0:
+            parts.append(f"{permanent_404} delisted by mfapi.in (404)")
+        if permanent_4xx > 0:
+            parts.append(f"{permanent_4xx} client-error (4xx)")
+        if parts:
+            msg = f"Completed successfully ({' + '.join(parts)})"
+        else:
+            msg = "Completed successfully"
+        return msg, "Completed", True
+
+    def _run(self, urls_total, urls_ok,
+             permanent_404=0, permanent_4xx=0):
+        return self._simulate_run(
+            urls_total, urls_ok, permanent_404, permanent_4xx,
+            self._MIN_SUCCESS_RATIO, self._COVERAGE_HARD_FLOOR,
+        )
 
     def test_all_schemes_404_returns_failed_and_preserves(self):
-        """Every scheme in the list 404s. answerable == 0 despite
-        urls_total > 0 → degenerate. Must NOT swap file, must return
-        Failed with descriptive msg."""
-        print("\n[ak-5jq v2 MAJOR #2 — 100/100 permanent skips → Failed, no swap]")
-        msg, status, swap_called = self._simulate_run(
-            urls_total=100, urls_ok=0, permanent_skips=100,
-            min_ratio=self._MIN_SUCCESS_RATIO,
-            hard_floor=self._COVERAGE_HARD_FLOOR,
+        """Every scheme in the list 404s. answerable == 0 → degenerate.
+        Must NOT swap file, must return Failed with descriptive msg."""
+        print("\n[ak-5jq v2/v3 — 100/100 permanent_404 → Failed, no swap]")
+        msg, status, swap_called = self._run(
+            urls_total=100, urls_ok=0, permanent_404=100,
         )
         self.assertEqual(status, "Failed")
         self.assertFalse(
@@ -1052,43 +1084,87 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
             "clobber last-good with empty file (reopens ak-539's clobber)",
         )
         self.assertIn("coverage degenerate", msg)
-        self.assertIn("all 100 schemes", msg)
+        self.assertIn("permanent_404=100", msg)
         self.assertIn("preserving last-good", msg)
-        print(f"  ✓ Failed + no swap: {msg[:80]}…")
+        print(f"  ✓ Failed + no swap: {msg[:100]}…")
 
-    def test_empty_url_list_is_not_degenerate_but_completed(self):
-        """urls_total == 0 → the input list was empty (upstream oddity,
-        not degeneracy). Must NOT trip the degenerate guard, must
-        succeed with success_ratio=1.0."""
-        print("\n[ak-5jq v2 MAJOR #2 — empty URL list is Completed, not degenerate]")
-        msg, status, swap_called = self._simulate_run(
-            urls_total=0, urls_ok=0, permanent_skips=0,
-            min_ratio=self._MIN_SUCCESS_RATIO,
-            hard_floor=self._COVERAGE_HARD_FLOOR,
+    def test_empty_url_list_is_now_degenerate_and_preserves(self):
+        """v3 broadened guard: urls_total == 0 (empty input list —
+        e.g. SetMFDetails wrote {data:[]} on a transient mfapi.in
+        hiccup) now trips the degenerate branch. Prevents the silent-
+        green clobber the v2 narrow guard let through."""
+        print("\n[ak-5jq v3 — empty URL list is DEGENERATE (v3 broadened), Failed + no swap]")
+        msg, status, swap_called = self._run(urls_total=0, urls_ok=0)
+        self.assertEqual(status, "Failed")
+        self.assertFalse(
+            swap_called,
+            "safe_replace_file called on empty-input run — would "
+            "clobber last-good with empty file (silent green in v2)",
         )
-        self.assertEqual(status, "Completed")
-        self.assertNotIn("degenerate", msg)
-        print("  ✓ urls_total=0 → Completed (no false degenerate alarm)")
+        self.assertIn("coverage degenerate", msg)
+        self.assertIn("urls_total=0", msg)
+        print("  ✓ urls_total=0 → Failed + no swap (v3 closes silent-green class)")
 
-    def test_mostly_permanent_skips_but_some_answerable(self):
-        """90 out of 100 permanent-skips, 10 answerable, 10 succeeded
-        → answerable=10, ratio=1.0 → Completed with skip count in msg."""
-        print("\n[ak-5jq v2 — 90 skips + 10 answered = Completed w/ skip count]")
-        msg, status, swap_called = self._simulate_run(
-            urls_total=100, urls_ok=10, permanent_skips=90,
-            min_ratio=self._MIN_SUCCESS_RATIO,
-            hard_floor=self._COVERAGE_HARD_FLOOR,
+    def test_mostly_permanent_404s_but_some_answerable(self):
+        """90 out of 100 permanent_404, 10 answerable, 10 succeeded
+        → answerable=10, ratio=1.0 → Completed with 404 count in msg."""
+        print("\n[ak-5jq v2/v3 — 90 permanent_404 + 10 answered = Completed w/ 404 count]")
+        msg, status, swap_called = self._run(
+            urls_total=100, urls_ok=10, permanent_404=90,
         )
         self.assertEqual(status, "Completed")
         self.assertTrue(swap_called)
-        self.assertIn("90 schemes permanently dropped", msg)
-        print("  ✓ 90 skips + 10 ok → Completed; permanent_skips surfaced")
+        self.assertIn("90 delisted by mfapi.in (404)", msg)
+        print("  ✓ 90 permanent_404 + 10 ok → Completed; 404 count surfaced")
+
+    def test_4xx_stays_in_denominator_and_trips_partial(self):
+        """v3 MINOR-B: a 5% 4xx wave on 100 URLs (95 ok, 5 permanent_4xx)
+        → answerable=100 (4xx NOT excluded), ratio=95%, trips 98% gate
+        → partial-success Failed. Pre-v3 (4xx excluded from
+        denominator): answerable=95, ratio=100% → silent Completed."""
+        print("\n[ak-5jq v3 MINOR-B — 5% 4xx wave visibly trips 98% gate (was silent green in v2)]")
+        msg, status, swap_called = self._run(
+            urls_total=100, urls_ok=95, permanent_4xx=5,
+        )
+        self.assertEqual(status, "Failed")
+        self.assertIn("partial success", msg)
+        self.assertIn("95.00%", msg)  # ratio visible
+        # File IS swapped (above hard floor, below 98%).
+        self.assertTrue(swap_called)
+        print("  ✓ 5% 4xx wave → partial-success Failed (bug visibility restored)")
+
+    def test_completed_msg_splits_404_and_4xx_when_both_present(self):
+        print("\n[ak-5jq v3 MINOR-A — Completed msg names both 404 and 4xx when both > 0]")
+        msg, status, swap_called = self._run(
+            urls_total=100, urls_ok=90, permanent_404=5, permanent_4xx=5,
+        )
+        # answerable = 100-5 = 95; ratio = 90/95 = 94.7% — below 98%.
+        # Actually that trips partial. Let me use success case instead.
+        msg2, status2, swap2 = self._run(
+            urls_total=200, urls_ok=190, permanent_404=5, permanent_4xx=5,
+        )
+        # answerable = 200-5 = 195; ratio = 190/195 = 97.4% — still below 98%.
+        # Use bigger baseline:
+        msg3, status3, swap3 = self._run(
+            urls_total=1000, urls_ok=990, permanent_404=5, permanent_4xx=5,
+        )
+        # answerable = 995; ratio = 990/995 = 99.5% — above 98%.
+        self.assertEqual(status3, "Completed")
+        self.assertIn("5 delisted by mfapi.in (404)", msg3)
+        self.assertIn("5 client-error (4xx)", msg3)
+        self.assertIn(" + ", msg3)  # separator between the two
+        print(f"  ✓ Both classes surfaced with '+' separator: {msg3}")
 
     def test_source_guard_on_degenerate_check(self):
-        print("\n[ak-5jq v2 MAJOR #2 — source guard: degenerate branch present + precedes hard-floor]")
+        """v3 broadened the guard from `answerable == 0 and urls_total > 0`
+        to `answerable == 0` — catches urls_total==0 (empty input)
+        alongside the all-permanent-skip case."""
+        print("\n[ak-5jq v3 — source guard: broadened `if answerable == 0:` precedes hard-floor]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        # Guard shape.
-        self.assertIn("if answerable == 0 and urls_total > 0:", code)
+        # v3 broadened guard shape.
+        self.assertIn("if answerable == 0:", code)
+        # And the v2 narrow shape must be GONE.
+        self.assertNotIn("if answerable == 0 and urls_total > 0:", code)
         # Descriptive msg.
         self.assertIn("coverage degenerate", code)
         self.assertIn("preserving last-good NAVs on disk", code)
@@ -1100,7 +1176,7 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
         )
         self.assertIsNotNone(m)
         body = m.group(1)
-        degenerate_idx = body.find("answerable == 0 and urls_total > 0")
+        degenerate_idx = body.find("if answerable == 0:")
         hardfloor_idx = body.find("success_ratio < _COVERAGE_HARD_FLOOR")
         self.assertGreaterEqual(degenerate_idx, 0)
         self.assertGreaterEqual(hardfloor_idx, 0)
@@ -1109,7 +1185,7 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
             "degenerate guard must precede hard-floor gate — "
             "success_ratio is meaningless when answerable == 0",
         )
-        print("  ✓ degenerate guard present + precedes hard-floor check")
+        print("  ✓ broadened guard `if answerable == 0:` precedes hard-floor")
 
 
 # ── v2 MINOR-4xx: 400/401/403 treated as permanent-skip ─────────────────
@@ -1140,14 +1216,22 @@ class TestV2Permanent4xxSource(unittest.TestCase):
         self.assertIn('"permanent_skip_404"', code)
         print("  ✓ distinct 4xx and 404 permanent-skip branches present")
 
-    def test_process_errors_uses_prefix_dispatch(self):
-        """v2: _process_errors routes both permanent_skip_404 AND
-        permanent_skip_4xx into permanent_skip_ids via a startswith
-        prefix check. Guard the prefix pattern."""
-        print("\n[ak-5jq v2 MINOR-4xx — _process_errors dispatches on 'permanent_skip_' prefix]")
+    def test_process_errors_routes_by_exact_class(self):
+        """v3 MINOR-B change: _process_errors now routes by EXACT class
+        into the two split sets, not by prefix into a single set.
+        Both are still permanent-skip (retry loop filters both via
+        the union) but only 404 is excluded from ratio denominator."""
+        print("\n[ak-5jq v3 MINOR-B — _process_errors routes 404 vs 4xx into split sets]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        self.assertIn('kind.startswith("permanent_skip_")', code)
-        print("  ✓ prefix-based dispatch present")
+        # v3 exact-class dispatch.
+        self.assertIn('if kind == "permanent_skip_404":', code)
+        self.assertIn('permanent_404_ids.add(scheme_id)', code)
+        self.assertIn('elif kind == "permanent_skip_4xx":', code)
+        self.assertIn('permanent_4xx_ids.add(scheme_id)', code)
+        # The v2 prefix-based dispatch is GONE (would have false-added
+        # 4xx to the denominator-exclusion set under the old shape).
+        self.assertNotIn('kind.startswith("permanent_skip_")', code)
+        print("  ✓ exact-class dispatch routes 404 vs 4xx into split sets")
 
 
 class TestV2Permanent4xxBehavior(unittest.IsolatedAsyncioTestCase):
