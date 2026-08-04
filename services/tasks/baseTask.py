@@ -1,7 +1,6 @@
 import json
 import os
 import shutil
-import threading
 from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
 
@@ -30,13 +29,6 @@ _KEEP_HISTORICAL_FILES = 3
 class BaseTask(ABC):
     """Abstract base class for a scheduled task."""
     _instance = None  # Singleton instance
-    # ak-iwj M3: class-level lock guarding singleton create + init.
-    # Shared across all BaseTask subclasses — briefly contended only
-    # during startup/first-instantiation, cheap otherwise. The double-
-    # check-locking pattern in __new__/__init__ below is what makes
-    # this correct: fast unlocked check for the happy path, locked
-    # check-then-set for the racing-caller create.
-    _singleton_lock = threading.Lock()
     id: int = None
     title: str
     result: str
@@ -51,45 +43,51 @@ class BaseTask(ABC):
     interval: int
 
     def __new__(cls, *args, **kwargs):
-        # ak-iwj M3: double-check locking to prevent double-init under
-        # concurrent instantiation. Fast unlocked check first (happy
-        # path — once the singleton exists, no thread ever takes the
-        # lock again). Slow path: take the lock, re-check under lock,
-        # create if still missing. Note: cls._instance resolves via
-        # MRO — SubClass shadows BaseTask._instance once assigned,
-        # giving each concrete subclass its own singleton naturally.
-        if cls._instance is not None:
-            return cls._instance
-        with cls._singleton_lock:
-            if cls._instance is None:
-                cls._instance = super(BaseTask, cls).__new__(cls)
-            return cls._instance
+        # ak-iwj M3 (v2 REVISED — see also v1 commit body): the v1 fix
+        # added double-check locking here for a theoretical concurrent-
+        # instantiation race. Reviewer verified — and audit confirmed —
+        # that the lock was INERT: every rate-task subclass overrides
+        # __new__ with its own local `if not cls._instance: cls._instance
+        # = super().__new__(cls)` pattern, so BaseTask.__new__ never
+        # actually runs on those subclasses. AND scheduler.py:106 is the
+        # ONLY instantiation vector in the codebase and it processes
+        # tasks serially in a for loop → the race the lock targeted is
+        # NOT REACHABLE. Rather than ship dead code that gives a false
+        # sense of protection (and forcing 12 subclass surgeries to make
+        # it real), we drop the lock and preserve the current simple
+        # pattern. If a future scheduler ever creates task instances
+        # concurrently (e.g. threadpool worker per job) this needs to
+        # be revisited — the race would then be reachable and the fix
+        # would need to live in each subclass __new__ (or those
+        # overrides removed to inherit a locked base). Filed
+        # observation-only comment as the guard.
+        if not cls._instance:
+            cls._instance = super(BaseTask, cls).__new__(cls)
+        return cls._instance
 
     def __init__(self, title, priority):
-        # ak-iwj M3: mirror the double-check pattern for init. The
-        # `initialized` attribute is set at the END of the init block,
-        # inside the lock, so a racing __init__ caller that got past
-        # the fast unlocked check will find it set under the lock and
-        # skip re-init. Prior code had many subclasses that never set
-        # initialized at all → re-init on every call. Centralizing here
-        # fixes those latently-broken subclasses too as a side benefit.
+        # ak-iwj M3 (v2 REVISED): centralized initialized flag set here
+        # even though the M3 lock was dropped — several subclasses
+        # (SetMFRate/MFDetails/NPSRate/KiteStockDetails/checkMail/
+        # InvestmentHistory) have the `hasattr(self, 'initialized')`
+        # guard without ever SETTING the flag → their guard is
+        # ineffective every call and they re-init on every scheduler
+        # tick. Setting the flag here in the base fixes those latent
+        # bugs without needing 12 subclass edits.
         if getattr(self, 'initialized', False):
             return
-        with self.__class__._singleton_lock:
-            if getattr(self, 'initialized', False):
-                return
-            # Initialise singleton with only title and priority
-            self.title = title
-            # Fix path issue - get the root directory and build absolute path
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            assets_path = os.path.join(root_dir, 'services', 'assets')
-            self.jsonService = JsonDownloadService.JSONDownloadService(assets_path)
-            self.priority = priority
-            self.transactionService = TransactionService()
-            self.investmentService = InvestmentService()
-            # Make tmp_dir if it doesnt exist
-            os.makedirs(self.tmp_dir, exist_ok=True)
-            self.initialized = True
+        # Initialise singleton with only title and priority
+        self.title = title
+        # Fix path issue - get the root directory and build absolute path
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        assets_path = os.path.join(root_dir, 'services', 'assets')
+        self.jsonService = JsonDownloadService.JSONDownloadService(assets_path)
+        self.priority = priority
+        self.transactionService = TransactionService()
+        self.investmentService = InvestmentService()
+        # Make tmp_dir if it doesnt exist
+        os.makedirs(self.tmp_dir, exist_ok=True)
+        self.initialized = True
 
     def init_runner(self, row: Job):
         self.id = row.id
@@ -144,6 +142,24 @@ class BaseTask(ABC):
             # observers see either the old bytes or the new bytes,
             # never a partial state.
             os.replace(tmp_path, file_path)
+            # 2b. ak-iwj v2 MINOR 2: fsync the containing directory
+            # so the DIRECTORY ENTRY change (which version wins the
+            # rename) is durable across a post-rename crash. On POSIX
+            # os.replace is atomic wrt concurrent readers but the
+            # rename's persistence to disk metadata is fsync-gated.
+            # Low priority for regenerable rate files (next run
+            # produces the same data), but cheap defensive. Best-
+            # effort — skips silently on Windows / non-POSIX / any
+            # FS that doesn't support dir fsync.
+            try:
+                parent_dir = os.path.dirname(file_path) or "."
+                dir_fd = os.open(parent_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except (OSError, AttributeError):
+                pass
             # 3. Round-trip validate. If json.load doesn't crash the
             # file is at least parseable. Doesn't validate schema —
             # that's the caller's responsibility.
