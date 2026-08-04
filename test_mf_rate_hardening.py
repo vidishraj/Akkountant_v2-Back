@@ -410,31 +410,34 @@ class TestPartialSuccessSourceInvariants(unittest.TestCase):
         self.assertIn("_MIN_SUCCESS_RATIO = 0.98", src)
         print("  ✓ threshold pinned at 0.98")
 
-    def test_buildJsonForMF_returns_triple(self):
-        print("\n[ak-539 C1 — buildJsonForMF returns (data, urls_total, urls_ok)]")
+    def test_buildJsonForMF_returns_expected_tuple(self):
+        """ak-539 C1 required (data, total, ok); ak-5jq H3 extended it
+        to (data, total, ok, permanent_skips). This test tracks the
+        current contract — data + counts + permanent_skips."""
+        print("\n[ak-539 C1 + ak-5jq H3 — buildJsonForMF returns 4-tuple w/ permanent_skips]")
         src = _source()
-        # The exact return shape at the end of buildJsonForMF.
-        self.assertIn(
-            'return {"data": list(result_map.values())}, len(urls), len(result_map)',
-            src,
-            "buildJsonForMF must return (data, urls_total, urls_ok) tuple",
-        )
-        print("  ✓ triple return shape present")
+        # Structural: 4-element tuple with the last element being the
+        # permanent-skip count. We check the distinctive final piece.
+        self.assertIn("len(permanent_skip_ids),", src)
+        self.assertIn('{"data": list(result_map.values())}', src)
+        print("  ✓ 4-tuple return shape (data + total + ok + permanent_skips)")
 
-    def test_run_unpacks_triple_and_gates_on_ratio(self):
-        print("\n[ak-539 C1 — run() unpacks triple + computes ratio + gates status]")
+    def test_run_unpacks_tuple_and_gates_on_ratio(self):
+        """ak-539 C1 unpacked (data, total, ok); ak-5jq H3 unpacks
+        the 4-tuple with permanent_skips as the 4th name."""
+        print("\n[ak-539 C1 + ak-5jq H3 — run() unpacks 4-tuple + ratio gate]")
         src = _source()
         self.assertIn(
-            "jsonData, urls_total, urls_ok = self.buildJsonForMF",
+            "jsonData, urls_total, urls_ok, permanent_skips = self.buildJsonForMF",
             src,
         )
-        # The ratio + gate. We match on distinctive substrings rather
-        # than an exact block so minor whitespace / var reorder doesn't
-        # false-trip the guard.
-        self.assertIn("success_ratio = (urls_ok / urls_total)", src)
+        # ak-5jq H3: denominator now excludes permanent skips, so the
+        # ratio math references `answerable` not raw urls_total.
+        self.assertIn("answerable = max(urls_total - permanent_skips, 0)", src)
+        self.assertIn("success_ratio = (urls_ok / answerable)", src)
         self.assertIn("success_ratio < _MIN_SUCCESS_RATIO", src)
         self.assertIn('"Failed", self.interval', src)
-        print("  ✓ triple unpack + ratio math + Failed gate all present in run()")
+        print("  ✓ 4-name unpack + answerable-denominator ratio + Failed gate present")
 
     def test_v2_hard_floor_constant_is_050(self):
         print("\n[ak-539 v2 — _COVERAGE_HARD_FLOOR constant = 0.5]")
@@ -574,16 +577,20 @@ class TestSingleEventLoopAndAsyncSleep(unittest.TestCase):
         """set(result_map) snapshot BEFORE building failed_urls is
         option (a) defense-in-depth on top of option (b)'s single-loop
         guarantee. Its removal would leave us relying only on the
-        single-loop invariant — thinner defense."""
-        print("\n[ak-539 C3 — retry loop snapshots set(result_map) before building failed_urls]")
+        single-loop invariant — thinner defense.
+
+        ak-5jq H3 additionally filters permanent_skip_ids from the
+        failed_urls list — 404s never retry. Both invariants must
+        hold together."""
+        print("\n[ak-539 C3 + ak-5jq H3 — retry loop snapshots succeeded + filters permanent skips]")
         src = _source()
+        # ak-539 C3: snapshot pattern.
         self.assertIn("succeeded = set(result_map)", src)
-        # And the failed_urls filter uses `succeeded`, not the raw dict.
-        self.assertIn(
-            "failed_urls = [u for u in urls if u.split(\"/\")[-1] not in succeeded]",
-            src,
-        )
-        print("  ✓ snapshot + snapshot-scoped filter both present")
+        # ak-5jq H3: filter now excludes BOTH succeeded and permanent
+        # skips. The exact walrus-based comprehension we ship.
+        self.assertIn("not in succeeded", src)
+        self.assertIn("sid not in permanent_skip_ids", src)
+        print("  ✓ snapshot + succeeded filter + permanent_skip_ids filter all present")
 
     def test_asyncio_sleep_not_time_sleep_between_passes(self):
         """C4: the inter-pass sleep MUST be asyncio.sleep now that the

@@ -312,9 +312,51 @@ class JSONDownloadService:
                 if time_diff <= td:
                     return True
                 else:
-                    # In LOCAL env, never auto-delete stale files — just mark as stale
+                    # ak-5jq H4: LOCAL env used to unconditionally
+                    # `return True` on stale files (never delete, always
+                    # consider fresh). Fine for the "don't nuke my
+                    # cached files during dev" intent — deadly for
+                    # anyone who left a >30d-old MF_details file in
+                    # place and never noticed the downstream stale-data
+                    # poisoning. Two tiers now:
+                    #
+                    #   * <30d stale in LOCAL: WARN + return True
+                    #     (preserve the "don't auto-delete" dev safety
+                    #     the original branch was written for).
+                    #   * >=30d stale in LOCAL: WARN + return False
+                    #     (force re-download; the file is so far past
+                    #     its expiry that whatever's downstream is
+                    #     almost certainly stale-poisoned).
+                    #   * Explicit AK_ALLOW_STALE_LIST=1 escape hatch
+                    #     restores the pre-H4 "LOCAL is exempt from
+                    #     everything" behavior for the rare case where
+                    #     someone genuinely needs to work with archival
+                    #     data (offline demo, historical replay).
                     if os.getenv('ENV') == 'LOCAL':
-                        self.logger.warning(f"Stale file (age: {time_diff}): {most_recent_file_path} — skipping deletion in LOCAL")
+                        if os.getenv('AK_ALLOW_STALE_LIST') == '1':
+                            self.logger.warning(
+                                f"Stale file (age: {time_diff}): "
+                                f"{most_recent_file_path} — "
+                                f"AK_ALLOW_STALE_LIST=1 in LOCAL, "
+                                f"treating as fresh"
+                            )
+                            return True
+                        hard_stale = timedelta(days=30)
+                        if time_diff >= hard_stale:
+                            self.logger.warning(
+                                f"Stale file (age: {time_diff}) exceeds "
+                                f"30-day LOCAL hard limit: "
+                                f"{most_recent_file_path} — forcing "
+                                f"re-download (set AK_ALLOW_STALE_LIST=1 "
+                                f"to bypass)"
+                            )
+                            return False
+                        self.logger.warning(
+                            f"Stale file (age: {time_diff}): "
+                            f"{most_recent_file_path} — skipping "
+                            f"deletion in LOCAL (still within 30-day "
+                            f"hard limit)"
+                        )
                         return True
                     self.deleteFile(most_recent_file_path)
                     return False

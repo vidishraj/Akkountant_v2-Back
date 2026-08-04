@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import random
 import time
+from collections import defaultdict
 
 from services.tasks.baseTask import BaseTask
 from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientResponseError, ClientTimeout
@@ -11,8 +13,29 @@ from utils.logger import Logger
 # Tuned for mfapi.in rate limits
 CONCURRENT_REQUESTS = 25
 MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds between retries
 RETRY_PASSES = 3  # number of full retry passes for failed schemes
+
+# ak-5jq H2: per-request timeout dropped from 30s to 10s. mfapi.in p99
+# is well under 5s on healthy runs; 10s catches genuine timeouts without
+# stretching a bad batch into minutes of wall time. Combined with the
+# H2 exponential backoff below, worst-case per-scheme wall time is now
+# bounded by (10s * MAX_RETRIES=3) + backoff sum ≈ 30 + (2+4+8) = ~44s,
+# vs the pre-H2 90s+ from linear 30-second timeouts + 2/4/6s delays.
+_REQUEST_TIMEOUT_SECONDS = 10
+_REQUEST_CONNECT_TIMEOUT_SECONDS = 5
+
+# ak-5jq H2: exponential backoff config. Base 2s, doubles per attempt
+# (2/4/8...), capped at 30s. Jitter (0-25% of the base) prevents retry
+# thundering-herd when many schemes hit the same rate limit in the same
+# window. Applied to 5xx/connect-error retries.
+_BACKOFF_BASE_SECONDS = 2.0
+_BACKOFF_CAP_SECONDS = 30.0
+_BACKOFF_JITTER_RATIO = 0.25
+
+# ak-5jq H3: 429 (rate-limit) gets a LONGER backoff — upstream is
+# explicitly telling us to slow down. Base 5s (vs 2s for 5xx), cap 60s.
+_BACKOFF_429_BASE_SECONDS = 5.0
+_BACKOFF_429_CAP_SECONDS = 60.0
 
 # ak-539 C1: partial-success threshold. A run that resolves ≥98% of the
 # URL list is treated as Completed; anything below returns Failed so the
@@ -20,6 +43,11 @@ RETRY_PASSES = 3  # number of full retry passes for failed schemes
 # of a "silent NAV holes" success. 98% allows for the small number of
 # legitimately-404 schemes MFAPI reports on any given day (~740 on a
 # 37k universe) without flipping the whole job to Failed.
+#
+# ak-5jq H3: the denominator for this ratio now excludes 404 permanent-
+# skips, so a run that only "fails" because a batch of schemes were
+# genuinely delisted by MFAPI no longer trips the 98% gate. This makes
+# the constant more honest about what it's guarding against.
 _MIN_SUCCESS_RATIO = 0.98
 _DNS_CACHE_TTL_SECONDS = 300  # ak-539 C2: TCPConnector DNS cache lifetime
 
@@ -35,6 +63,25 @@ _DNS_CACHE_TTL_SECONDS = 300  # ak-539 C2: TCPConnector DNS cache lifetime
 # a real outage lands well below. 0.5 is a clear "half-or-more failed"
 # signal that no legitimate partial-run scenario should hit.
 _COVERAGE_HARD_FLOOR = 0.5
+
+
+# ak-5jq H3: fetch_scheme now returns a classified failure marker
+# instead of a bare int status. _process_responses skips these; the
+# _fetch_all_passes retry loop reads them to decide whether to retry
+# (all but permanent_skip_404) and to accumulate error-class stats.
+_ERROR_KEY = "__error_class__"
+
+
+def _compute_backoff(attempt, *, base, cap, jitter_ratio=_BACKOFF_JITTER_RATIO):
+    """ak-5jq H2: exponential backoff with jitter and a hard cap.
+
+    attempt is 0-indexed. Returns a float number of seconds to sleep.
+    Uses random.uniform for jitter so concurrent scheme retries don't
+    align into a thundering herd against mfapi.in.
+    """
+    raw = min(cap, base * (2 ** attempt))
+    jitter = random.uniform(0, raw * jitter_ratio)
+    return raw + jitter
 
 
 class SetMFRate(BaseTask):
@@ -55,18 +102,36 @@ class SetMFRate(BaseTask):
     def run(self):
         try:
             listUrl = "https://api.mfapi.in/mf"
-            # Delete existing file if it exists, else
             latestListFile = self.jsonService.getLatestFile(self.jsonService.listType,
                                                             self.jsonService.MfListPrefix)
 
-            # ak-539 C1: buildJsonForMF now returns (data, urls_total, urls_ok)
-            # so run() can compute the success ratio and gate the completed
-            # status behind it. Previously any partial success returned
-            # "Completed" while writing an incomplete rates file to disk —
-            # downstream getMFRate() served empty dicts for missing schemes
-            # (silent NAV holes for users) with the jobs table showing green.
-            jsonData, urls_total, urls_ok = self.buildJsonForMF(listUrl, latestListFile)
-            success_ratio = (urls_ok / urls_total) if urls_total else 1.0
+            # ak-5jq H1: explicit dependency check. Previously
+            # buildJsonForMF called `open(latestListFile)` which raises
+            # TypeError on None — the job crashed with an unhelpful
+            # traceback whenever SetMFDetails hadn't run in >7d (past
+            # the MfList retention window). Now we return a clean
+            # Failed with an operator-actionable message.
+            if latestListFile is None:
+                msg = (
+                    "MF details list missing or stale — SetMFDetails "
+                    f"must run first (looked for prefix "
+                    f"{self.jsonService.MfListPrefix!r} under "
+                    f"{self.jsonService.listType!r})"
+                )
+                self.logger.error(f"MF rate job: {msg}")
+                return msg, "Failed", self.interval
+
+            # ak-539 C1 + ak-5jq H3: buildJsonForMF returns
+            # (data, urls_total, urls_ok, permanent_skips) — the last
+            # element is the count of scheme_ids that returned 404
+            # from mfapi.in (delisted). They're excluded from the
+            # ratio denominator so a batch of legit-delisted schemes
+            # doesn't trip the 98% partial-success gate.
+            jsonData, urls_total, urls_ok, permanent_skips = self.buildJsonForMF(
+                listUrl, latestListFile,
+            )
+            answerable = max(urls_total - permanent_skips, 0)
+            success_ratio = (urls_ok / answerable) if answerable > 0 else 1.0
 
             # ak-539 v2 (post-review MAJOR fix): hard-floor gate FIRST.
             # safe_replace_file destroys the last-good rates file the
@@ -78,8 +143,8 @@ class SetMFRate(BaseTask):
             # known NAVs until the next run recovers.
             if success_ratio < _COVERAGE_HARD_FLOOR:
                 msg = (
-                    f"coverage below hard floor: {urls_ok}/{urls_total} "
-                    f"({success_ratio:.2%} — below "
+                    f"coverage below hard floor: {urls_ok}/{answerable} "
+                    f"answerable ({success_ratio:.2%} — below "
                     f"{_COVERAGE_HARD_FLOOR:.0%} floor); "
                     f"preserving last-good NAVs on disk"
                 )
@@ -100,22 +165,26 @@ class SetMFRate(BaseTask):
             if not ok:
                 return err, "Failed", self.interval
 
-            # ak-539 C1: 98% partial-success gate. Between the hard floor
-            # and the 98% threshold we swapped the file (degraded > stale)
-            # but flip the jobs-table status to Failed so an operator
-            # sees the run isn't clean.
-            #
-            # Ratio math is done here rather than in buildJsonForMF so the
-            # threshold constant lives with the caller that decides what
-            # 'Completed' means — buildJsonForMF only reports raw counts.
+            # ak-539 C1: 98% partial-success gate.
             if success_ratio < _MIN_SUCCESS_RATIO:
                 msg = (
-                    f"partial success: {urls_ok}/{urls_total} schemes "
-                    f"written ({success_ratio:.2%} — below "
+                    f"partial success: {urls_ok}/{answerable} answerable "
+                    f"schemes written ({success_ratio:.2%} — below "
                     f"{_MIN_SUCCESS_RATIO:.0%} threshold)"
                 )
                 self.logger.warning(f"MF rate job: {msg}")
                 return msg, "Failed", self.interval
+
+            # ak-5jq H3: Completed msg surfaces the permanent-skip
+            # count when there are any, so operators can see the
+            # attrition rate without grepping logs. Silent 0-skips
+            # cases still get the plain 'Completed successfully'.
+            if permanent_skips > 0:
+                return (
+                    f"Completed successfully "
+                    f"({permanent_skips} schemes permanently dropped by mfapi.in)",
+                    "Completed", self.interval,
+                )
             return 'Completed successfully', "Completed", self.interval
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
@@ -166,20 +235,48 @@ class SetMFRate(BaseTask):
         # in-flight retry). Swapped to asyncio.sleep() as part of the
         # single-loop move so the shape is correct going forward.
         start_time = time.time()
-        result_map = asyncio.run(
+        result_map, permanent_skip_ids, error_class_counts = asyncio.run(
             self._fetch_all_passes(urls, start_time=start_time)
         )
 
-        final_failed = len(urls) - len(result_map)
-        if final_failed > 0:
-            self.logger.warning(f"{final_failed} schemes still failed after all retry passes")
+        # ak-5jq H3: log the per-class error breakdown so an operator
+        # can distinguish "transient 5xx flood" from "batch of 404
+        # delistings" from "rate-limited" — none of which showed up
+        # differently in the pre-H3 logs.
+        if error_class_counts:
+            breakdown = " ".join(
+                f"{k}={v}" for k, v in sorted(error_class_counts.items())
+            )
+            self.logger.info(
+                f"MF rate: error breakdown {breakdown} "
+                f"permanent_skips_404={len(permanent_skip_ids)}"
+            )
 
-        self.logger.info(f"MF rate fetch complete: {len(result_map)} schemes in {time.time() - start_time:.2f}s")
-        # ak-539 C1: return (data_dict, urls_total, urls_ok) so run() can
-        # compute the success ratio and gate the jobs-table status. Callers
-        # depending on the old single-return-value shape will TypeError on
-        # unpack — intentional; there is only one internal caller (run()).
-        return {"data": list(result_map.values())}, len(urls), len(result_map)
+        final_failed = (
+            len(urls) - len(result_map) - len(permanent_skip_ids)
+        )
+        if final_failed > 0:
+            self.logger.warning(
+                f"{final_failed} schemes still failed after all retry passes "
+                f"(excluding {len(permanent_skip_ids)} permanent 404 skips)"
+            )
+
+        self.logger.info(
+            f"MF rate fetch complete: {len(result_map)} schemes in "
+            f"{time.time() - start_time:.2f}s "
+            f"(permanent_skips={len(permanent_skip_ids)})"
+        )
+        # ak-539 C1 + ak-5jq H3: return (data, urls_total, urls_ok,
+        # permanent_skips). run() adjusts the denominator for the ratio
+        # math and surfaces the permanent-skip count in the Completed
+        # msg. Callers depending on the old shape will TypeError on
+        # unpack — intentional; there is only one internal caller.
+        return (
+            {"data": list(result_map.values())},
+            len(urls),
+            len(result_map),
+            len(permanent_skip_ids),
+        )
 
     async def _fetch_all_passes(self, urls, *, start_time):
         """ak-539 C3: single-event-loop driver for the initial + retry
@@ -188,25 +285,40 @@ class SetMFRate(BaseTask):
         pass' failed_urls computation as belt-and-braces defense against
         any surviving mid-pass mutation (option (a) on top of option (b)
         per Lead's dispatch).
+
+        ak-5jq H3: additionally accumulates permanent_skip_ids (404s —
+        excluded from retry passes) and per-class error counts across
+        all passes. Returns (result_map, permanent_skip_ids,
+        error_class_counts).
         """
         result_map = {}  # scheme_id -> parsed data
+        permanent_skip_ids = set()  # ak-5jq H3: 404s from any pass
+        error_class_counts = defaultdict(int)
 
         # First pass — full concurrency across the deduped URL list.
         responses = await self._fetch_pass(urls)
         self._process_responses(responses, result_map)
+        self._process_errors(responses, permanent_skip_ids, error_class_counts)
         self.logger.info(
             f"Pass 1 complete: {len(result_map)}/{len(urls)} schemes "
-            f"in {time.time() - start_time:.2f}s"
+            f"in {time.time() - start_time:.2f}s "
+            f"(permanent_skips={len(permanent_skip_ids)})"
         )
 
-        # Retry passes for URLs whose scheme_id didn't land in result_map.
+        # Retry passes for URLs whose scheme_id didn't land in result_map
+        # AND aren't permanently skipped (404s never retry — mfapi.in
+        # already told us that scheme is gone).
         for retry_pass in range(RETRY_PASSES):
             # Snapshot succeeded ids BEFORE building the failed list so
             # concurrent producer/consumer semantics can't produce a
             # partial view. Even inside a single event loop this is a
             # cheap defense-in-depth on top of the single-loop guarantee.
             succeeded = set(result_map)
-            failed_urls = [u for u in urls if u.split("/")[-1] not in succeeded]
+            failed_urls = [
+                u for u in urls
+                if (sid := u.split("/")[-1]) not in succeeded
+                and sid not in permanent_skip_ids
+            ]
             if not failed_urls:
                 break
             self.logger.info(
@@ -219,12 +331,34 @@ class SetMFRate(BaseTask):
             concurrency = max(10, CONCURRENT_REQUESTS // (retry_pass + 2))
             responses = await self._fetch_pass(failed_urls, concurrency=concurrency)
             self._process_responses(responses, result_map)
+            self._process_errors(responses, permanent_skip_ids, error_class_counts)
             self.logger.info(
                 f"Pass {retry_pass + 2} complete: {len(result_map)}/{len(urls)} "
-                f"schemes in {time.time() - start_time:.2f}s"
+                f"schemes in {time.time() - start_time:.2f}s "
+                f"(permanent_skips={len(permanent_skip_ids)})"
             )
 
-        return result_map
+        return result_map, permanent_skip_ids, error_class_counts
+
+    def _process_errors(self, responses, permanent_skip_ids, error_class_counts):
+        """ak-5jq H3: walk responses looking for classified failure
+        markers (see fetch_scheme). Extracts:
+          * permanent_skip_ids: 404s go here so retry passes filter them.
+          * error_class_counts: per-class tallies for the summary log.
+        Success responses (parsed by _process_responses) are ignored here.
+        """
+        for response in responses:
+            if not isinstance(response, tuple):
+                continue
+            scheme_id, payload = response
+            if not isinstance(payload, dict):
+                continue
+            kind = payload.get(_ERROR_KEY)
+            if not kind:
+                continue
+            error_class_counts[kind] += 1
+            if kind == "permanent_skip_404":
+                permanent_skip_ids.add(scheme_id)
 
     async def _fetch_pass(self, urls, concurrency=CONCURRENT_REQUESTS):
         """Wrapper around make_requests kept for parity with the pre-
@@ -264,7 +398,15 @@ class SetMFRate(BaseTask):
 
     async def make_requests(self, urls: list, concurrency=CONCURRENT_REQUESTS, **kwargs):
         semaphore = asyncio.Semaphore(concurrency)
-        timeout = ClientTimeout(total=30, connect=10)
+        # ak-5jq H2: per-request total dropped 30s → 10s (mfapi.in p99
+        # is well under 5s on healthy runs; 10s catches genuine hangs
+        # without stretching bad batches into minutes). Connect budget
+        # halved to 5s — DNS + TCP handshake for mfapi.in should
+        # complete in milliseconds once ttl_dns_cache warms.
+        timeout = ClientTimeout(
+            total=_REQUEST_TIMEOUT_SECONDS,
+            connect=_REQUEST_CONNECT_TIMEOUT_SECONDS,
+        )
         # ak-539 C2: enable HTTP connection pooling. Previously
         # force_close=True + limit_per_host=<concurrency> meant every
         # one of ~37k requests opened + closed its own TCP socket → FD
@@ -291,7 +433,27 @@ class SetMFRate(BaseTask):
         return [r for r in results if not isinstance(r, Exception)]
 
     async def fetch_scheme(self, url: str, session: ClientSession, semaphore: asyncio.Semaphore):
+        """Fetch one scheme's NAV from mfapi.in.
+
+        ak-5jq H2 + H3: return-value contract:
+          * (scheme_id, {"data": ..., "meta": ...})  → success
+          * (scheme_id, {_ERROR_KEY: 'permanent_skip_404', 'status': 404})
+              → mfapi.in permanently dropped this scheme; caller must
+                NOT retry (see _fetch_all_passes filter).
+          * (scheme_id, {_ERROR_KEY: 'final_429', 'status': 429})
+          * (scheme_id, {_ERROR_KEY: 'final_5xx', 'status': <5xx>})
+          * (scheme_id, {_ERROR_KEY: 'final_timeout', 'status': 408})
+          * (scheme_id, {_ERROR_KEY: 'final_other', 'status': <int>})
+        Non-success shapes are counted by _process_errors and ignored
+        by _process_responses (only 'data'-shaped dicts land in
+        result_map).
+
+        Backoff (ak-5jq H2): exponential with 25% jitter, capped at
+        30s for 5xx/timeouts and 60s for 429 (upstream told us to
+        slow down harder).
+        """
         scheme_id = url.split("/")[-1]
+        last_status = 500  # tracks the class the terminal `return` reports
         for attempt in range(MAX_RETRIES):
             async with semaphore:
                 try:
@@ -299,19 +461,84 @@ class SetMFRate(BaseTask):
                         if resp.status == 200:
                             data = await resp.json()
                             return scheme_id, data
-                        elif resp.status in (429, 502, 503):
-                            # Rate limited or server overloaded — retry with backoff
-                            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                        if resp.status == 404:
+                            # ak-5jq H3: permanent skip. mfapi.in has
+                            # dropped this scheme; retrying is wasted
+                            # work + a wasted retry-loop slot for a
+                            # legit-transient failure. INFO-level (not
+                            # WARN) — this happens as a normal part of
+                            # MFAPI's daily attrition.
+                            self.logger.info(
+                                f"MF rate: permanent skip 404 for scheme "
+                                f"{scheme_id} (delisted by mfapi.in)"
+                            )
+                            return scheme_id, {
+                                _ERROR_KEY: "permanent_skip_404",
+                                "status": 404,
+                            }
+                        if resp.status == 429:
+                            # ak-5jq H2 + H3: longer backoff — upstream
+                            # explicitly asked us to slow down.
+                            last_status = 429
+                            await asyncio.sleep(_compute_backoff(
+                                attempt,
+                                base=_BACKOFF_429_BASE_SECONDS,
+                                cap=_BACKOFF_429_CAP_SECONDS,
+                            ))
                             continue
-                        else:
-                            body = await resp.text()
-                            self.logger.debug(f"HTTP {resp.status} for {scheme_id}: {body[:100]}")
-                            return scheme_id, resp.status
+                        if 500 <= resp.status < 600:
+                            # ak-5jq H2 + H3: transient server error —
+                            # exponential backoff with cap 30s.
+                            last_status = resp.status
+                            await asyncio.sleep(_compute_backoff(
+                                attempt,
+                                base=_BACKOFF_BASE_SECONDS,
+                                cap=_BACKOFF_CAP_SECONDS,
+                            ))
+                            continue
+                        # ak-5jq H3: anything else (401/403/400/…) is
+                        # a client-side or unusual response. WARN once
+                        # then fail — retrying isn't useful.
+                        body = await resp.text()
+                        self.logger.warning(
+                            f"MF rate: HTTP {resp.status} for {scheme_id} "
+                            f"(non-retryable): {body[:100]}"
+                        )
+                        return scheme_id, {
+                            _ERROR_KEY: "final_other",
+                            "status": resp.status,
+                        }
                 except (ClientConnectorError, asyncio.TimeoutError):
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                    last_status = 408
+                    await asyncio.sleep(_compute_backoff(
+                        attempt,
+                        base=_BACKOFF_BASE_SECONDS,
+                        cap=_BACKOFF_CAP_SECONDS,
+                    ))
                 except ClientResponseError as e:
-                    return scheme_id, e.status
+                    # aiohttp's response-shape error — treat like the
+                    # generic non-retryable branch above.
+                    self.logger.warning(
+                        f"MF rate: ClientResponseError {e.status} for {scheme_id}"
+                    )
+                    return scheme_id, {
+                        _ERROR_KEY: "final_other",
+                        "status": e.status,
+                    }
                 except Exception as e:
                     self.logger.error(f"Unexpected error for {scheme_id}: {e}")
-                    return scheme_id, 500
-        return scheme_id, 408  # All retries exhausted
+                    return scheme_id, {
+                        _ERROR_KEY: "final_other",
+                        "status": 500,
+                    }
+        # ak-5jq H3: retries exhausted — classify the final failure by
+        # the last status we observed.
+        if last_status == 429:
+            kind = "final_429"
+        elif 500 <= last_status < 600:
+            kind = "final_5xx"
+        elif last_status == 408:
+            kind = "final_timeout"
+        else:
+            kind = "final_other"
+        return scheme_id, {_ERROR_KEY: kind, "status": last_status}

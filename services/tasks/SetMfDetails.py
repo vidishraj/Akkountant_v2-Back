@@ -182,6 +182,23 @@ class SetMFDetails(BaseTask):
                 f"ratio={deviation_ratio:+.1%}. "
                 f"sample_first_{_MF_DETAILS_DUP_SAMPLE_LIMIT}_codes={first_codes}"
             )
+        elif current * _MF_DETAILS_ERR_MULTIPLIER < prev_count:
+            # ak-5jq (H3 theme): symmetric downside alarm. Mirrors the
+            # >2× spike check for the "MFAPI silently returned half the
+            # universe" class. Show first-N codes so an operator can
+            # tell "API returned a truncated list" from "genuine mass
+            # delisting" from "wrong endpoint / URL change".
+            first_codes = [
+                item.get('schemeCode')
+                for item in jsonData[:_MF_DETAILS_DUP_SAMPLE_LIMIT]
+                if isinstance(item, dict)
+            ]
+            self.logger.error(
+                f"MF details: COUNT DROP >{_MF_DETAILS_ERR_MULTIPLIER:g}× — "
+                f"current={current} previous={prev_count} "
+                f"ratio={deviation_ratio:+.1%}. "
+                f"sample_first_{_MF_DETAILS_DUP_SAMPLE_LIMIT}_codes={first_codes}"
+            )
         elif abs(deviation_ratio) > _MF_DETAILS_WARN_DEVIATION:
             self.logger.warning(
                 f"MF details: count deviation {deviation_ratio:+.1%} "
