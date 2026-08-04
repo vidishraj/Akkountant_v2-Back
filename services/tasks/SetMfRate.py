@@ -23,6 +23,19 @@ RETRY_PASSES = 3  # number of full retry passes for failed schemes
 _MIN_SUCCESS_RATIO = 0.98
 _DNS_CACHE_TTL_SECONDS = 300  # ak-539 C2: TCPConnector DNS cache lifetime
 
+# ak-539 v2 (post-review MAJOR fix): coverage hard floor.
+# Below this ratio we treat the run as a transient-outage class and
+# PRESERVE the last-good rates file on disk rather than clobbering it
+# with a near-empty replacement. Rationale: on an mfapi.in outage /
+# DNS flood / rate-limit apocalypse, most schemes return non-200 and
+# never land in result_map — the "partial" file would be nearly empty
+# and callers would see NAV holes for ~1 interval until the next good
+# run. A legitimate partial run (e.g. Aug 3-class SIGKILL) still lands
+# above 50% coverage because retries mostly complete before the kill;
+# a real outage lands well below. 0.5 is a clear "half-or-more failed"
+# signal that no legitimate partial-run scenario should hit.
+_COVERAGE_HARD_FLOOR = 0.5
+
 
 class SetMFRate(BaseTask):
     _instance = None
@@ -53,6 +66,29 @@ class SetMFRate(BaseTask):
             # downstream getMFRate() served empty dicts for missing schemes
             # (silent NAV holes for users) with the jobs table showing green.
             jsonData, urls_total, urls_ok = self.buildJsonForMF(listUrl, latestListFile)
+            success_ratio = (urls_ok / urls_total) if urls_total else 1.0
+
+            # ak-539 v2 (post-review MAJOR fix): hard-floor gate FIRST.
+            # safe_replace_file destroys the last-good rates file the
+            # moment it runs; a transient-outage-shape result_map
+            # (near-empty but size > 0) would clobber it with garbage
+            # under the v1 flow. Below the hard floor we skip both the
+            # tmp write AND the swap so the previous good file stays
+            # on disk exactly as-is, and callers keep serving the last
+            # known NAVs until the next run recovers.
+            if success_ratio < _COVERAGE_HARD_FLOOR:
+                msg = (
+                    f"coverage below hard floor: {urls_ok}/{urls_total} "
+                    f"({success_ratio:.2%} — below "
+                    f"{_COVERAGE_HARD_FLOOR:.0%} floor); "
+                    f"preserving last-good NAVs on disk"
+                )
+                self.logger.error(f"MF rate job: {msg}")
+                return msg, "Failed", self.interval
+
+            # Above the hard floor — write + swap. The file may be
+            # degraded (below the 98% threshold) but is still better
+            # than stale for the majority of callers.
             filePath = os.path.join(self.tmp_dir, 'MFRate.json')
             try:
                 os.remove(filePath)
@@ -64,16 +100,14 @@ class SetMFRate(BaseTask):
             if not ok:
                 return err, "Failed", self.interval
 
-            # ak-539 C1: success-ratio gate. We write the file first (so the
-            # partial data is still available to callers that would rather
-            # have degraded coverage than none), but flip the jobs-table
-            # status to Failed with a descriptive message so an operator
+            # ak-539 C1: 98% partial-success gate. Between the hard floor
+            # and the 98% threshold we swapped the file (degraded > stale)
+            # but flip the jobs-table status to Failed so an operator
             # sees the run isn't clean.
             #
             # Ratio math is done here rather than in buildJsonForMF so the
             # threshold constant lives with the caller that decides what
             # 'Completed' means — buildJsonForMF only reports raw counts.
-            success_ratio = (urls_ok / urls_total) if urls_total else 1.0
             if success_ratio < _MIN_SUCCESS_RATIO:
                 msg = (
                     f"partial success: {urls_ok}/{urls_total} schemes "
