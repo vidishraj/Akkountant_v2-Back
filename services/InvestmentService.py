@@ -18,6 +18,11 @@ from models.securityTransactions import SecurityTransactions
 from models.stockTrade import TradeAssociation
 from services.Base_Service import BaseService
 from services.EPFService import EPFService
+# ak-ran v2 #5: leaf-module constant so the WealthDigest routing key
+# is a single source of truth across scheduler + jobsObject + bootstrap.
+# wealth_digest_constants has ZERO transitive deps, so the import
+# doesn't create the InvestmentService <-> services.tasks.* cycle.
+from services.tasks.wealth_digest_constants import WEALTH_DIGEST_JOB_TITLE
 from services.GoldService import GoldService
 from services.MfService import MfService
 from services.NpsService import NPSService
@@ -50,7 +55,12 @@ class InvestmentService(BaseService):
         "SetPPFRate": "Set PPF Rates",
         "SetEPFRate": "Set EPF Rates",
         "CheckMail": "Check Mail",
-        "CheckStatement": "Check Statements"
+        "CheckStatement": "Check Statements",
+        # ak-ran Phase 1 + v2 #5: manual-trigger + scheduler-recognized
+        # title for the daily wealth-management digest task. Key is
+        # the shared WEALTH_DIGEST_JOB_TITLE constant so a rename
+        # only touches one file.
+        WEALTH_DIGEST_JOB_TITLE: "Wealth Digest (daily briefing)",
     }
 
     def __init__(self):

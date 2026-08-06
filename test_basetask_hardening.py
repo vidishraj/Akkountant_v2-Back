@@ -609,6 +609,8 @@ class TestFleetSubclassSmoke(unittest.TestCase):
         ("services.tasks.checkMailTask", "CheckMailTask"),
         ("services.tasks.checkStatementsTask", "CheckStatementTask"),
         ("services.tasks.InvestmentHistoryTask", "InvestmentHistoryTask"),
+        # ak-ran Phase 1: daily wealth-management digest task.
+        ("services.tasks.WealthDigestTask", "WealthDigestTask"),
     ]
 
     @classmethod

@@ -19,6 +19,8 @@ from services.tasks.SetEPFRate import SetEPFRate
 from services.tasks.checkMailTask import CheckMailTask
 from services.tasks.checkStatementsTask import CheckStatementTask
 from services.tasks.SetStockOldCodes import SetStockOldCodes
+from services.tasks.WealthDigestTask import WealthDigestTask
+from services.tasks.wealth_digest_constants import WEALTH_DIGEST_JOB_TITLE
 from utils.logger import Logger
 
 
@@ -34,7 +36,15 @@ TASK_MAPPING = {
     "SetEPFRate": SetEPFRate,
     "CheckMail": CheckMailTask,
     "CheckStatement": CheckStatementTask,
-    "InvestmentHistoryTask": InvestmentHistoryTask
+    "InvestmentHistoryTask": InvestmentHistoryTask,
+    # ak-ran Phase 1 + v2 #5: daily proactive wealth-management digest
+    # at 06:00 IST. Bootstrap script (bootstrap_wealth_digest.py)
+    # seeds the first Pending Job; subsequent runs self-reschedule
+    # at 24h cadence per WealthDigestTask.interval. Routing key is
+    # WEALTH_DIGEST_JOB_TITLE — shared across scheduler / jobsObject
+    # / bootstrap so a typo becomes a compile-time NameError instead
+    # of a silent routing miss.
+    WEALTH_DIGEST_JOB_TITLE: WealthDigestTask,
 }
 
 

@@ -35,6 +35,18 @@ DEFAULT_TITLE = "New conversation"
 # Matches what controllers/agentEP.py accepts.
 VALID_AGENT_TYPES = ('investment', 'transaction', 'freelance')
 
+# ak-ran Phase 1: canonical title for the daily wealth-management
+# digest conversation. Shared with WealthDigestTask via import so
+# find_or_create_by_title uses the same exact string on both write
+# (digest task) and any future read (FE / other jobs). Grep for
+# WEALTH_DIGEST_TITLE to find every site that touches this thread.
+# NOTE: title lives inside agent_type='investment' — per Lead's Q1
+# GO, we reuse the existing agent type rather than mint a new one
+# ('wealth_digest' would need VALID_AGENT_TYPES + agentEP whitelist
+# + FE-side awareness). If Phase 2 promotes to a dedicated agent
+# type, this constant moves with it.
+WEALTH_DIGEST_TITLE = "Wealth Digest"
+
 # Whitespace-collapse regex used by derive_title.
 _WS_RE = re.compile(r"\s+")
 
@@ -159,6 +171,55 @@ class AgentConversationService(BaseService):
         self.db.session.add(conv)
         self.db.session.commit()
         return conv.id
+
+    def find_or_create_by_title(self, user_id, agent_type, title):
+        """ak-ran Phase 1: idempotent lookup for a conversation
+        identified by (user_id, agent_type, title). Returns the
+        conversation_id; creates a new row if none exists.
+
+        Purpose: WealthDigestTask fires daily and needs to append to
+        the SAME conversation each run (not create N conversations
+        over time). This is the primitive that guarantees convergence
+        on a single thread per user.
+
+        Matching rules:
+          - user_id + agent_type + title all match exactly.
+          - deleted_at IS NULL — a soft-deleted conversation is
+            treated as "not found" so a fresh one is created (the
+            user explicitly deleted the old thread; don't resurrect).
+          - If multiple non-deleted matches exist (should be rare —
+            only happens if a caller creates the conv directly
+            without using this helper), return the OLDEST (min id)
+            so all future runs converge on the first-created one.
+
+        Args mirror create_conversation for symmetry."""
+        if not user_id:
+            raise ValueError("find_or_create_by_title: user_id required")
+        if agent_type not in VALID_AGENT_TYPES:
+            raise ValueError(
+                f"find_or_create_by_title: invalid agent_type "
+                f"{agent_type!r}; expected one of {VALID_AGENT_TYPES}"
+            )
+        if not title:
+            raise ValueError("find_or_create_by_title: title required")
+        existing = (
+            self.db.session.query(AgentConversation)
+            .filter(AgentConversation.user_id == user_id)
+            .filter(AgentConversation.agent_type == agent_type)
+            .filter(AgentConversation.title == title)
+            .filter(AgentConversation.deleted_at.is_(None))
+            .order_by(AgentConversation.id.asc())
+            .first()
+        )
+        if existing is not None:
+            return existing.id
+        # Create fresh with the explicit title (bypass derive_title —
+        # we already know the exact string).
+        return self.create_conversation(
+            user_id=user_id,
+            agent_type=agent_type,
+            title=title,
+        )
 
     def append_message(self, user_id, conversation_id, role, content,
                        attachments_meta=None, partial=False):
