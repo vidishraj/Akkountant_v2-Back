@@ -94,9 +94,22 @@ def main():
         from services.Base_Service import BaseService
         db = BaseService().db
 
+        # ak-3eo H3: RUNNING included in the non-terminal set so
+        # bootstrap can't seed a duplicate during an active daily run.
+        # Pre-H3 the check was (PENDING, OVERDUE) only — if bootstrap
+        # was re-run WHILE the scheduler had a Running WealthDigest
+        # job in-flight (e.g. operator re-running post-deploy to be
+        # sure), a second Pending would be seeded → next tick fires
+        # two digests → double-write to the conversation. RUNNING in
+        # the set makes bootstrap wait for the current run to
+        # complete/fail before adding another.
         existing = db.session.query(Job).filter(
             Job.title == job_title,
-            Job.status.in_([JobStatus.PENDING.value, JobStatus.OVERDUE.value]),
+            Job.status.in_([
+                JobStatus.PENDING.value,
+                JobStatus.OVERDUE.value,
+                JobStatus.RUNNING.value,
+            ]),
         ).first()
         if existing is not None:
             print(
