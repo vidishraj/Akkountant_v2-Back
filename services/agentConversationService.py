@@ -153,6 +153,27 @@ class AgentConversationService(BaseService):
 
         Returns the integer id of the new row (NOT the model object —
         the caller often only needs the id for the SSE preamble).
+
+        ak-6si bug fix: BaseService.db is a property that returns a
+        NEW scoped_session on every access when g.db is None (the
+        background-task path — WealthDigestTask runs inside an
+        app_context but has no request_context, so g.db is None).
+        Pre-fix, `self.db.session.add(conv)` and `self.db.session.
+        commit()` each re-invoked the property → landed on DIFFERENT
+        sessions → the row was added to session A but commit ran
+        empty on session B → conv.id stayed None because no flush
+        ever happened on the session holding conv. Fix:
+          (1) cache the session in a local so add/flush/commit all
+              hit the SAME session,
+          (2) call session.flush() explicitly so conv.id is populated
+              from the DB's RETURNING/lastrowid BEFORE we commit —
+              defense against SQLAlchemy's default expire_on_commit
+              expiring the object and requiring a lazy re-load,
+          (3) snapshot conv.id BEFORE commit for the same reason,
+          (4) WARN + raise if the snapshot is None so future silent
+              failures surface (pre-fix returned None silently → the
+              caller trip append_message ownership check with no
+              upstream signal).
         """
         if not user_id:
             raise ValueError("create_conversation: user_id required")
@@ -163,14 +184,42 @@ class AgentConversationService(BaseService):
             )
         if title is None:
             title = derive_title(first_user_message)
+        # ak-6si (1): cache the session so add/flush/commit are on
+        # the SAME session even when self.db returns a fresh scoped
+        # session each call (background-task path).
+        session = self.db.session
         conv = AgentConversation(
             user_id=user_id,
             agent_type=agent_type,
             title=title,
         )
-        self.db.session.add(conv)
-        self.db.session.commit()
-        return conv.id
+        try:
+            session.add(conv)
+            # ak-6si (2): flush explicitly to populate conv.id from
+            # the DB's autoincrement RETURNING before commit expires
+            # the object.
+            session.flush()
+            # ak-6si (3): snapshot the id BEFORE commit. Defense
+            # against expire_on_commit lazy-load returning None if
+            # the session state gets muddled.
+            conv_id = conv.id
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        # ak-6si (4): defensive — surface silent None returns instead
+        # of propagating them to callers who trip ownership checks
+        # downstream with no upstream signal.
+        if conv_id is None:
+            msg = (
+                f"create_conversation: conv.id is None after flush+commit "
+                f"(user_id={user_id[:8]}... agent_type={agent_type!r} "
+                f"title={title!r}). Likely session-caching / autoincrement "
+                f"issue. Refusing to return None."
+            )
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+        return conv_id
 
     def find_or_create_by_title(self, user_id, agent_type, title):
         """ak-ran Phase 1: idempotent lookup for a conversation
@@ -202,8 +251,15 @@ class AgentConversationService(BaseService):
             )
         if not title:
             raise ValueError("find_or_create_by_title: title required")
+        # ak-6si: cache the session so the SELECT + fall-through to
+        # create_conversation are on the SAME scoped_session (in the
+        # background-task path BaseService.db returns a fresh session
+        # per attribute access; without caching, the SELECT could see
+        # different data than what create_conversation subsequently
+        # writes).
+        session = self.db.session
         existing = (
-            self.db.session.query(AgentConversation)
+            session.query(AgentConversation)
             .filter(AgentConversation.user_id == user_id)
             .filter(AgentConversation.agent_type == agent_type)
             .filter(AgentConversation.title == title)
@@ -212,14 +268,40 @@ class AgentConversationService(BaseService):
             .first()
         )
         if existing is not None:
+            if existing.id is None:
+                # Defensive: an existing row without an id would be a
+                # pathological ORM state, but call it out so a future
+                # silent None return has a log trail.
+                self.logger.error(
+                    f"find_or_create_by_title: existing row has id=None "
+                    f"(user_id={user_id[:8]}... agent_type={agent_type!r} "
+                    f"title={title!r})"
+                )
+                raise RuntimeError(
+                    "find_or_create_by_title: existing row has id=None"
+                )
             return existing.id
         # Create fresh with the explicit title (bypass derive_title —
-        # we already know the exact string).
-        return self.create_conversation(
+        # we already know the exact string). create_conversation now
+        # raises RuntimeError on None-id return (ak-6si), so this
+        # propagates loudly rather than passing None to the caller.
+        conv_id = self.create_conversation(
             user_id=user_id,
             agent_type=agent_type,
             title=title,
         )
+        # ak-6si: belt-and-braces — even though create_conversation
+        # now raises on None, guard here too so the invariant is
+        # explicit at both callers.
+        if conv_id is None:
+            msg = (
+                f"find_or_create_by_title: create_conversation returned "
+                f"None (user_id={user_id[:8]}... agent_type={agent_type!r} "
+                f"title={title!r})"
+            )
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+        return conv_id
 
     def append_message(self, user_id, conversation_id, role, content,
                        attachments_meta=None, partial=False):
