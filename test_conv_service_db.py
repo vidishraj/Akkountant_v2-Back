@@ -416,8 +416,227 @@ class TestAk6siFixSourceInvariants(unittest.TestCase):
         print("  ✓ session cache + existing-id guard + create-return guard all present")
 
 
+# ── ak-m6k: append_message read-side session-cache tests ───────────────
+
+
+@unittest.skipUnless(_DEPS_OK, _SKIP_REASON)
+class TestAppendMessageSessionCacheAkM6k(unittest.TestCase):
+    """ak-m6k INSTANCE 2 (read-side): append_message._fetch_owned
+    used a fresh scoped_session/engine per self.db access; the
+    ownership SELECT couldn't see a conv that had JUST been committed
+    by find_or_create_by_title via a DIFFERENT fresh engine. Symptom:
+    append_message returned None → digest never persisted → ak-ran
+    Step 3 activation failed twice in prod.
+
+    Fix (this batch): session cached in a local at append_message
+    entry + threaded into _fetch_owned via session= kwarg. Read +
+    write now share the SAME scoped_session/engine.
+
+    Tests mirror the ak-6si create-side coverage: real SQLite
+    integration + broken-db shim to prove the fix survives the
+    hostile session shape."""
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:")
+        AgentConversation.__table__.create(self.engine)
+        AgentMessage.__table__.create(self.engine)
+        self._SessionFactory = scoped_session(
+            sessionmaker(
+                autocommit=False, autoflush=False, bind=self.engine,
+            )
+        )
+        AgentConversationService._instance = None
+        self.svc = AgentConversationService()
+        self._install_stub_db(broken=False)
+
+    def tearDown(self):
+        try:
+            self._SessionFactory.remove()
+        except Exception:
+            pass
+        AgentConversationService._instance = None
+
+    def _install_stub_db(self, *, broken):
+        stub = _StubDb(self._SessionFactory, broken=broken)
+        type(self.svc).db = property(lambda _self, _stub=stub: _stub)
+
+    def test_append_message_returns_int_msg_id(self):
+        print("\n[ak-m6k — append_message returns positive int, never None]")
+        cid = self.svc.find_or_create_by_title(
+            user_id="u1", agent_type="investment", title=WEALTH_DIGEST_TITLE,
+        )
+        mid = self.svc.append_message(
+            user_id="u1", conversation_id=cid,
+            role="assistant", content="digest body",
+        )
+        self.assertIsNotNone(mid, "append_message returned None — ak-m6k regressed")
+        self.assertIsInstance(mid, int)
+        self.assertGreater(mid, 0)
+        print(f"  ✓ cid={cid} mid={mid}")
+
+    def test_append_message_finds_just_committed_conv(self):
+        """ak-m6k INSTANCE 2 direct repro: create conv then IMMEDIATELY
+        append. Pre-fix, _fetch_owned's SELECT via a fresh engine
+        couldn't see the conv committed by find_or_create's earlier
+        fresh engine, so append_message returned None."""
+        print("\n[ak-m6k INSTANCE 2 repro — append RIGHT AFTER create sees the just-committed conv]")
+        cid = self.svc.find_or_create_by_title(
+            user_id="u1", agent_type="investment", title=WEALTH_DIGEST_TITLE,
+        )
+        # Immediate append — no delay, no session cleanup between.
+        mid = self.svc.append_message(
+            user_id="u1", conversation_id=cid,
+            role="assistant", content="immediate",
+        )
+        self.assertIsNotNone(mid)
+        # And the message actually persisted with correct conv_id.
+        session = type(self.svc).db.fget(self.svc).session
+        row = session.query(AgentMessage).filter(AgentMessage.id == mid).first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.conversation_id, cid)
+        print(f"  ✓ create+immediate-append round-trip works (cid={cid} mid={mid})")
+
+    def test_append_message_survives_broken_db_shim(self):
+        """Reproduce the pre-fix background-task session shape (fresh
+        session per .db access). The post-ak-m6k session-cache-at-
+        entry + thread-into-_fetch_owned pattern MUST survive this,
+        else the fix is inert."""
+        print("\n[ak-m6k — append_message robust under broken db (fresh session per access)]")
+        # Create with the good (cached) db first so conv is committed.
+        cid = self.svc.find_or_create_by_title(
+            user_id="u1", agent_type="investment", title=WEALTH_DIGEST_TITLE,
+        )
+        # Now switch to the broken db shim and try to append.
+        self._install_stub_db(broken=True)
+        # Post-fix: append_message caches session at entry, threads
+        # into _fetch_owned, so read+write hit the SAME session even
+        # though the .db property returns a fresh one on each access.
+        mid = self.svc.append_message(
+            user_id="u1", conversation_id=cid,
+            role="assistant", content="under-broken-db",
+        )
+        self.assertIsNotNone(mid, "append_message failed under broken-db — ak-m6k fix regressed")
+        self.assertIsInstance(mid, int)
+        print(f"  ✓ mid={mid} — session-cache survives fresh-session-per-access shape")
+
+    def test_wrong_user_returns_none_not_raises(self):
+        """Ownership check semantics preserved — wrong user_id gets
+        None (controller maps to 404), not RuntimeError."""
+        print("\n[ak-m6k — cross-user append still returns None (ownership check preserved)]")
+        cid = self.svc.find_or_create_by_title(
+            user_id="u1", agent_type="investment", title=WEALTH_DIGEST_TITLE,
+        )
+        mid = self.svc.append_message(
+            user_id="u_hostile",  # different user
+            conversation_id=cid,
+            role="assistant", content="hostile",
+        )
+        self.assertIsNone(mid, "cross-user append should return None, not persist")
+        # And the message table stays empty.
+        session = type(self.svc).db.fget(self.svc).session
+        count = session.query(AgentMessage).count()
+        self.assertEqual(count, 0)
+        print("  ✓ wrong user → None, no row written")
+
+    def test_soft_delete_also_uses_cached_session(self):
+        """Regression: soft_delete's _fetch_owned + commit must ALSO
+        share the same session (same pattern as append_message)."""
+        print("\n[ak-m6k — soft_delete uses cached session for read+write consistency]")
+        cid = self.svc.find_or_create_by_title(
+            user_id="u1", agent_type="investment", title=WEALTH_DIGEST_TITLE,
+        )
+        ok = self.svc.soft_delete(user_id="u1", conversation_id=cid)
+        self.assertTrue(ok)
+        # And a subsequent find_or_create should CREATE FRESH (soft-
+        # deleted conv is treated as not-found).
+        new_cid = self.svc.find_or_create_by_title(
+            user_id="u1", agent_type="investment", title=WEALTH_DIGEST_TITLE,
+        )
+        self.assertNotEqual(cid, new_cid, "soft-deleted conv resurrected — semantics broken")
+        print(f"  ✓ soft-delete cid={cid}, subsequent create new_cid={new_cid}")
+
+
+class TestAkM6kFixSourceInvariants(unittest.TestCase):
+    """Source-inspection guards for the ak-m6k fix — always run so
+    a future refactor can't silently revert the session-caching +
+    thread-into-_fetch_owned pattern."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "services", "agentConversationService.py",
+        )
+        with open(path) as fh:
+            cls.src = fh.read()
+        cls.code = TestAk6siFixSourceInvariants._strip_comments_and_docstrings(cls.src)
+
+    def test_fetch_owned_accepts_session_kwarg(self):
+        print("\n[ak-m6k — _fetch_owned accepts optional session= kwarg]")
+        self.assertIn(
+            "def _fetch_owned(self, user_id, conversation_id, *, session=None):",
+            self.src,
+        )
+        # And uses the passed session when non-None.
+        self.assertIn(
+            "query_session = session if session is not None else self.db.session",
+            self.src,
+        )
+        print("  ✓ session= kwarg + fallback path both present")
+
+    def test_append_message_threads_session_into_fetch_owned(self):
+        print("\n[ak-m6k — append_message caches session + threads into _fetch_owned]")
+        import re
+        m = re.search(
+            r"def append_message\(self.*?\n(?=    def )",
+            self.code, re.DOTALL,
+        )
+        self.assertIsNotNone(m, "could not locate append_message body")
+        body = m.group(0)
+        # Session cached at entry.
+        self.assertIn("session = self.db.session", body)
+        # Threaded into _fetch_owned via kwarg.
+        self.assertIn(
+            "self._fetch_owned(user_id, conversation_id, session=session)",
+            body,
+        )
+        # Add + flush + commit all use the cached session.
+        self.assertIn("session.add(msg)", body)
+        self.assertIn("session.flush()", body)
+        self.assertIn("session.commit()", body)
+        # Snapshot msg.id BEFORE commit.
+        self.assertIn("msg_id = msg.id", body)
+        # None-check raises rather than returns None.
+        self.assertIn("if msg_id is None:", body)
+        self.assertIn("raise RuntimeError(fail_msg)", body)
+        # Pre-fix shape gone.
+        self.assertNotIn("self.db.session.add(msg)", body,
+                         "append_message still uses self.db.session.add — regressed")
+        self.assertNotIn("self.db.session.commit()", body,
+                         "append_message still uses self.db.session.commit — regressed")
+        print("  ✓ cached session + threaded + snapshot + raise-on-None + pre-fix shape gone")
+
+    def test_soft_delete_threads_session_into_fetch_owned(self):
+        print("\n[ak-m6k — soft_delete caches session + threads into _fetch_owned]")
+        import re
+        m = re.search(
+            r"def soft_delete\(self.*?\n(?=    def )",
+            self.code, re.DOTALL,
+        )
+        self.assertIsNotNone(m, "could not locate soft_delete body")
+        body = m.group(0)
+        self.assertIn("session = self.db.session", body)
+        self.assertIn(
+            "self._fetch_owned(user_id, conversation_id, session=session)",
+            body,
+        )
+        self.assertIn("session.commit()", body)
+        self.assertNotIn("self.db.session.commit()", body)
+        print("  ✓ soft_delete session-cache + threaded")
+
+
 if __name__ == "__main__":
-    print("ak-6si — AgentConversationService real-DB integration tests")
+    print("ak-6si + ak-m6k — AgentConversationService real-DB integration tests")
     print("=" * 70)
     unittest.main(verbosity=0, exit=False)
     print("=" * 70)

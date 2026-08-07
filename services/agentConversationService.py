@@ -311,7 +311,19 @@ class AgentConversationService(BaseService):
         Validates the role against AGENT_MESSAGE_ROLES and confirms the
         conversation belongs to user_id before writing. Returns the
         new message id, or None if the conversation doesn't belong to
-        the user / doesn't exist.
+        the user / doesn't exist. Raises RuntimeError if the DB write
+        succeeded but msg.id ended up None (ak-6si-style defensive
+        guard so silent None returns can't propagate to callers).
+
+        ak-m6k: session cached in a local at method entry + threaded
+        into _fetch_owned so the ownership SELECT and the subsequent
+        INSERT + updated_at UPDATE all hit the SAME scoped_session
+        (and therefore the SAME engine + connection). Pre-fix,
+        _fetch_owned's `self.db.session.query(...)` and this method's
+        `self.db.session.add(msg)` each materialized a fresh engine
+        (background-task path where g.db is None), so the ownership
+        check couldn't see a conv that had JUST been committed by
+        find_or_create_by_title via a DIFFERENT fresh engine.
         """
         if role not in AGENT_MESSAGE_ROLES:
             raise ValueError(
@@ -320,7 +332,12 @@ class AgentConversationService(BaseService):
             )
         if content is None:
             content = ""
-        conv = self._fetch_owned(user_id, conversation_id)
+        # ak-m6k: cache session in a local + thread into _fetch_owned
+        # so the ownership check + write path share the same session/
+        # engine. Prevents the read-side manifestation of the
+        # ak-6si-class bug (INSTANCE 2 per ak-m6k bead body).
+        session = self.db.session
+        conv = self._fetch_owned(user_id, conversation_id, session=session)
         if conv is None:
             return None
         msg = AgentMessage(
@@ -330,39 +347,80 @@ class AgentConversationService(BaseService):
             attachments_meta=attachments_meta,
             partial=bool(partial),
         )
-        self.db.session.add(msg)
-        # Explicit updated_at bump so the ORDER BY in list_conversations
-        # reflects the new activity even if the DB's onupdate trigger
-        # doesn't fire on this dialect.
-        conv.updated_at = datetime.utcnow()
-        self.db.session.commit()
-        return msg.id
+        try:
+            session.add(msg)
+            # Explicit updated_at bump so the ORDER BY in list_conversations
+            # reflects the new activity even if the DB's onupdate trigger
+            # doesn't fire on this dialect.
+            conv.updated_at = datetime.utcnow()
+            # ak-m6k / ak-6si: flush before commit populates msg.id
+            # from RETURNING before commit's expire_on_commit fires
+            # + snapshot BEFORE commit so lazy-load can't return None.
+            session.flush()
+            msg_id = msg.id
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        # ak-6si-style defensive: raise rather than return None so
+        # future silent-None returns surface immediately at the caller.
+        if msg_id is None:
+            fail_msg = (
+                f"append_message: msg.id is None after flush+commit "
+                f"(user_id={user_id[:8]}... conv_id={conversation_id!r} "
+                f"role={role!r}). Likely session-caching / autoincrement "
+                f"issue. Refusing to return None."
+            )
+            self.logger.error(fail_msg)
+            raise RuntimeError(fail_msg)
+        return msg_id
 
     def soft_delete(self, user_id, conversation_id):
         """Set deleted_at on a user's conversation. Returns True on
-        success, False if not owned / not found / already deleted."""
-        conv = self._fetch_owned(user_id, conversation_id)
+        success, False if not owned / not found / already deleted.
+
+        ak-m6k: session cached + threaded (same class of read/write
+        cross-session issue as append_message)."""
+        session = self.db.session
+        conv = self._fetch_owned(user_id, conversation_id, session=session)
         if conv is None:
             return False
-        conv.deleted_at = datetime.utcnow()
-        self.db.session.commit()
+        try:
+            conv.deleted_at = datetime.utcnow()
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
         return True
 
     # ── helpers ────────────────────────────────────────────────────────
 
-    def _fetch_owned(self, user_id, conversation_id):
+    def _fetch_owned(self, user_id, conversation_id, *, session=None):
         """Return a live (non-soft-deleted) AgentConversation owned by
         user_id, else None. Single source of truth for the membership
         check — every read/write helper goes through here so a future
-        permissions change has exactly one site to update."""
+        permissions change has exactly one site to update.
+
+        ak-m6k: accepts an optional `session=` kwarg so callers can
+        thread their cached session in and guarantee read+write happen
+        on the SAME engine. When session is None (backward-compat
+        callers that don't cache), falls back to self.db.session
+        (fresh scoped_session per call in the background-task path).
+        Callers doing a subsequent write MUST pass session= to avoid
+        the ak-m6k read-side snapshot issue.
+        """
         if not user_id or not conversation_id:
             return None
         try:
             cid = int(conversation_id)
         except (TypeError, ValueError):
             return None
+        # ak-m6k: use caller-provided session if any, else fall back
+        # to self.db.session (single-shot readers that don't need
+        # cross-method consistency).
+        query_session = session if session is not None else self.db.session
         return (
-            self.db.session.query(AgentConversation)
+            query_session.query(AgentConversation)
             .filter(AgentConversation.id == cid)
             .filter(AgentConversation.user_id == user_id)
             .filter(AgentConversation.deleted_at.is_(None))
