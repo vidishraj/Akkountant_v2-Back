@@ -173,6 +173,17 @@ class TaskScheduler:
 
     def _run_overdue_scheduler(self):
         with self.flask_app.app_context():
+            # ak-ojd Path B defense-in-depth: set g.db explicitly at
+            # the task-invocation boundary (mirrors reprocess_*.py
+            # pattern). Redundant with the Base_Service.db
+            # current_app.db fallback (which handles the case where
+            # g.db is not set), but explicit-at-boundary is clearer
+            # for anyone reading scheduler.py — makes the "background
+            # task must share the app's stable engine" contract
+            # visible AT the task-runner entry point instead of
+            # implicit via the primitive property.
+            from flask import g
+            g.db = self.flask_app.db
             while True:
                 try:
                     self._update_overdue_jobs()
@@ -183,6 +194,10 @@ class TaskScheduler:
     def _run_job_processor(self):
         from utils.DateTimeUtil import is_within_allowed_window, seconds_until_allowed_window
         with self.flask_app.app_context():
+            # ak-ojd Path B defense-in-depth: see _run_overdue_scheduler
+            # comment above.
+            from flask import g
+            g.db = self.flask_app.db
             while True:
                 try:
                     if is_within_allowed_window():
