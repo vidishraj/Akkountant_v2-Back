@@ -320,8 +320,207 @@ class TestBaseServiceDbBehavioral(unittest.TestCase):
         print(f"  ✓ writer.commit + reader.query on separate svc instances agree (id={new_id})")
 
 
+# ── ak-ojd v2: session.remove() bounds error-cascade between tasks ─────
+
+
+class TestAkOjdV2SessionResetSourceInvariants(unittest.TestCase):
+    """Guard the v2 fix that resets self.flask_app.db.session.remove()
+    between tasks. Without this, a task that leaves the app scoped_
+    session in pending-rollback state cascades PendingRollbackError
+    into every subsequent task's first query — because scheduler
+    holds ONE long-lived app_context so Flask-SQLAlchemy's per-
+    request teardown never fires."""
+
+    def test_per_task_session_remove_in_finally(self):
+        """Per-task remove(): the finally block wrapping startTask()
+        inside the deduplicated for-loop MUST call
+        self.flask_app.db.session.remove() so each task starts with
+        a clean scoped_session state."""
+        print("\n[ak-ojd v2 — per-task session.remove() in finally around startTask()]")
+        code = _source_code_only(_SCHEDULER_PATH)
+        import re
+        # Locate the for-loop body around startTask.
+        m = re.search(
+            r"for job in deduplicated:(.*?)session\.commit\(\)",
+            code, re.DOTALL,
+        )
+        self.assertIsNotNone(m, "could not locate deduplicated for-loop body")
+        body = m.group(1)
+        # try/finally around startTask + finally does session.remove().
+        self.assertIn("try:", body)
+        self.assertIn("result, status, interval = task_instance.startTask()", body)
+        self.assertIn("finally:", body)
+        self.assertIn("self.flask_app.db.session.remove()", body)
+        print("  ✓ try/finally + session.remove() present at per-task boundary")
+
+    def test_per_task_remove_wrapped_in_defensive_except(self):
+        """Best-effort cleanup: the remove() call itself is wrapped
+        in try/except so a scheduler tick can't die from a cleanup
+        failure. Failure logged at WARNING."""
+        print("\n[ak-ojd v2 — session.remove() itself wrapped in try/except (never crashes loop)]")
+        code = _source_code_only(_SCHEDULER_PATH)
+        # The inner try/except around the remove() call.
+        self.assertIn("except Exception as cleanup_exc:", code)
+        self.assertIn("session.remove() after", code)
+        self.assertIn("failed (non-fatal)", code)
+        print("  ✓ inner try/except + non-fatal WARN present")
+
+    def test_symmetric_remove_in_overdue_loop(self):
+        """Defense-in-depth: _run_overdue_scheduler's tick also
+        removes the app session per iteration. Payload uses a
+        scheduler-local session for writes today, but symmetric
+        cleanup + guards a future refactor."""
+        print("\n[ak-ojd v2 — _run_overdue_scheduler also removes session per tick]")
+        code = _source_code_only(_SCHEDULER_PATH)
+        # There should be TWO session.remove() sites in scheduler
+        # (per-task inside _process_pending_and_overdue_jobs +
+        # per-tick inside _run_overdue_scheduler).
+        remove_count = code.count("self.flask_app.db.session.remove()")
+        self.assertGreaterEqual(
+            remove_count, 2,
+            f"expected >=2 session.remove() sites, got {remove_count}",
+        )
+        print(f"  ✓ {remove_count} session.remove() sites (per-task + per-tick)")
+
+
+@unittest.skipUnless(_FLASK_OK, _SKIP_REASON)
+class TestAkOjdV2PoisonedSessionBoundedToOneTask(unittest.TestCase):
+    """Behavioral: task_N leaves the app scoped_session in pending-
+    rollback state (raised mid-txn without rolling back). Task_N+1's
+    first query would raise PendingRollbackError WITHOUT the v2
+    session.remove() fix. This test simulates that scheduler code
+    path directly (without spinning up the whole TaskScheduler
+    thread) by calling the same session lifecycle: startTask →
+    finally: session.remove().
+
+    Runs behaviourally in the verify env where flask+sqlalchemy
+    are available; skips cleanly otherwise (same gate as
+    TestBaseServiceDbBehavioral)."""
+
+    def setUp(self):
+        from flask import Flask, g
+        from flask_sqlalchemy import SQLAlchemy
+        from sqlalchemy.orm import DeclarativeBase
+        class _Base(DeclarativeBase):
+            pass
+        self.app = Flask(__name__)
+        self.app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+        self.app.db = SQLAlchemy(self.app, model_class=_Base)
+        # Small table for the probe.
+        from sqlalchemy import Column, Integer, String
+        with self.app.app_context():
+            class _Probe(self.app.db.Model):
+                __tablename__ = "test_ak_ojd_v2_probes"
+                id = Column(Integer, primary_key=True, autoincrement=True)
+                name = Column(String(80))
+            self.app.db.create_all()
+            self._Probe = _Probe
+
+    def _simulate_scheduler_iteration(self, task_fn):
+        """Mirror the scheduler's per-task shape:
+            try:
+                task_fn()
+            finally:
+                self.flask_app.db.session.remove()
+        """
+        try:
+            task_fn()
+        finally:
+            try:
+                self.app.db.session.remove()
+            except Exception:
+                pass
+
+    def test_poisoned_session_bounded_to_one_task_with_remove(self):
+        """Task N raises WITHOUT rolling back → scheduler's finally
+        calls session.remove() → task N+1's query works cleanly."""
+        print("\n[ak-ojd v2 — poisoned task N doesn't fail task N+1 (session.remove bounds cascade)]")
+        Probe = self._Probe
+
+        def bad_task():
+            # Add + intentionally leave the session in pending state
+            # by raising BEFORE commit. Simulates a task that raises
+            # mid-transaction without a rollback.
+            with self.app.app_context():
+                self.app.db.session.add(Probe(name="poison"))
+                self.app.db.session.flush()
+                raise RuntimeError("simulated task failure mid-txn")
+
+        def good_task():
+            # A subsequent task tries a normal query. Without
+            # session.remove() between tasks, this would raise
+            # PendingRollbackError.
+            with self.app.app_context():
+                count = self.app.db.session.query(Probe).count()
+                # And write a fresh row to prove the session is
+                # actually usable, not just readable.
+                self.app.db.session.add(Probe(name="clean-after-poison"))
+                self.app.db.session.commit()
+                return count
+
+        # Task N: raises.
+        with self.assertRaises(RuntimeError):
+            self._simulate_scheduler_iteration(bad_task)
+
+        # Task N+1: MUST succeed (would fail with PendingRollbackError
+        # without the ak-ojd v2 session.remove() cleanup between).
+        try:
+            self._simulate_scheduler_iteration(good_task)
+        except Exception as exc:
+            self.fail(
+                f"task N+1 failed after task N poisoned session — "
+                f"ak-ojd v2 session.remove() cleanup regressed: {exc}"
+            )
+        # And verify the poison row was NOT committed (flushed but
+        # not committed, then session removed → not in DB).
+        with self.app.app_context():
+            poison_rows = self.app.db.session.query(Probe).filter(
+                Probe.name == "poison"
+            ).count()
+            self.assertEqual(
+                poison_rows, 0,
+                "poison row committed unexpectedly — was flushed but "
+                "should have been dropped by session.remove()",
+            )
+            # And the clean-after-poison row IS in DB.
+            clean_rows = self.app.db.session.query(Probe).filter(
+                Probe.name == "clean-after-poison"
+            ).count()
+            self.assertEqual(clean_rows, 1)
+        print("  ✓ task N poison → task N+1 clean; poison not committed, clean row is")
+
+    def test_without_remove_poisoned_session_would_fail_next_task(self):
+        """Negative control: WITHOUT the finally-remove() (i.e. same
+        scenario but skipping the cleanup), task N+1's query DOES
+        fail. Confirms the test above actually exercises the fix
+        path (rather than passing because the scenario doesn't
+        naturally poison the session)."""
+        print("\n[ak-ojd v2 — negative control: WITHOUT remove(), task N+1 DOES fail]")
+        Probe = self._Probe
+
+        # Simulate: task N raises mid-txn without rollback + WITHOUT
+        # the finally-remove.
+        with self.app.app_context():
+            self.app.db.session.add(Probe(name="poison-noremove"))
+            self.app.db.session.flush()
+            try:
+                raise RuntimeError("simulated failure")
+            except RuntimeError:
+                pass  # caught but NO rollback + NO remove
+
+            # Task N+1 query — should raise PendingRollbackError
+            # because the transaction is in a bad state.
+            from sqlalchemy.exc import PendingRollbackError, InvalidRequestError
+            with self.assertRaises((PendingRollbackError, InvalidRequestError)):
+                self.app.db.session.query(Probe).count()
+        # Cleanup so subsequent tests don't inherit poison.
+        self.app.db.session.rollback()
+        self.app.db.session.remove()
+        print("  ✓ without session.remove(), pending-rollback poisons next query (control passes)")
+
+
 if __name__ == "__main__":
-    print("ak-ojd Path B — BaseService.db systemic fix tests")
+    print("ak-ojd Path B + v2 — BaseService.db systemic fix tests")
     print("=" * 70)
     unittest.main(verbosity=0, exit=False)
     print("=" * 70)

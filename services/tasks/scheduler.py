@@ -115,7 +115,35 @@ class TaskScheduler:
 
                 task_instance = task_class(job.title, job.priority)
                 task_instance.init_runner(job)
-                result, status, interval = task_instance.startTask()
+                try:
+                    result, status, interval = task_instance.startTask()
+                finally:
+                    # ak-ojd v2 MAJOR: reset the app's scoped_session
+                    # between tasks. Post-Path-B, the scheduler holds
+                    # ONE long-lived app_context for the entire
+                    # while-True lifetime → Flask-SQLAlchemy's per-
+                    # request teardown-session-remove never fires →
+                    # the app scoped_session is a SINGLE long-lived
+                    # session shared by every task. Pre-Path-B, the
+                    # fresh-engine-per-access branch gave accidental
+                    # isolation; without this remove(), a task that
+                    # leaves the session in pending-rollback state
+                    # (raised mid-txn without rolling back) will
+                    # cascade a PendingRollbackError into the next
+                    # task's first query. session.remove() bounds
+                    # error-cascade + identity-map growth to a single
+                    # task boundary — standard Flask-SQLAlchemy
+                    # long-running-loop hygiene.
+                    #
+                    # Best-effort: never let cleanup crash the loop.
+                    try:
+                        self.flask_app.db.session.remove()
+                    except Exception as cleanup_exc:
+                        self.logger.warning(
+                            f"scheduler: session.remove() after "
+                            f"{job.title} failed (non-fatal): "
+                            f"{cleanup_exc}"
+                        )
 
                 self.logger.info(f"Job result: {result}, status: {status}")
                 job.result = result
@@ -190,6 +218,19 @@ class TaskScheduler:
                     time.sleep(120)
                 except Exception as e:
                     self.logger.error(f"Error in overdue scheduler: {e}")
+                finally:
+                    # ak-ojd v2 MAJOR (symmetric with _process loop):
+                    # reset the app scoped_session per tick even
+                    # though this loop's payload uses a scheduler-
+                    # local session for its writes. Defense-in-depth
+                    # against any future _update_overdue_jobs
+                    # refactor that reaches self.flask_app.db.session
+                    # for reads, and cheap symmetry with the per-task
+                    # remove() below.
+                    try:
+                        self.flask_app.db.session.remove()
+                    except Exception:
+                        pass
 
     def _run_job_processor(self):
         from utils.DateTimeUtil import is_within_allowed_window, seconds_until_allowed_window
