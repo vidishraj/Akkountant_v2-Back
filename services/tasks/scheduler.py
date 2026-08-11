@@ -253,13 +253,35 @@ class TaskScheduler:
 
 
 if __name__ == "__main__":
-    from flask import Flask
+    # ak-pib P0 HOTFIX: standalone-entry mode must reuse the fully-
+    # configured Akkountant instance from app.py — NOT a bare
+    # Flask(__name__). Post-ak-ojd-Path-B (commit 036e995), the
+    # scheduler loops set `g.db = self.flask_app.db` at task-invocation
+    # boundary as defense-in-depth. A bare Flask() has no `.db`
+    # attribute → AttributeError on the first tick → both scheduler
+    # threads crash at init → prod fleet-down. Mirrors the
+    # reprocess_*.py / retry_failed_pdfs.py pattern: import the
+    # configured `app` from app.py (which runs _setup_database and
+    # attaches `.db = SQLAlchemy(...)`).
+    #
+    # Import cycle safety: app.py imports scheduler at module-load
+    # time (`from services.tasks.scheduler import TaskScheduler`). If
+    # this import lived at top-of-file it would create a cycle. Placed
+    # INSIDE the `if __name__ == "__main__":` guard, the cycle is
+    # avoided by construction — the guard only fires when scheduler.py
+    # is the ENTRY-POINT script (`python services/tasks/scheduler.py`
+    # or `python -m services.tasks.scheduler`), at which moment app.py
+    # has NOT yet been imported by anything in the process. Loading
+    # app.py fresh here then re-imports scheduler under its normal
+    # `services.tasks.scheduler` module name (a DIFFERENT module
+    # object from `__main__`), whose __main__ block does not re-fire
+    # under import. Standard Python entry-point pattern.
+    from app import app as flask_app
 
-    app = Flask(__name__)
     # Replace with your database URL
     DATABASE_URL = os.getenv('DATABASE_URL')
 
-    scheduler = TaskScheduler(DATABASE_URL, flask_app=app)
+    scheduler = TaskScheduler(DATABASE_URL, flask_app=flask_app)
     scheduler.start_scheduler()
 
-    app.run(port=5000, debug=False)
+    flask_app.run(port=5000, debug=False)
