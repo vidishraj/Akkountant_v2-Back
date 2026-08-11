@@ -1,4 +1,3 @@
-import os
 from datetime import datetime
 
 from services.tasks.AIRateTask import AIRateTask
@@ -57,6 +56,10 @@ PPF_SCHEMA = {
 class SetPPFRate(AIRateTask):
     _instance = None
 
+    # ak-2r8: BaseRateTask contract.
+    _rate_filename = 'PPFRate.json'
+    _rate_prefix_attr = 'PPFRatePrefix'
+
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(SetPPFRate, cls).__new__(cls)
@@ -106,38 +109,43 @@ class SetPPFRate(AIRateTask):
 
         return data
 
-    def run(self):
-        try:
-            jsonData, ai_err = self.fetch_rates_via_ai(
-                url=PPF_URL,
-                system_prompt=PPF_SYSTEM_PROMPT,
-                schema=PPF_SCHEMA,
-                agent="rate.ppf",
-            )
-            if jsonData is None:
-                return f"Failed to get PPF Rates: {ai_err}"[:800], "Failed", self.interval
-            if 'periods' not in jsonData or len(jsonData['periods']) == 0:
-                got_keys = list(jsonData.keys())[:10]
-                return f"PPF Rates response missing/empty 'periods'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+    def _fetch_all(self):
+        """ak-2r8: BaseRateTask contract.
 
-            # Expand rate change periods into monthly entries
-            monthly_data = self._expand_periods_to_monthly(jsonData['periods'])
-            if not monthly_data:
-                return "Failed to expand PPF rate periods", "Failed", self.interval
+        Universe-of-1 semantics: the LLM extraction either succeeds
+        (returns a `periods` list which we expand to monthly entries)
+        or fails outright. In either case total=1; ok=1 on success,
+        ok=0 on any failure.
 
-            self.logger.info(f"Expanded {len(jsonData['periods'])} rate periods into {len(monthly_data)} monthly entries")
-            output = {"data": monthly_data}
+        Failure paths preserve the pre-refactor error messages (they
+        surface in jobs.result via extras['error'] → BaseRateTask's
+        data-is-None short-circuit).
+        """
+        jsonData, ai_err = self.fetch_rates_via_ai(
+            url=PPF_URL,
+            system_prompt=PPF_SYSTEM_PROMPT,
+            schema=PPF_SCHEMA,
+            agent="rate.ppf",
+        )
+        if jsonData is None:
+            msg = f"Failed to get PPF Rates: {ai_err}"[:800]
+            return None, 1, 0, {}, {'error': msg}
+        if 'periods' not in jsonData or len(jsonData['periods']) == 0:
+            got_keys = list(jsonData.keys())[:10]
+            msg = (
+                f"PPF Rates response missing/empty 'periods'. Got "
+                f"top-level keys: {got_keys}"
+            )[:800]
+            return None, 1, 0, {}, {'error': msg}
 
-            filePath = os.path.join(self.tmp_dir, 'PPFRate.json')
-            try:
-                os.remove(filePath)
-            except OSError:
-                pass
-            self.save_json(output, filePath)
+        # Expand rate change periods into monthly entries
+        monthly_data = self._expand_periods_to_monthly(jsonData['periods'])
+        if not monthly_data:
+            return None, 1, 0, {}, {'error': "Failed to expand PPF rate periods"}
 
-            ok, err = self.safe_replace_file(filePath, self.jsonService.PPFRatePrefix, self.jsonService.ratesType)
-            if not ok:
-                return err, "Failed", self.interval
-            return 'Completed successfully', "Completed", self.interval
-        except Exception as ex:
-            return ex.__str__(), "Failed", self.interval
+        self.logger.info(
+            f"Expanded {len(jsonData['periods'])} rate periods "
+            f"into {len(monthly_data)} monthly entries"
+        )
+        output = {"data": monthly_data}
+        return output, 1, 1, {}, {}

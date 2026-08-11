@@ -52,9 +52,28 @@ _SET_MF_RATE_PATH = os.path.join(
     "services", "tasks", "SetMfRate.py",
 )
 
+# ak-2r8: gate machinery hoisted from SetMfRate.run() to BaseRateTask.run().
+# Tests that used to source-inspect SetMfRate for gate structure now
+# split their assertions across two files:
+#   * SetMfRate.py    — MF-specific fetch/unpack shape (5-tuple, H1 null
+#                       guard, permanent_404 as skip-dict key).
+#   * BaseRateTask.py — the 3-tier gate ordering (degenerate → hard-floor
+#                       → 98%) and the safe_replace_file precedence
+#                       invariant.
+_BASE_RATE_TASK_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "services", "tasks", "BaseRateTask.py",
+)
+
 
 def _source():
     with open(_SET_MF_RATE_PATH) as fh:
+        return fh.read()
+
+
+def _source_base():
+    """ak-2r8: BaseRateTask.py source (gate machinery)."""
+    with open(_BASE_RATE_TASK_PATH) as fh:
         return fh.read()
 
 
@@ -427,20 +446,36 @@ class TestPartialSuccessSourceInvariants(unittest.TestCase):
     def test_run_unpacks_tuple_and_gates_on_ratio(self):
         """ak-539 C1 unpacked (data, total, ok); ak-5jq H3 → 4-tuple;
         ak-5jq v3 → 5-tuple with split 404/4xx. Denominator uses
-        only permanent_404 per v3 MINOR-B."""
-        print("\n[ak-539 C1 + ak-5jq v3 — run() unpacks 5-tuple + 404-only denominator]")
+        only permanent_404 per v3 MINOR-B.
+
+        ak-2r8: gate machinery hoisted to BaseRateTask.run(); the
+        5-tuple + 404-in-skips-dict shape lives in
+        SetMFRate._fetch_all() now. Assertions split across the two
+        files below."""
+        print("\n[ak-539 C1 + ak-5jq v3 — _fetch_all unpacks 5-tuple + 404-only denominator]")
         src = _source()
+        # 5-tuple unpack still lives in SetMFRate — _fetch_all wraps
+        # buildJsonForMF and hands the classifications to the base.
         self.assertIn(
             "jsonData, urls_total, urls_ok, permanent_404, permanent_4xx = (",
             src,
         )
-        # v3: denominator excludes permanent_404 ONLY (not 4xx). 4xx
-        # stays in denominator so client-side breakage waves are visible.
-        self.assertIn("answerable = max(urls_total - permanent_404, 0)", src)
-        self.assertIn("success_ratio = (urls_ok / answerable)", src)
-        self.assertIn("success_ratio < _MIN_SUCCESS_RATIO", src)
-        self.assertIn('"Failed", self.interval', src)
-        print("  ✓ 5-name unpack + 404-only denominator + Failed gate present")
+        # v3 MINOR-B invariant: SetMFRate places ONLY permanent_404
+        # into the skips-dict passed to BaseRateTask (4xx stays in
+        # denominator via extras channel).
+        self.assertIn("{'permanent_404': permanent_404}", src)
+        # ak-2r8: base's success_ratio math + gate return live in
+        # BaseRateTask.run(). Denominator subtraction uses sum(skips)
+        # which for MF resolves to permanent_404 only.
+        base_src = _source_base()
+        self.assertIn(
+            "answerable = max(int(total) - int(total_perm_skips), 0)",
+            base_src,
+        )
+        self.assertIn("success_ratio = (ok / answerable)", base_src)
+        self.assertIn("success_ratio < self._MIN_SUCCESS_RATIO", base_src)
+        self.assertIn('"Failed", self.interval', base_src)
+        print("  ✓ 5-name unpack in SetMFRate + gate math in BaseRateTask")
 
     def test_v2_hard_floor_constant_is_050(self):
         print("\n[ak-539 v2 — _COVERAGE_HARD_FLOOR constant = 0.5]")
@@ -453,38 +488,50 @@ class TestPartialSuccessSourceInvariants(unittest.TestCase):
         _COVERAGE_HARD_FLOOR` check must appear in run() BEFORE the
         first call to safe_replace_file. Anything else means the
         review MAJOR is regressed (safe_replace_file would still
-        clobber last-good on a below-floor run)."""
-        print("\n[ak-539 v2 — hard-floor branch precedes safe_replace_file in run()]")
-        code = _source_code_only()
-        # Slice to run()'s body: `def run(self):` to the next method
-        # `def ` at 4-space indent (buildJsonForMF).
+        clobber last-good on a below-floor run).
+
+        ak-2r8: run() lives on BaseRateTask post-hoist. Assertion
+        now targets BaseRateTask.run() body. The SetMFRate-specific
+        'preserving last-good NAVs on disk' phrasing lives in
+        SetMFRate._fmt_hard_floor_msg (checked separately)."""
+        print("\n[ak-539 v2 — hard-floor branch precedes safe_replace_file in BaseRateTask.run()]")
+        base_src = _source_base()
+        # Strip full-line comments from base source (mirror _source_code_only).
+        code_lines = []
+        for line in base_src.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            code_lines.append(line)
+        code = "\n".join(code_lines)
         import re
         m = re.search(
-            r"def run\(self\):(.*?)(?=\n    (?:async )?def )",
+            r"def run\(self\):(.*?)(?=\n    def |\Z)",
             code, re.DOTALL,
         )
-        self.assertIsNotNone(m, "could not locate run() body")
+        self.assertIsNotNone(m, "could not locate BaseRateTask.run() body")
         body = m.group(1)
-        floor_idx = body.find("success_ratio < _COVERAGE_HARD_FLOOR")
+        floor_idx = body.find("success_ratio < self._COVERAGE_HARD_FLOOR")
         replace_idx = body.find("self.safe_replace_file(")
         self.assertGreaterEqual(
-            floor_idx, 0, "hard-floor gate missing from run()",
+            floor_idx, 0, "hard-floor gate missing from BaseRateTask.run()",
         )
         self.assertGreaterEqual(
-            replace_idx, 0, "safe_replace_file call missing from run()",
+            replace_idx, 0, "safe_replace_file call missing from BaseRateTask.run()",
         )
         self.assertLess(
             floor_idx, replace_idx,
             f"hard-floor gate must precede safe_replace_file "
             f"(floor at {floor_idx}, replace at {replace_idx}); "
-            f"otherwise safe_replace_file destroys last-good NAVs "
-            f"before the floor can preserve them.",
+            f"otherwise safe_replace_file destroys last-good "
+            f"before the floor can preserve it.",
         )
-        # The hard-floor branch must return early (Failed) — check the
-        # descriptive message string is in run() body too.
-        self.assertIn("coverage below hard floor", body)
-        self.assertIn("preserving last-good NAVs on disk", body)
-        print("  ✓ hard-floor gate + early-return precede safe_replace_file")
+        # SetMFRate's domain-specific 'NAVs on disk' phrasing lives
+        # in _fmt_hard_floor_msg — check for the substring there.
+        mf_src = _source()
+        self.assertIn("coverage below hard floor", mf_src)
+        self.assertIn("preserving last-good NAVs on disk", mf_src)
+        print("  ✓ hard-floor gate + early-return precede safe_replace_file (BaseRateTask.run + MF phrasing)")
 
 
 # ── C2: TCPConnector config source-inspection ────────────────────────────

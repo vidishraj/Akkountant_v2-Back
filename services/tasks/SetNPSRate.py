@@ -1,15 +1,40 @@
-import os
 import pandas as pd
 import requests
 from io import BytesIO
 from datetime import datetime, timedelta
 
-from services.tasks.baseTask import BaseTask
+from services.tasks.BaseRateTask import BaseRateTask
 from utils.logger import Logger
 
 
-class SetNPSRate(BaseTask):
+# ak-2r8: NPS enumerated universe = 14 PFMs × 16 schemes = 224 candidate
+# combinations. Historically many combinations don't exist as real schemes
+# (the fetch returns None for those) so `successful_downloads` typically
+# lands well below 224 even on a healthy run. That means the MF-defaults
+# (98% / 50%) would trip on every healthy NPS run and preserve last-good
+# for no reason.
+#
+# Q2 GO'd option (a): apply the SAME gate machinery with LOW thresholds
+# (0.05 / 0.05). This catches the specific bug ak-2r8 targets — an
+# empty-response run that would clobber last-good with an all-null file
+# — while allowing normal partial coverage through. The count-deviation
+# baseline (which knows what "normal coverage" is for the current PFM×
+# scheme universe) is Phase 2 work, tracked in follow-up bead
+# ak-2r8-fb-nps-count-deviation.
+_NPS_MIN_SUCCESS_RATIO = 0.05
+_NPS_COVERAGE_HARD_FLOOR = 0.05
+
+
+class SetNPSRate(BaseRateTask):
     _instance = None
+
+    # ak-2r8: BaseRateTask contract.
+    _rate_filename = 'NPSRATE.json'
+    _rate_prefix_attr = 'NpsRatePrefix'
+
+    # ak-2r8 Q2 option (a): low thresholds pending Phase 2 count-deviation.
+    _MIN_SUCCESS_RATIO = _NPS_MIN_SUCCESS_RATIO
+    _COVERAGE_HARD_FLOOR = _NPS_COVERAGE_HARD_FLOOR
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -23,24 +48,27 @@ class SetNPSRate(BaseTask):
             # 4 hours
             self.interval = 60
 
-    def run(self):
-        try:
-            # Generate NPS rate data from Excel downloads
-            jsonData = self.fetchNPSRatesFromExcel()
-            
-            filePath = os.path.join(self.tmp_dir, 'NPSRATE.json')
-            try:
-                os.remove(filePath)
-            except OSError:
-                pass
-            self.save_json(jsonData, filePath)
+    def _fetch_all(self):
+        """ak-2r8: BaseRateTask contract.
 
-            ok, err = self.safe_replace_file(filePath, self.jsonService.NpsRatePrefix, self.jsonService.ratesType)
-            if not ok:
-                return err, "Failed", self.interval
-            return 'Completed successfully', "Completed", self.interval
-        except Exception as ex:
-            return ex.__str__(), "Failed", self.interval
+        NPS enumerated universe = 14 PFMs × 16 schemes = 224 candidate
+        combinations. `fetchNPSRatesFromExcel` iterates all 224 and
+        returns the ones that produced parseable NAV rows.
+
+        Returns (data, 224, len(all_rates), {}, {}).
+
+        `permanent_skips` is intentionally empty (`{}`) — NPS currently
+        has no way to distinguish "PFM×scheme combination doesn't
+        exist" from "transient upstream error". Every non-response
+        counts against the ratio. The low thresholds (5% each) mean
+        this is fine in practice: an empty run (0/224 = 0%) trips
+        both gates → preserve last-good.
+        """
+        jsonData = self.fetchNPSRatesFromExcel()
+        # Universe is fixed at 224; ok = actual downloaded schemes.
+        total = 14 * 16
+        ok = int(jsonData.get('total_schemes', 0) or 0)
+        return jsonData, total, ok, {}, {}
 
     def fetchNPSRatesFromExcel(self):
         """

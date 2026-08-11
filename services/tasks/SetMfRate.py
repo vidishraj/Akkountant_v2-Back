@@ -6,6 +6,7 @@ import time
 from collections import defaultdict
 
 from services.tasks.baseTask import BaseTask
+from services.tasks.BaseRateTask import BaseRateTask
 from aiohttp import ClientSession, ClientConnectorError, TCPConnector, ClientResponseError, ClientTimeout
 
 from utils.logger import Logger
@@ -115,8 +116,21 @@ def _compute_backoff(attempt, *, base, cap, jitter_ratio=_BACKOFF_JITTER_RATIO):
     return raw + jitter
 
 
-class SetMFRate(BaseTask):
+class SetMFRate(BaseRateTask):
     _instance = None
+
+    # ak-2r8: BaseRateTask contract — file lives at
+    # {tmp_dir}/MFRate.json; swap target is the historical MfRatePrefix
+    # under ratesType (unchanged from pre-refactor).
+    _rate_filename = 'MFRate.json'
+    _rate_prefix_attr = 'MfRatePrefix'
+
+    # ak-2r8: MF uses the base defaults (0.98 / 0.5) verbatim — these
+    # are the values the ak-539 arc landed on for MF. Kept explicit
+    # here (not just inheriting the base default) so the ak-539
+    # provenance is discoverable at the MF task itself.
+    _MIN_SUCCESS_RATIO = _MIN_SUCCESS_RATIO
+    _COVERAGE_HARD_FLOOR = _COVERAGE_HARD_FLOOR
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -138,128 +152,132 @@ class SetMFRate(BaseTask):
             # by failed runs or missed ticks.
             self.interval = 150  # minutes → 2.5h self-reschedule cadence
 
-    def run(self):
-        try:
-            listUrl = "https://api.mfapi.in/mf"
-            latestListFile = self.jsonService.getLatestFile(self.jsonService.listType,
-                                                            self.jsonService.MfListPrefix)
+    # ak-2r8: run() is now inherited from BaseRateTask. The hoisted
+    # gate machinery matches SetMFRate's pre-refactor 3-tier layout
+    # 1:1 (degenerate → hard-floor → 98%). See BaseRateTask.py.
 
-            # ak-5jq H1: explicit dependency check. Previously
-            # buildJsonForMF called `open(latestListFile)` which raises
-            # TypeError on None — the job crashed with an unhelpful
-            # traceback whenever SetMFDetails hadn't run in >7d (past
-            # the MfList retention window). Now we return a clean
-            # Failed with an operator-actionable message.
-            if latestListFile is None:
-                msg = (
-                    "MF details list missing or stale — SetMFDetails "
-                    f"must run first (looked for prefix "
-                    f"{self.jsonService.MfListPrefix!r} under "
-                    f"{self.jsonService.listType!r})"
-                )
-                self.logger.error(f"MF rate job: {msg}")
-                return msg, "Failed", self.interval
+    def _fetch_all(self):
+        """ak-2r8: BaseRateTask contract. Returns
+        `(data, total, ok, permanent_skips_dict, extras)`.
 
-            # ak-539 C1 + ak-5jq H3 + v3 MINOR-B: buildJsonForMF returns
-            # (data, urls_total, urls_ok, permanent_404, permanent_4xx).
-            # The two skip counts are tracked separately per v3 MINOR-B:
-            #   * permanent_404 (delisted by mfapi.in) IS excluded from
-            #     the ratio denominator — genuinely no longer part of
-            #     the answerable universe.
-            #   * permanent_4xx (client-error 400/401/403 — OUR bad
-            #     requests) stays IN the denominator so a systematic
-            #     client-side breakage wave visibly drags ratio down
-            #     and trips the hard-floor / 98% gate. Excluding them
-            #     from denominator (v2) hid a fixable bug class.
-            jsonData, urls_total, urls_ok, permanent_404, permanent_4xx = (
-                self.buildJsonForMF(listUrl, latestListFile)
+        Wraps the pre-existing MF fetch pipeline:
+          * H1 dependency check (list file present) — on miss returns
+            `(None, 0, 0, {}, {'error': msg})` so run() short-circuits
+            to Failed WITHOUT clobbering last-good.
+          * buildJsonForMF returns the (data, urls_total, urls_ok,
+            permanent_404, permanent_4xx) tuple — kept as-is because
+            that contract is tested elsewhere.
+          * permanent_skips is emitted with the classification split
+            preserved for _completed_msg to use.
+
+        v3 MINOR-B invariant: only permanent_404 is subtracted from
+        the answerable denominator (via BaseRateTask.run()). 4xx stays
+        IN the denominator so a client-side breakage wave visibly
+        drags the ratio down and trips the gate. To preserve this
+        semantics, only `permanent_404` is placed in the
+        permanent_skips dict passed to the base (the dict feeds
+        BaseRateTask.run()'s `answerable = total - sum(skips.values())`
+        subtraction). permanent_4xx flows via extras so
+        _completed_msg can still surface it in the Completed message.
+        """
+        listUrl = "https://api.mfapi.in/mf"
+        latestListFile = self.jsonService.getLatestFile(
+            self.jsonService.listType,
+            self.jsonService.MfListPrefix,
+        )
+
+        # ak-5jq H1: explicit dependency check. Previously
+        # buildJsonForMF called `open(latestListFile)` which raises
+        # TypeError on None — the job crashed with an unhelpful
+        # traceback whenever SetMFDetails hadn't run in >7d (past
+        # the MfList retention window). Now we return a clean
+        # Failed with an operator-actionable message.
+        if latestListFile is None:
+            msg = (
+                "MF details list missing or stale — SetMFDetails "
+                f"must run first (looked for prefix "
+                f"{self.jsonService.MfListPrefix!r} under "
+                f"{self.jsonService.listType!r})"
             )
-            answerable = max(urls_total - permanent_404, 0)
+            self.logger.error(f"MF rate job: {msg}")
+            return None, 0, 0, {}, {'error': msg}
 
-            # ak-5jq v2 MAJOR #2 + v3: degenerate-answerable guard.
-            # v3 broadens the guard from `answerable == 0 and urls_total
-            # > 0` to just `answerable == 0` — reviewer flagged that
-            # the v2 shape still let urls_total == 0 slip through the
-            # `success_ratio = 1.0` fallback and clobber last-good with
-            # an empty file (SetMFDetails writing {data: []} on a
-            # transient mfapi.in hiccup or parse glitch would trigger
-            # this silently). The MF universe is never legitimately
-            # empty, so preserving last-good on urls_total==0 is
-            # strictly safe on every path including first run (H1's
-            # None-guard fires before we get here on true first run).
-            #
-            # Note the ordering: this check must precede the hard-floor
-            # gate below because success_ratio is meaningless when
-            # answerable == 0 (would be 1.0 by the fallback rule).
-            if answerable == 0:
-                msg = (
-                    f"coverage degenerate: answerable=0 "
-                    f"(urls_total={urls_total} permanent_404={permanent_404} "
-                    f"permanent_4xx={permanent_4xx}); preserving last-good "
-                    f"NAVs on disk"
-                )
-                self.logger.error(f"MF rate job: {msg}")
-                return msg, "Failed", self.interval
+        # ak-539 C1 + ak-5jq H3 + v3 MINOR-B: buildJsonForMF returns
+        # (data, urls_total, urls_ok, permanent_404, permanent_4xx).
+        # See buildJsonForMF for the retry / classification pipeline.
+        jsonData, urls_total, urls_ok, permanent_404, permanent_4xx = (
+            self.buildJsonForMF(listUrl, latestListFile)
+        )
+        # ak-2r8: cache permanent_4xx so _fmt_degenerate_msg can
+        # surface it in the "coverage degenerate" message (per-arg
+        # signatures of _fmt_* don't include extras). Serial-scheduler
+        # invariant means no threading concern here.
+        self._last_permanent_4xx = permanent_4xx
+        # ak-2r8: permanent_404 goes in skips-dict (excluded from
+        # denominator per v3 MINOR-B); permanent_4xx surfaced via
+        # extras (stays IN denominator — client-side breakage waves
+        # must be visible to the ratio gate).
+        return (
+            jsonData,
+            urls_total,
+            urls_ok,
+            {'permanent_404': permanent_404},
+            {'permanent_404': permanent_404, 'permanent_4xx': permanent_4xx},
+        )
 
-            success_ratio = (urls_ok / answerable) if answerable > 0 else 1.0
+    # ---- MF-specific message templates (preserve pre-refactor phrasing) ----
 
-            # ak-539 v2 (post-review MAJOR fix): hard-floor gate FIRST.
-            # safe_replace_file destroys the last-good rates file the
-            # moment it runs; a transient-outage-shape result_map
-            # (near-empty but size > 0) would clobber it with garbage
-            # under the v1 flow. Below the hard floor we skip both the
-            # tmp write AND the swap so the previous good file stays
-            # on disk exactly as-is, and callers keep serving the last
-            # known NAVs until the next run recovers.
-            #
-            # v3 MINOR-B: `answerable` denominator now includes 4xx
-            # (client-error) schemes so a systematic client-side
-            # breakage wave visibly drags the ratio down and reaches
-            # this gate. Pre-v3, 4xx were excluded from denominator
-            # and a bad-encoding wave (X% 400s) silently completed.
-            if success_ratio < _COVERAGE_HARD_FLOOR:
-                msg = (
-                    f"coverage below hard floor: {urls_ok}/{answerable} "
-                    f"answerable ({success_ratio:.2%} — below "
-                    f"{_COVERAGE_HARD_FLOOR:.0%} floor); "
-                    f"preserving last-good NAVs on disk"
-                )
-                self.logger.error(f"MF rate job: {msg}")
-                return msg, "Failed", self.interval
+    def _fmt_degenerate_msg(self, total, permanent_skips):
+        """ak-2r8: preserve SetMFRate's pre-refactor degenerate msg
+        verbatim. Callers grep for 'coverage degenerate' + 'urls_total='
+        + 'permanent_404=' + 'permanent_4xx=' + 'NAVs on disk'."""
+        # Recover the split values: BaseRateTask.run passed us
+        # permanent_skips={'permanent_404': N} (dict form). But the
+        # 4xx count lives only in extras for MF. Since _fmt_* doesn't
+        # receive extras, we need to keep the class-level fields
+        # populated. Simplest: extract 404 from skips; if the 4xx
+        # count is not in this dict we default to 0 (only path is
+        # a subclass that never populated 4xx).
+        p404 = permanent_skips.get('permanent_404', 0)
+        # Look up permanent_4xx from the most recent _fetch_all extras.
+        # BaseRateTask doesn't cache extras itself — pull from the
+        # `_last_extras` we stash below in a small override.
+        p4xx = getattr(self, '_last_permanent_4xx', 0)
+        return (
+            f"coverage degenerate: answerable=0 "
+            f"(urls_total={total} permanent_404={p404} "
+            f"permanent_4xx={p4xx}); preserving last-good "
+            f"NAVs on disk"
+        )
 
-            # Above the hard floor — write + swap. The file may be
-            # degraded (below the 98% threshold) but is still better
-            # than stale for the majority of callers.
-            filePath = os.path.join(self.tmp_dir, 'MFRate.json')
-            try:
-                os.remove(filePath)
-            except OSError:
-                pass
-            self.save_json(jsonData, filePath)
+    def _fmt_hard_floor_msg(self, ok, answerable, ratio):
+        """ak-2r8: preserve SetMFRate's pre-refactor hard-floor msg
+        (uses 'NAVs on disk' phrasing)."""
+        return (
+            f"coverage below hard floor: {ok}/{answerable} "
+            f"answerable ({ratio:.2%} — below "
+            f"{self._COVERAGE_HARD_FLOOR:.0%} floor); "
+            f"preserving last-good NAVs on disk"
+        )
 
-            ok, err = self.safe_replace_file(filePath, self.jsonService.MfRatePrefix, self.jsonService.ratesType)
-            if not ok:
-                return err, "Failed", self.interval
+    def _fmt_partial_success_msg(self, ok, answerable, ratio):
+        """ak-2r8: preserve SetMFRate's pre-refactor partial-success
+        msg (uses 'schemes written' phrasing)."""
+        return (
+            f"partial success: {ok}/{answerable} answerable "
+            f"schemes written ({ratio:.2%} — below "
+            f"{self._MIN_SUCCESS_RATIO:.0%} threshold)"
+        )
 
-            # ak-539 C1: 98% partial-success gate.
-            if success_ratio < _MIN_SUCCESS_RATIO:
-                msg = (
-                    f"partial success: {urls_ok}/{answerable} answerable "
-                    f"schemes written ({success_ratio:.2%} — below "
-                    f"{_MIN_SUCCESS_RATIO:.0%} threshold)"
-                )
-                self.logger.warning(f"MF rate job: {msg}")
-                return msg, "Failed", self.interval
+    def _completed_msg(self, ok, answerable, permanent_skips, extras):
+        """ak-5jq v3 MINOR-A: SetMFRate's Completed msg splits 404 vs
+        4xx counts into distinct phrases ('delisted by mfapi.in (404)'
+        vs 'client-error (4xx)'). extras carries both."""
+        return _completed_msg(
+            extras.get('permanent_404', 0),
+            extras.get('permanent_4xx', 0),
+        )
 
-            # ak-5jq H3 + v3 MINOR-A: Completed msg surfaces the
-            # permanent-skip counts when there are any. v3 splits the
-            # message into distinct 404 (delisted by mfapi.in) and 4xx
-            # (client-error — OUR bad requests) portions so operators
-            # can distinguish "MFAPI's daily attrition" from "we're
-            # sending malformed requests / lost auth".
-            return _completed_msg(permanent_404, permanent_4xx), "Completed", self.interval
-        except Exception as ex:
-            return ex.__str__(), "Failed", self.interval
 
     def buildJsonForMF(self, baseUrl, listPath):
         with open(listPath, 'r') as file:

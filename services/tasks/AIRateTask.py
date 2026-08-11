@@ -10,16 +10,25 @@ rate-fetcher flows. See `utils/web_extract.py` for the shared helper.
 Subclasses declare `URL`, `EXTRACTION_SYSTEM_PROMPT`, `OUTPUT_SCHEMA`, and
 the `agent` label, plus any post-processing (e.g. PPF's period-to-monthly
 expansion). The base handles the fetch + extract + JSON unwrapping.
+
+ak-2r8: AIRateTask now inherits from BaseRateTask (was BaseTask). The
+`fetch_rates_via_ai` helper is unchanged; subclasses (SetPPFRate,
+SetEPFRate, SetIBJAGoldRate) additionally implement `_fetch_all()` to
+plug into BaseRateTask's coverage-gate machinery. Universe-of-1 semantics:
+successful extraction → (data, 1, 1, {}, {}); failed extraction →
+(None, 1, 0, {}, {'error': msg}) — the base's data-is-None short-circuit
+returns Failed WITHOUT clobbering last-good. Adds architectural
+consistency and blocks any future "silent green on empty payload" bug.
 """
 
 from __future__ import annotations  # PEP 604 (`dict | None`) on 3.9 worktree env
 
-from services.tasks.baseTask import BaseTask
+from services.tasks.BaseRateTask import BaseRateTask
 from utils.logger import Logger
 from utils.web_extract import fetch_and_extract
 
 
-class AIRateTask(BaseTask):
+class AIRateTask(BaseRateTask):
     """Base for tasks that fetch + extract rate data from a known upstream URL."""
 
     def __init__(self, title, priority):

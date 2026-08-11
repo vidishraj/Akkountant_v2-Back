@@ -596,6 +596,14 @@ class TestFleetSubclassSmoke(unittest.TestCase):
 
     # Names + import paths of every rate-task subclass in the fleet.
     # Sourced from services/tasks/scheduler.py TASK_MAPPING.
+    #
+    # ak-2r8: the 5 RATE tasks (SetMFRate + SetNPSRate + SetPPFRate +
+    # SetEPFRate + SetIBJAGoldRate) now inherit from BaseRateTask which
+    # itself inherits from BaseTask — so `issubclass(BaseTask)` still
+    # holds. Adding BaseRateTask to the smoke list would double-cover
+    # the same MRO; the per-subclass rows below already exercise it
+    # transitively. Contract details for BaseRateTask.run() live in
+    # test_baserate_task_contract.py.
     _SUBCLASSES = [
         ("services.tasks.SetMfRate", "SetMFRate"),
         ("services.tasks.SetMfDetails", "SetMFDetails"),

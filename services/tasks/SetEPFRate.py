@@ -1,5 +1,3 @@
-import os
-
 from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
@@ -85,6 +83,10 @@ EPF_SCHEMA = {
 class SetEPFRate(AIRateTask):
     _instance = None
 
+    # ak-2r8: BaseRateTask contract.
+    _rate_filename = 'EPFRate.json'
+    _rate_prefix_attr = 'EPFRatePrefix'
+
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(SetEPFRate, cls).__new__(cls)
@@ -98,38 +100,33 @@ class SetEPFRate(AIRateTask):
             self.interval = 10080
             self.initialized = True
 
-    def run(self):
-        try:
-            jsonData, ai_err = self.fetch_rates_via_ai(
-                url=EPF_URL,
-                system_prompt=EPF_SYSTEM_PROMPT,
-                schema=EPF_SCHEMA,
-                agent="rate.epf",
-            )
-            if jsonData is None:
-                return f"Failed to get EPF Rates: {ai_err}"[:800], "Failed", self.interval
-            if 'data' not in jsonData or len(jsonData['data']) == 0:
-                got_keys = list(jsonData.keys())[:10]
-                return f"EPF Rates response missing/empty 'data'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+    def _fetch_all(self):
+        """ak-2r8: BaseRateTask contract. Universe-of-1 semantics
+        (LLM extract either succeeds or fails). Failure paths preserve
+        the pre-refactor error messages via extras['error']."""
+        jsonData, ai_err = self.fetch_rates_via_ai(
+            url=EPF_URL,
+            system_prompt=EPF_SYSTEM_PROMPT,
+            schema=EPF_SCHEMA,
+            agent="rate.epf",
+        )
+        if jsonData is None:
+            msg = f"Failed to get EPF Rates: {ai_err}"[:800]
+            return None, 1, 0, {}, {'error': msg}
+        if 'data' not in jsonData or len(jsonData['data']) == 0:
+            got_keys = list(jsonData.keys())[:10]
+            msg = (
+                f"EPF Rates response missing/empty 'data'. Got "
+                f"top-level keys: {got_keys}"
+            )[:800]
+            return None, 1, 0, {}, {'error': msg}
 
-            # Re-map LLM-schema key "interest_rate" → on-disk display key
-            # "Interest Rate". The on-disk EPFRate.json contract is
-            # unchanged; only the API-boundary schema uses the compliant
-            # snake_case form to satisfy the Anthropic property-key regex.
-            for entry in jsonData['data']:
-                if 'interest_rate' in entry:
-                    entry['Interest Rate'] = entry.pop('interest_rate')
+        # Re-map LLM-schema key "interest_rate" → on-disk display key
+        # "Interest Rate". The on-disk EPFRate.json contract is
+        # unchanged; only the API-boundary schema uses the compliant
+        # snake_case form to satisfy the Anthropic property-key regex.
+        for entry in jsonData['data']:
+            if 'interest_rate' in entry:
+                entry['Interest Rate'] = entry.pop('interest_rate')
 
-            filePath = os.path.join(self.tmp_dir, 'EPFRate.json')
-            try:
-                os.remove(filePath)
-            except OSError:
-                pass
-            self.save_json(jsonData, filePath)
-
-            ok, err = self.safe_replace_file(filePath, self.jsonService.EPFRatePrefix, self.jsonService.ratesType)
-            if not ok:
-                return err, "Failed", self.interval
-            return 'Completed successfully', "Completed", self.interval
-        except Exception as ex:
-            return ex.__str__(), "Failed", self.interval
+        return jsonData, 1, 1, {}, {}

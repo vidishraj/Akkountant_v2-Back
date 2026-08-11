@@ -329,15 +329,37 @@ class TestH3ErrorClassificationSource(unittest.TestCase):
     def test_ratio_denominator_excludes_only_404(self):
         """v3 MINOR-B: 404 permanent skips are legit-delisted, excluded
         from denominator. 4xx (client-error) stays IN denominator so a
-        systematic client-side breakage wave visibly drags ratio down."""
-        print("\n[ak-5jq v3 MINOR-B — ratio denominator = urls_total - permanent_404 (NOT - permanent_4xx)]")
+        systematic client-side breakage wave visibly drags ratio down.
+
+        ak-2r8: SetMFRate._fetch_all() now emits the classification
+        split via `permanent_skips={'permanent_404': ...}` (skips dict
+        excluded from denominator by BaseRateTask.run()) and
+        `extras={'permanent_4xx': ...}` (surfaced in Completed msg
+        only, stays IN the ratio denominator by construction — 4xx
+        is not in the skips dict)."""
+        print("\n[ak-5jq v3 MINOR-B — permanent_404 in skips-dict; permanent_4xx in extras only]")
         code = _source_code_only(_SET_MF_RATE_PATH)
-        # New denominator uses ONLY 404 count.
-        self.assertIn("answerable = max(urls_total - permanent_404, 0)", code)
-        self.assertIn("success_ratio = (urls_ok / answerable)", code)
-        # And v2's old shape (single 'permanent_skips') is gone.
-        self.assertNotIn("urls_total - permanent_skips", code)
-        print("  ✓ denominator excludes 404 only; 4xx stays in denominator")
+        # SetMFRate places 404 in skips-dict → base excludes it from denom.
+        self.assertIn("{'permanent_404': permanent_404}", code)
+        # SetMFRate places both 404 + 4xx in extras (for _completed_msg).
+        self.assertIn("'permanent_4xx': permanent_4xx", code)
+        # The v2 lump-sum shape (single 'permanent_skips') is not what
+        # SetMFRate emits — the skips-dict has ONLY permanent_404.
+        self.assertNotIn("'permanent_4xx': permanent_4xx, 'permanent_404': permanent_404}", code)
+        # BaseRateTask uses sum(permanent_skips.values()) as the
+        # denominator subtraction — assert that math lives there.
+        _BASE_PATH = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "services", "tasks", "BaseRateTask.py",
+        )
+        base_code = _source_code_only(_BASE_PATH)
+        self.assertIn(
+            "total_perm_skips = sum(permanent_skips.values())", base_code,
+        )
+        self.assertIn(
+            "answerable = max(int(total) - int(total_perm_skips), 0)", base_code,
+        )
+        print("  ✓ 404 in skips-dict (excluded from denom); 4xx in extras (stays in denom)")
 
     def test_completed_msg_uses_split_helper(self):
         """v3 MINOR-A: Completed msg via _completed_msg helper that
@@ -545,7 +567,13 @@ class TestH1NullListGuard(unittest.TestCase):
     latter needs the full BaseTask stack."""
 
     def test_run_guards_latestListFile_is_None(self):
-        print("\n[ak-5jq H1 — run() checks latestListFile is None before use]")
+        """ak-2r8: H1 guard hoisted from SetMFRate.run() to
+        SetMFRate._fetch_all(). Its return shape now is
+        `(None, 0, 0, {}, {'error': msg})` — BaseRateTask.run() sees
+        `data is None`, reads extras['error'], and short-circuits to
+        Failed. The "Failed" string literal thus lives in BaseRateTask,
+        not SetMFRate."""
+        print("\n[ak-5jq H1 — _fetch_all() checks latestListFile is None before use]")
         code = _source_code_only(_SET_MF_RATE_PATH)
         # The exact guard shape we ship.
         self.assertIn("if latestListFile is None:", code)
@@ -560,7 +588,16 @@ class TestH1NullListGuard(unittest.TestCase):
             "must run first",
             code,
         )
-        self.assertIn('"Failed"', code)
+        # ak-2r8: the null-guard now returns (None, 0, 0, {}, extras)
+        # so BaseRateTask.run() maps to Failed via the data-is-None
+        # short-circuit. Assert BaseRateTask's short-circuit exists.
+        _BASE_PATH = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "services", "tasks", "BaseRateTask.py",
+        )
+        base_code = _source_code_only(_BASE_PATH)
+        self.assertIn("if data is None:", base_code)
+        self.assertIn('"Failed", self.interval', base_code)
         # Order: the guard must appear BEFORE buildJsonForMF is called.
         guard_idx = code.find("if latestListFile is None:")
         call_idx = code.find("self.buildJsonForMF(")
@@ -570,7 +607,7 @@ class TestH1NullListGuard(unittest.TestCase):
             guard_idx, call_idx,
             "H1 guard must precede buildJsonForMF call",
         )
-        print("  ✓ guard present + precedes buildJsonForMF call + returns Failed")
+        print("  ✓ guard present + precedes buildJsonForMF call + returns Failed via BaseRateTask")
 
     def test_error_log_fires_on_null_guard_path(self):
         print("\n[ak-5jq H1 — null-list branch logs ERROR (not just returns Failed)]")
@@ -1160,26 +1197,40 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
     def test_source_guard_on_degenerate_check(self):
         """v3 broadened the guard from `answerable == 0 and urls_total > 0`
         to `answerable == 0` — catches urls_total==0 (empty input)
-        alongside the all-permanent-skip case."""
-        print("\n[ak-5jq v3 — source guard: broadened `if answerable == 0:` precedes hard-floor]")
-        code = _source_code_only(_SET_MF_RATE_PATH)
-        # v3 broadened guard shape.
-        self.assertIn("if answerable == 0:", code)
-        # And the v2 narrow shape must be GONE.
-        self.assertNotIn("if answerable == 0 and urls_total > 0:", code)
-        # Descriptive msg.
-        self.assertIn("coverage degenerate", code)
-        self.assertIn("preserving last-good NAVs on disk", code)
-        # Ordering: degenerate check must precede hard-floor check.
+        alongside the all-permanent-skip case.
+
+        ak-2r8: gates hoisted to BaseRateTask.run(). SetMFRate still
+        owns the domain-specific 'NAVs on disk' phrasing via
+        `_fmt_degenerate_msg`. Assertions split accordingly."""
+        print("\n[ak-5jq v3 — degenerate guard: BaseRateTask.run() + SetMFRate NAV phrasing]")
+        _BASE_PATH = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "services", "tasks", "BaseRateTask.py",
+        )
+        base_code = _source_code_only(_BASE_PATH)
+        # v3 broadened guard shape (base uses `if answerable == 0:`
+        # unconditionally — no urls_total > 0 clause).
+        self.assertIn("if answerable == 0:", base_code)
+        # And the v2 narrow shape must be GONE from BASE too.
+        self.assertNotIn("if answerable == 0 and", base_code)
+        # Base contains the generic 'coverage degenerate' substring
+        # (via _fmt_degenerate_msg default).
+        self.assertIn("coverage degenerate", base_code)
+        # SetMFRate provides the NAV-specific phrasing.
+        mf_code = _source_code_only(_SET_MF_RATE_PATH)
+        self.assertIn("preserving last-good NAVs on disk", mf_code)
+        self.assertIn("coverage degenerate", mf_code)
+        # Ordering: degenerate check must precede hard-floor check in
+        # BaseRateTask.run().
         import re
         m = re.search(
-            r"def run\(self\):(.*?)(?=\n    (?:async )?def )",
-            code, re.DOTALL,
+            r"def run\(self\):(.*?)(?=\n    def |\Z)",
+            base_code, re.DOTALL,
         )
-        self.assertIsNotNone(m)
+        self.assertIsNotNone(m, "could not locate BaseRateTask.run() body")
         body = m.group(1)
         degenerate_idx = body.find("if answerable == 0:")
-        hardfloor_idx = body.find("success_ratio < _COVERAGE_HARD_FLOOR")
+        hardfloor_idx = body.find("success_ratio < self._COVERAGE_HARD_FLOOR")
         self.assertGreaterEqual(degenerate_idx, 0)
         self.assertGreaterEqual(hardfloor_idx, 0)
         self.assertLess(
@@ -1187,7 +1238,7 @@ class TestV2DegenerateAnswerableGuard(unittest.TestCase):
             "degenerate guard must precede hard-floor gate — "
             "success_ratio is meaningless when answerable == 0",
         )
-        print("  ✓ broadened guard `if answerable == 0:` precedes hard-floor")
+        print("  ✓ broadened guard `if answerable == 0:` precedes hard-floor (BaseRateTask.run)")
 
 
 # ── v2 MINOR-4xx: 400/401/403 treated as permanent-skip ─────────────────

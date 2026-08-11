@@ -1,5 +1,3 @@
-import os
-
 from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
@@ -90,6 +88,10 @@ _GOLD_DISPLAY_KEYS = [
 class SetIBJAGoldRate(AIRateTask):
     _instance = None
 
+    # ak-2r8: BaseRateTask contract.
+    _rate_filename = 'GOLDRATE.json'
+    _rate_prefix_attr = 'GoldRatePrefix'
+
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super(SetIBJAGoldRate, cls).__new__(cls)
@@ -103,46 +105,43 @@ class SetIBJAGoldRate(AIRateTask):
             self.interval = 300
             self.initialized = True
 
-    def run(self):
-        try:
-            # v4 (hq-wisp-il849): reverted from the pinned-sonnet diag probe
-            # back to the default bare "sonnet" alias. The pinned probe was a
-            # diagnostic to isolate alias-flip from a deeper sonnet issue;
-            # actual root cause turned out to be the invalid property keys
-            # in GOLD_SCHEMA (see schema comment above), not the model
-            # string. Bare alias = no per-call override = `fetch_and_extract`
-            # default ("sonnet").
-            jsonData, ai_err = self.fetch_rates_via_ai(
-                url=GOLD_URL,
-                system_prompt=GOLD_SYSTEM_PROMPT,
-                schema=GOLD_SCHEMA,
-                agent="rate.gold",
-            )
-            if jsonData is None:
-                return f"Failed to get Gold Rates: {ai_err}"[:800], "Failed", self.interval
-            if 'carat_24' not in jsonData:
-                got_keys = list(jsonData.keys())[:10]
-                return f"Gold Rates response missing 'carat_24'. Got top-level keys: {got_keys}"[:800], "Failed", self.interval
+    def _fetch_all(self):
+        """ak-2r8: BaseRateTask contract. Universe-of-1 semantics
+        (LLM extract either succeeds or fails). Failure paths preserve
+        the pre-refactor error messages via extras['error'].
 
-            # Re-map LLM-schema-compliant keys → on-disk display keys. The
-            # frontend reads GoldRate.json with the historical "24 Carat" /
-            # "22 Carat" / "18 Carat" top-level keys (see
-            # JsonDownloadService.getGoldRate, GoldService consumers); that
-            # on-disk contract is unchanged by v4.
-            for k_schema, k_display in _GOLD_DISPLAY_KEYS:
-                if k_schema in jsonData:
-                    jsonData[k_display] = jsonData.pop(k_schema)
+        v4 (hq-wisp-il849): reverted from the pinned-sonnet diag probe
+        back to the default bare "sonnet" alias. The pinned probe was a
+        diagnostic to isolate alias-flip from a deeper sonnet issue;
+        actual root cause turned out to be the invalid property keys
+        in GOLD_SCHEMA (see schema comment above), not the model
+        string. Bare alias = no per-call override = `fetch_and_extract`
+        default ("sonnet").
+        """
+        jsonData, ai_err = self.fetch_rates_via_ai(
+            url=GOLD_URL,
+            system_prompt=GOLD_SYSTEM_PROMPT,
+            schema=GOLD_SCHEMA,
+            agent="rate.gold",
+        )
+        if jsonData is None:
+            msg = f"Failed to get Gold Rates: {ai_err}"[:800]
+            return None, 1, 0, {}, {'error': msg}
+        if 'carat_24' not in jsonData:
+            got_keys = list(jsonData.keys())[:10]
+            msg = (
+                f"Gold Rates response missing 'carat_24'. Got "
+                f"top-level keys: {got_keys}"
+            )[:800]
+            return None, 1, 0, {}, {'error': msg}
 
-            filePath = os.path.join(self.tmp_dir, 'GOLDRATE.json')
-            try:
-                os.remove(filePath)
-            except OSError:
-                pass
-            self.save_json(jsonData, filePath)
+        # Re-map LLM-schema-compliant keys → on-disk display keys. The
+        # frontend reads GoldRate.json with the historical "24 Carat" /
+        # "22 Carat" / "18 Carat" top-level keys (see
+        # JsonDownloadService.getGoldRate, GoldService consumers); that
+        # on-disk contract is unchanged by v4.
+        for k_schema, k_display in _GOLD_DISPLAY_KEYS:
+            if k_schema in jsonData:
+                jsonData[k_display] = jsonData.pop(k_schema)
 
-            ok, err = self.safe_replace_file(filePath, self.jsonService.GoldRatePrefix, self.jsonService.ratesType)
-            if not ok:
-                return err, "Failed", self.interval
-            return 'Completed successfully', "Completed", self.interval
-        except Exception as ex:
-            return ex.__str__(), "Failed", self.interval
+        return jsonData, 1, 1, {}, {}
