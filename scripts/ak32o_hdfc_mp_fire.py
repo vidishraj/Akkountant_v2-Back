@@ -408,6 +408,29 @@ def phase4_preview(app, user_id: str, files: list[dict]) -> list[dict]:
     per file so Overseer can pick per-file (a) vs inter-file (b) semantics.
 
     Read-only. Does NOT insert any OPENING_BALANCE row (that's held on Q2).
+
+    ak-32o v5 Option A (post hq-wisp-cpkbaf): additive observability +
+    encrypted-PDF decrypt wire. Three orthogonal changes vs v4:
+
+      * Decrypt wire (fix 2) — call `app.mailProcessor._get_statement_password`
+        + `doc.authenticate(password)` (in-memory, non-mutating) so encrypted
+        PDFs like file 10 (19c248db3a7b7d55) can be parsed. On decrypt
+        failure emits `phase4.skip reason='decrypt_failed'`.
+
+      * Per-file skip emit (fix 3a) — every continue path
+        (pdf_unresolved / pdf_read_fail / decrypt_failed / summary_unparseable)
+        emits `phase4.skip` so operators see per-file coverage in the stream
+        instead of silent-drop.
+
+      * Aggregate summary emit (fix 3b) — at end of phase4_preview, emits
+        `phase4.summary` with parsed / skipped / skip_reasons counts. First
+        thing an operator or Lead can look at to gauge preview coverage.
+
+    NO parser changes in this bead — parser hardening scoped to follow-up
+    bead **ak-19d** (Lead-filed 2026-08-17). The ak-ifc backstop in
+    services/mailProcessorService.py:1975-1976 uses the same parser and has
+    the same coverage gap on these files; ak-19d fixes both callers at once
+    when it lands.
     """
     import fitz as _fitz
     from utils.statement_sections import (
@@ -417,20 +440,81 @@ def phase4_preview(app, user_id: str, files: list[dict]) -> list[dict]:
     from sqlalchemy import func as sa_func
 
     previews = []
+    skip_reasons_counter = {
+        "pdf_unresolved": 0,
+        "pdf_read_fail": 0,
+        "decrypt_failed": 0,
+        "summary_unparseable": 0,
+    }
+    parsed_count = 0
 
     with app.app_context():
         g.db = app.db
         prev_reconstructed_closing = None
         for f in files:
             file_id = f["file_id"]
+            gmail_id = f.get("gmail_id")
             pdf_path = f.get("resolved_pdf_path")
             if not pdf_path or not os.path.isfile(pdf_path):
+                skip_reasons_counter["pdf_unresolved"] += 1
+                emit("phase4.skip",
+                     file_id=file_id, gmail_id=gmail_id,
+                     reason="pdf_unresolved",
+                     note=f"resolved_pdf_path={pdf_path!r} not on disk")
                 previews.append({"file_id": file_id, "note": "pdf_unresolved"})
                 continue
 
-            # Parse PDF summary.
+            # ak-32o v5 fix (2): decrypt wire.
+            # Reuse the live mailProcessor's password strategy so we
+            # decode encrypted PDFs consistently with how they were
+            # ingested. In-memory authenticate() only — NEVER mutate
+            # the persisted PDF file (phase4 is read-only).
+            #
+            # We construct a minimal email dict for _get_statement_password
+            # (it needs sender + optional _sender_domain to route to bank).
+            _pw_email = {
+                "sender": f.get("sender") or "reprocess@local",
+                "subject": f.get("subject") or "",
+                "date": str(f.get("email_date") or ""),
+                "_bank": "HDFC_DEBIT",  # scope hint for consistency
+            }
             try:
                 doc = _fitz.open(pdf_path)
+            except Exception as exc:
+                skip_reasons_counter["pdf_read_fail"] += 1
+                emit("phase4.skip",
+                     file_id=file_id, gmail_id=gmail_id,
+                     reason="pdf_read_fail",
+                     note=f"fitz.open failed: {exc}")
+                previews.append({"file_id": file_id, "note": f"pdf_read_fail: {exc}"})
+                continue
+
+            if doc.needs_pass:
+                try:
+                    password = app.mailProcessor._get_statement_password(
+                        user_id, _pw_email, pdf_path=pdf_path,
+                    )
+                except Exception as exc:
+                    password = None
+                    emit("phase4.decrypt.lookup_error",
+                         file_id=file_id, gmail_id=gmail_id, error=str(exc))
+                if not password or not doc.authenticate(password):
+                    doc.close()
+                    skip_reasons_counter["decrypt_failed"] += 1
+                    emit("phase4.skip",
+                         file_id=file_id, gmail_id=gmail_id,
+                         reason="decrypt_failed",
+                         note=("no statementPasswords match or wrong "
+                               "password (in-memory authenticate failed)"))
+                    previews.append({
+                        "file_id": file_id, "note": "decrypt_failed",
+                    })
+                    continue
+
+            # Extract text (page-marker shape matches
+            # mailProcessorService.py:1963 + :2187 for cross-caller
+            # consistency).
+            try:
                 lines = []
                 for pn in range(1, doc.page_count + 1):
                     lines.append(f"\f<PAGE:{pn}>")
@@ -440,10 +524,23 @@ def phase4_preview(app, user_id: str, files: list[dict]) -> list[dict]:
                 spans = detect_hdfc_sections(raw)
                 summary = parse_hdfc_savings_summary(raw, spans=spans)
             except Exception as exc:
+                skip_reasons_counter["pdf_read_fail"] += 1
+                emit("phase4.skip",
+                     file_id=file_id, gmail_id=gmail_id,
+                     reason="pdf_read_fail",
+                     note=f"text-extract or parser threw: {exc}")
                 previews.append({"file_id": file_id, "note": f"pdf_read_fail: {exc}"})
                 continue
 
             if summary is None:
+                skip_reasons_counter["summary_unparseable"] += 1
+                emit("phase4.skip",
+                     file_id=file_id, gmail_id=gmail_id,
+                     reason="summary_unparseable",
+                     note=("parse_hdfc_savings_summary returned None — "
+                           "either SAVINGS section header not matched OR "
+                           "no _HDFC_SUMMARY_PATTERNS regex matched. "
+                           "See ak-19d for parser hardening follow-up."))
                 previews.append({"file_id": file_id, "note": "summary_unparseable"})
                 continue
 
@@ -611,7 +708,26 @@ def phase4_preview(app, user_id: str, files: list[dict]) -> list[dict]:
             }
             emit("phase4.preview", **preview)
             previews.append(preview)
+            parsed_count += 1
             prev_reconstructed_closing = reconstructed_close
+
+    # ak-32o v5 fix (3b): aggregate summary emit. First thing an
+    # operator / Lead / Overseer looks at to gauge preview coverage.
+    # `parsed` = files that produced a real phase4.preview event with
+    # trustworthy stated_open/close/reconstructed_close/deltas.
+    # `skipped` = files with no preview event (broken down by reason).
+    #
+    # If parsed == 0 the whole preview is uninformative for Q2 — likely
+    # ak-19d parser hardening needed before Overseer can pick delta
+    # semantics (or Overseer picks "drop Phase 4 entirely" and ak-32o
+    # ships value via snapshot+wipe+reinvoke without OPENING_BALANCE).
+    total_skipped = sum(skip_reasons_counter.values())
+    emit("phase4.summary",
+         files_seen=len(files),
+         parsed=parsed_count,
+         skipped=total_skipped,
+         skip_reasons=skip_reasons_counter,
+         trustworthy_for_q2=(parsed_count > 0))
 
     return previews
 

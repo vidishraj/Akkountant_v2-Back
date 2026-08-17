@@ -36,6 +36,24 @@ file — Overseer picks semantics from real numbers.
 | NEW MAJOR — NULL-tag exclusion silently zeroed sums | `phase4_preview._exclude` (orchestrator) | v2's `tag != 'OPENING_BALANCE'` failed on NULL tags (SQL three-valued logic: `NULL != 'X'` → NULL → row EXCLUDED). Since `Transactions.tag` is NULLABLE and normal rows land tag=NULL, every normal row was silently dropped from debit_sum/credit_sum → reconstructed_closing ≈ stated_opening → both deltas garbage. Reviewer take (a): DROPPED the tag clause; referenceID PK-prefix filter (`~referenceID.like('OPENING_BALANCE_%')`) alone is null-safe (referenceID is the non-null PK) AND sufficient since Phase 4's synthetic insert uses `referenceID='OPENING_BALANCE_<fileID>'`. |
 | Behavioral guard — NULL-tag regression lock | `phase4.sanity` emit (orchestrator) | Every file emits filtered_debit_sum + unfiltered_debit_sum + excluded_debit_magnitude (and credit-side). Invariant: `filtered + excluded == unfiltered` per side (tolerance 0.5 paise). If it fails: loud `phase4.error` — sums UNTRUSTWORTHY, do NOT surface to Overseer. Locks the v2 NULL-logic bug shape from recurring. |
 
+## Reviewer v4 fix summary (post hq-wisp-1t049i)
+
+| Fix | Location | Note |
+|-----|----------|------|
+| BUG — --dry-run silently skipped phase4_preview | `main()` at previews line | Inverted ternary `previews = [] if args.dry_run else phase4_preview(...)` meant --dry-run never called the preview. Runbook + --help both promised preview under --dry-run; code did the opposite. Fix: unconditional call. Destructive INSERT path stays gated on `_PHASE4_AWAITING_Q2_GO` independent of the ternary. |
+
+## v5 fix summary (post hq-wisp-cpkbaf — Option A per Lead's GO)
+
+Diagnosis confirmed the ak-ifc backstop in mailProcessorService.py:1975-1976 uses the SAME `parse_hdfc_savings_summary` parser as phase4_preview and has been silent-nooping on these 12 files for months — a latent observability defect in the live ingest pipeline surfaced by ak-32o. Parser fix scoped to follow-up bead **ak-19d** (P2, Lead-filed). This v5 delivers observability + decrypt wire; NO parser changes.
+
+| Fix | Location | Note |
+|-----|----------|------|
+| (2) Encrypted-PDF decrypt wire | `phase4_preview` (orchestrator) | Reuses `app.mailProcessor._get_statement_password(user_id, email_dict, pdf_path)` + `doc.authenticate(password)` — in-memory only, never mutates the persisted PDF. Enables preview to parse encrypted files like #10 (19c248db3a7b7d55). |
+| (3a) Per-file skip emit | `phase4_preview` on every continue path | Emits `phase4.skip {file_id, gmail_id, reason, note}` for each of: `pdf_unresolved` / `pdf_read_fail` / `decrypt_failed` / `summary_unparseable`. Operators see per-file coverage in the stream — no more silent-drop. |
+| (3b) Aggregate summary emit | End of `phase4_preview` | Emits `phase4.summary {files_seen, parsed, skipped, skip_reasons, trustworthy_for_q2}` — one look tells the operator/Lead/Overseer whether Q2 preview data is trustworthy. `trustworthy_for_q2` is `parsed > 0`. |
+| (4) Sanity emit already scoped to parsed files | `phase4.sanity` (unchanged) | Structure already places the sanity emit AFTER the `summary is None → continue` skip, so it only fires per parsed file. No false-negative on all-skipped runs. Verified by code inspection. |
+| Docstring — cite ak-19d | `phase4_preview` header | Marks parser expansion as separately-scoped so future readers know the SKIP path is intentional + tracked. |
+
 ---
 
 ## Copy-paste blocks (infra fires each, pastes stdout back verbatim)
