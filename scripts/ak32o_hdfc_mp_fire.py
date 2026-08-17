@@ -738,7 +738,20 @@ def main():
         pass
 
     # Phase 4 PREVIEW (read-only — the destructive insert is HELD on Q2).
-    previews = [] if args.dry_run else phase4_preview(app, args.user_id, files)
+    #
+    # ak-32o v3 v4 (hq-wisp-1t049i): unconditional call. Prior shape
+    # `previews = [] if args.dry_run else phase4_preview(...)` was
+    # INVERTED — --dry-run silently skipped the whole preview, so
+    # Overseer's Q2 decision (which depends on stated_open/close +
+    # reconstructed_close + delta_per_file + delta_inter_file +
+    # phase4.sanity per file) had nothing to see. Runbook + --help
+    # both promised preview under --dry-run. Take (a) per reviewer +
+    # Lead: preview is read-only regardless of --dry-run; the
+    # destructive INSERT path inside is hard-gated on
+    # _PHASE4_AWAITING_Q2_GO (raises SystemExit if --enable-phase4-*
+    # flags passed pre-Q2), so calling preview in dry-run is safe
+    # AND is exactly the behavior --dry-run should produce.
+    previews = phase4_preview(app, args.user_id, files)
     if _PHASE4_AWAITING_Q2_GO:
         emit("phase4.held",
              reason="Overseer Q2 (per-file vs inter-file) awaiting — preview only")
