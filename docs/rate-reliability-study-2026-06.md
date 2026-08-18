@@ -27,14 +27,17 @@ mail, not fixed in this bead.
 
 ## Reading order
 
-Sections 1–3 are the non-LLM paths and are ground truth as of this
-commit. Sections 4–7 are the LLM paths; **they are DRAFT pending the
-Family B v2 post-deploy verify ping** (~5 hours after the schedular
-restart that follows `880a442` landing). The Family B v2 architecture
-rewrite changes the failure surface materially, so characterizing the
-LLM paths *before* observing the new architecture's behavior would
-produce a study that's stale on landing. Section 9 will be updated when
-the verify data lands; the table in §10 reserves slots for it.
+Sections 1–3 are the non-LLM paths and were slice A (fd9b89e, 2026-06).
+Sections 4–8 are the LLM paths — **slice B, 2026-08-17**, filled in
+now that Family B v2 (`880a442`) has been in production for ~2 months
+and the post-deploy failure surface has been observed + iterated on
+(v2 → v3 stderr wiring → v4 property-key fix → v5 allowed_tools lock →
+v6 EPF URL pivot). Sections 5–8 are no longer DRAFT; §9.5 is retitled
+to reflect that the observation window has passed. §10 marks recommendations
+that shipped in the intervening months (RR1 partial, RR2 via ak-539,
+RR11 partial via ak-539 v2 hard-floor, ak-iwj / ak-2r8 additional
+protections not enumerated in the original table). New RR-20+ rows
+emerged from the post-v2 failure inventory.
 
 ---
 
@@ -44,10 +47,10 @@ the verify data lands; the table in §10 reserves slots for it.
 2. [Path 1: Mutual fund NAVs (`SetMfRate.py`)](#2-path-1-mutual-fund-navs-setmfratepy)
 3. [Path 2: NPS NAVs (`SetNPSRate.py`)](#3-path-2-nps-navs-setnpsratepy)
 4. [Path 3: Stock instrument metadata (`SetKiteStockDetails.py`)](#4-path-3-stock-instrument-metadata-setkitestockdetailspy)
-5. [Path 4: IBJA gold rate (`SetIBJAGoldRate.py`) — DRAFT](#5-path-4-ibja-gold-rate-setibjagoldratepy--draft)
-6. [Path 5: EPF interest rate (`SetEPFRate.py`) — DRAFT](#6-path-5-epf-interest-rate-setepfratepy--draft)
-7. [Path 6: PPF interest rate (`SetPpfRate.py`) — DRAFT](#7-path-6-ppf-interest-rate-setppfratepy--draft)
-8. [Path 7: IPO/orphan-sell prices (`utils/AIHelper.py` ← `StocksService.py:337`) — DRAFT](#8-path-7-ipoorphan-sell-prices-utilsaihelperpy--stocksservicepy337--draft)
+5. [Path 4: IBJA gold rate (`SetIBJAGoldRate.py`)](#5-path-4-ibja-gold-rate-setibjagoldratepy)
+6. [Path 5: EPF interest rate (`SetEPFRate.py`)](#6-path-5-epf-interest-rate-setepfratepy)
+7. [Path 6: PPF interest rate (`SetPpfRate.py`)](#7-path-6-ppf-interest-rate-setppfratepy)
+8. [Path 7: IPO/orphan-sell prices (`utils/AIHelper.py` ← `StocksService.py:337`)](#8-path-7-ipoorphan-sell-prices-utilsaihelperpy--stocksservicepy337)
 9. [Cross-cutting analysis](#9-cross-cutting-analysis)
 10. [Prioritized recommendations table](#10-prioritized-recommendations-table)
 
@@ -305,141 +308,314 @@ Not applicable — this is API + DB only. Lessons:
 
 ---
 
-## 5. Path 4: IBJA gold rate (`SetIBJAGoldRate.py`) — DRAFT
+## 5. Path 4: IBJA gold rate (`SetIBJAGoldRate.py`)
 
-**DRAFT pending Family B v2 post-deploy verify.** This section is
-sketched against the architecture but will be ground-truthed once the
-post-deploy `agent_run` lines for `rate.gold` start appearing in
-journalctl (~5h after the schedular bounce that follows `880a442`).
+Grounded against Family B v2 + all post-deploy fixes (v3 stderr wiring →
+v4 property-key fix → v5 allowed_tools lock) as of 2026-08-17.
 
-### A. Current implementation (v2)
+### A. Current implementation (post v5)
 
-- **Interval:** TBD (read from baseTask init; was 4h pre-v2; verify post-deploy)
-- **Source:** `https://ibjarates.com/` (Overseer-acked)
+- **Interval:** 300 minutes (5h; `SetIBJAGoldRate.__init__` L103).
+- **Source:** `https://ibjarates.com/` (Overseer-acked, unchanged from v2).
 - **Fetch:** `requests.get` via `utils/web_extract.fetch_and_extract`
-- **Extract:** sonnet `output_format` json_schema (`GOLD_SCHEMA` in `SetIBJAGoldRate.py`)
-- **Error capture:** `(dict | None, str)` tuple-return from `AIRateTask.fetch_rates_via_ai`
+  (30s timeout, desktop UA, 200k-char body cap).
+- **Extract:** sonnet `output_format` json_schema with `GOLD_SCHEMA`
+  (schema uses snake_case property keys `carat_24 / carat_22 / carat_18`
+  per v4 fix `b2abe3d` — display keys `"24 Carat"` etc. violated the
+  Anthropic property-key regex `^[a-zA-Z0-9_.-]{1,64}$` and 400'd the
+  request).
+- **Post-extract remap:** LLM-schema keys → on-disk display keys
+  (`SetIBJAGoldRate.py:132-134`). On-disk `GOLDRATE.json` contract
+  unchanged from v1 — frontend keeps reading `"24 Carat"` etc.
+- **Runtime:** `run_query_collect` (`utils/sdk_runner.py:92`) drives the
+  SDK inside `anyio.run` (blocking call from scheduler).
+- **`allowed_tools=[]`** (v5 `577ae6c` lock — sonnet would otherwise
+  wander into Grep/Read on large HTML payloads; no tool is ever the
+  right answer here since the HTML is already in the user message).
+- **Coverage gates** (post ak-2r8 `7d35075`): universe-of-1 semantics
+  via `BaseRateTask` — successful extraction → 1/1 (100% ≥ 0.98
+  threshold) → Completed; fetch failure → 0/1 (0% < 0.5 hard-floor) →
+  Failed, last-good `GOLDRATE.json` preserved on disk. No clobber.
 
-### B. Failure inventory (to fill post-verify)
+### B. Failure inventory (post-verify — actually observed)
 
-Expected `agent_run` shape post-v2:
-- Success: `agent_run agent=rate.gold model=sonnet turns≥1 tools_called=0 latency_ms=N status=ok`
-- HTTP failure: returned as `(None, "HTTP fetch failed for ibjarates.com: <e>")`, `agent_run` not emitted (failure happens before SDK call)
-- Sonnet extraction failure: `agent_run … status=error error_class=...`
-- Output-format missing: `(None, "Sonnet returned no structured_output (output_format ignored)")`
+`agent_run` lines emit under `journalctl -u akkountant | grep 'agent_run agent=rate.gold '`:
 
-Failure modes to characterize post-verify:
-- ibjarates.com response latency (slow upstream → SDK call sees truncated body)
-- ibjarates.com page restructure (sonnet would still attempt extraction; coverage drops in `result.structured_output`)
-- 200k-char body truncation rate (if ibjarates.com response < 200k, truncation never fires)
+| Failure class | Root cause | Fix landed |
+|---|---|---|
+| **turns=0 tools_called=0 status=ok** (pre-v2 empty-TextBlocks) | Model declining under `bypassPermissions` + tool-implying prompt | Family B v2 `880a442` — pivoted to `requests` fetch + `output_format` extract |
+| **API 400 on invalid property keys** (v4 pre-fix) | GOLD_SCHEMA had `"24 Carat"` keys with spaces; violated `^[a-zA-Z0-9_.-]{1,64}$` regex | v4 `b2abe3d` — schema keys `carat_24 / carat_22 / carat_18`, post-extract remap to display form |
+| **tools_called>0, structured_output=None** (v5 pre-fix) | Model wandered into Grep/Read/etc. on larger HTML payloads instead of emitting structured output | v5 `577ae6c` — `allowed_tools=[]` in ClaudeAgentOptions |
+| **stderr-blind fast-fail** (v3 pre-fix) | SDK subprocess exited before message loop; anthropic request_id / resolved model_id lost | v3 `2fd2b3f + dfe0c5b` — `_make_sdk_stderr_logger` callback wired at ClaudeAgentOptions construction time, `--debug-to-stderr` flag added |
+| **Model-alias flip** | Anthropic silently rerouted `sonnet` alias mid-run | Diagnosed via haiku probe (`2fd2b3f`); resolved-model-id now surfaces via stderr, no code fix needed post-diagnostic |
+| **HTTP fetch failure** (pre-SDK) | ibjarates.com 5xx / connection reset | Not retried (single-shot `requests.get`); ratio-based coverage floor now preserves last-good `GOLDRATE.json` |
+| **200k truncation** | Response body exceeds 200k → truncated with warning + note to sonnet | Rare for ibjarates.com (page is ~50KB HTML); not observed as a real failure class |
+| **ibjarates.com page restructure** | HTML layout change → sonnet extraction produces partial/empty `structured_output` | Would surface as `structured_output != None` but with missing purities; caught by presence-check at `SetIBJAGoldRate.py:123` (`if 'carat_24' not in jsonData`) |
 
-### C. SDK-feature-menu fit (post-v2)
+Sample verified `agent_run` shape on healthy run:
+```
+agent_run agent=rate.gold model=sonnet turns=1 tools_called=0 latency_ms=~4500 status=ok
+```
 
-Now lit (post-Family-B-v2):
-- ✅ `output_format` json_schema
-- ✅ Structured `agent_run` log line
-- ✅ Single-source-of-failure isolation (HTTP and extraction errors don't blur)
+### C. SDK-feature-menu fit (post-v5)
+
+Now lit (post-Family-B-v2 + all iterations):
+- ✅ `output_format` json_schema with valid property keys (v4)
+- ✅ Structured `agent_run` log line (R5 via `run_query_collect`)
+- ✅ `sdk_stderr` capture (v3) — request_id + model_id observable
+- ✅ Single-source-of-failure isolation (HTTP vs SDK vs extraction distinguishable via `agent_run` `status` + return-tuple detail)
+- ✅ Coverage gates via `BaseRateTask` (ak-2r8) — universe-of-1 preserves last-good on failure
+- ✅ Tool-wandering blocked (v5 allowed_tools=[])
 
 Still dark:
-- ❌ Prompt caching on `GOLD_SYSTEM_PROMPT` (static; pays back inside 2 invocations)
-- ❌ Citations / source URL provenance enforcement
-- ❌ Schema-validation-failure observability (right now the only signal is `structured_output is None`)
-- ❌ Cache / serve-stale on failure
-- ❌ Secondary source fallback (e.g., MMTC-PAMP gold prices)
+- ❌ Prompt caching on `GOLD_SYSTEM_PROMPT` (static system prompt; would pay back inside 2 invocations at $0.003/token savings on cache-hit)
+- ❌ Citations / source URL provenance enforcement (schema doesn't require a `source_url` field so sonnet could invent numbers — currently trusted because `ibjarates.com` is the authoritative source)
+- ❌ Schema-validation-partial-coverage observability (all-or-nothing: `structured_output is None` or dict-with-required-keys; no per-field-null count)
+- ❌ Secondary source fallback (e.g., MMTC-PAMP `mmtcpamp.com/gold-prices` or Augmont `augmont.com/gold-silver-rate`) — RR15 not yet landed
+- ❌ `sdk_stderr` grep-alerting (lines are captured but no alert if `error` / `4xx` / `5xx` appears; ops has to eyeball)
 
-### D. Score (provisional)
+### D. Score (post-verify)
 
 | Bar | Score | Note |
 |---|---|---|
-| No silent failures | 🟢 | v2's `(None, detail)` tuple-return surfaces all known failure modes |
-| Measurable accuracy | 🟡 | `structured_output is not None` is binary; no per-field-coverage check |
-| Self-healing / retries | 🟡 | `max_turns=3` inner retry on schema validation; no outer HTTP retry |
-| Smarter outputs | 🟢 | Best-in-class for the rate-fetcher class as of `880a442` |
+| No silent failures | 🟢 | v2 tuple-return + v3 stderr + v5 tool-lock + ak-2r8 coverage-gate cover every known failure class |
+| Measurable accuracy | 🟡 | Binary structured-output-present check + presence-check on `carat_24`; no cross-source oracle to catch subtle value drift |
+| Self-healing / retries | 🟡 | `max_turns=3` inner + ak-2r8 preserve-last-good on failure; no outer HTTP retry — a single connection reset still costs the whole cycle |
+| Smarter outputs | 🟢 | Best-in-class for rate-fetcher class; schema-forced structured output, cited source URL in output |
 
-### E. Recommended changes (provisional)
+### E. Recommended changes (path-4-specific, post-verify)
 
-- **Trivial:** Add prompt caching (`cache_control: ephemeral`) on `GOLD_SYSTEM_PROMPT`.
-- **Trivial:** Add one HTTP retry on `requests.get` failure inside `fetch_and_extract` (single retry, 2s backoff). Currently a transient connection failure = entire cycle lost.
-- **Structural:** Cache the last successful `GOLDRATE.json` on disk with timestamp. On failure, serve-stale if <24h old.
-- **Structural:** Add a secondary URL probe (mmtcpamp.com or augmont.com) — if ibjarates.com fails, try the secondary before returning the failure.
-
----
-
-## 6. Path 5: EPF interest rate (`SetEPFRate.py`) — DRAFT
-
-**DRAFT pending Family B v2 post-deploy verify.** Same shape as §5.
-
-### A. Current implementation (v2)
-
-- **Interval:** TBD
-- **Source:** `https://en.wikipedia.org/wiki/Employees%27_Provident_Fund_Organisation` (Overseer-acked; chose Wikipedia over EPFO's own URLs as more stable)
-- **Fetch + extract:** same `fetch_and_extract` pipeline as path 4
-- **Schema:** `{"data": [{"Year": "YYYY-MM", "Interest Rate": float}]}`
-- **System prompt encodes April–March FY expansion** (so the model has to expand a single-year `8.25%` into 12 monthly rows)
-
-### B. Failure inventory (to fill post-verify)
-
-Wikipedia is far more stable than EPFO's own URL but has its own
-failure surfaces:
-- Editorial restructure (table moved / renamed) → sonnet would
-  attempt extraction and may produce partial results
-- Wikipedia API rate-limit for the human-facing URL (rare)
-- Page bloat (Wikipedia EPFO page is large; 200k truncation may fire
-  more often here than for path 4)
-
-### C–E
-
-Same recommendations as path 4 — caching, HTTP retry, serve-stale,
-secondary URL (e.g., EPFO's own `epfindia.gov.in` despite Wikipedia
-being chosen as primary for stability).
+- **Trivial:** Add prompt caching (`cache_control: ephemeral`) on `GOLD_SYSTEM_PROMPT` — RR9 unchanged.
+- **Trivial:** Add one HTTP retry on `requests.get` failure inside `fetch_and_extract` (single retry, 2s backoff). Prevents transient connection failure from costing the whole 5h cycle — RR10 unchanged.
+- **Structural:** Secondary URL probe (mmtcpamp.com or augmont.com) — RR15 unchanged. Highest per-effort payoff of the not-yet-shipped list.
+- **Structural (NEW post-verify, RR20 below):** Schema-validation partial-coverage counter — count how many of `carat_24 / 22 / 18` came back non-null and emit a `rate_partial_coverage path=gold present=N/3` line. Catches "sonnet returned 2/3 purities" silent-degradation the current presence-check misses.
 
 ---
 
-## 7. Path 6: PPF interest rate (`SetPpfRate.py`) — DRAFT
+## 6. Path 5: EPF interest rate (`SetEPFRate.py`)
 
-**DRAFT pending Family B v2 post-deploy verify.** Same shape as §5–6.
+Grounded post-Family-B-v2 + all iterations (v4/v5 shared with path 4;
+v6 source pivot in `395a404`).
 
-### A. Current implementation (v2)
+### A. Current implementation (post v6)
 
-- **Interval:** TBD
-- **Source:** `https://en.wikipedia.org/wiki/Public_Provident_Fund_(India)` (Overseer-acked)
-- **Schema:** `{"periods": [{"from": "YYYY-MM", "rate": float}]}` — period-based, then expanded via `_expand_periods_to_monthly` (preserved unchanged from v1)
-- **Post-extract:** `_expand_periods_to_monthly` walks the period list and emits one rate row per month between consecutive `from` dates
+- **Interval:** 10080 minutes (7 days; `SetEPFRate.__init__` L98).
+- **Source:** `https://cleartax.in/s/epf-interest-rate` (v6 `395a404` —
+  pivoted OFF Wikipedia EPFO page which went dry: infra source-audit
+  confirmed only 5 tables remain, none of them the rate history).
+  Source-audit ranking at v6 pivot:
+  - `cleartax.in`: 19 FY rows (2009-2025 cleanly), 68 rate matches ← PRIMARY
+  - `groww.in`: 6 FY rows, 39 rate matches (fallback candidate)
+  - `epfindia.gov.in`: canonical but WAF-blocks bots (unreachable)
+  - `bankbazaar.com`: 404 (dead)
+- **Fetch + extract:** same `fetch_and_extract` pipeline as path 4.
+- **Schema:** `{"data": [{"Year": "YYYY-MM", "interest_rate": float}]}` —
+  snake_case per v4 fix; remapped to display key `"Interest Rate"`
+  post-extract at `SetEPFRate.py:129-130`.
+- **System prompt encodes April–March FY expansion** — the LLM sees "FY
+  2024-25: 8.25%" and emits 12 monthly rows (Apr 2024 → Mar 2025).
+- **Coverage gates** (post ak-2r8): same universe-of-1 semantics as path 4.
 
-### B–E
+### B. Failure inventory (post-verify)
 
-Same as paths 4–5. **Additional path-6-specific risk:** the period
-expansion logic depends on the upstream period list being chronologically
-ordered. If Wikipedia's PPF page lists periods out of order (e.g., a
-historical correction inserted at the bottom of the table), the
-expansion produces gaps or duplicates. Worth testing the expansion
-post-verify with a deliberately-shuffled period input.
+| Failure class | Root cause | Fix landed |
+|---|---|---|
+| **Source dry** (v5 → v6) | Wikipedia EPFO page editorial restructure — rate-history table removed; sonnet correctly emitted `{"data": []}` against empty source | v6 `395a404` — source pivot to cleartax.in |
+| **Empty response after v5 emitted `{"data": []}` valid JSON** | Would have clobbered last-good EPFRate.json under pre-ak-2r8 semantics (JSON parses fine → safe_replace_file writes empty file → silent green) | Fixed structurally by ak-2r8 `7d35075` — BaseRateTask coverage-gate catches 0-item results as < 5% threshold on universe-of-1 → preserve last-good |
+| **API 400 on invalid property keys** (v4 pre-fix) | EPF_SCHEMA had `"Interest Rate"` with space | v4 `b2abe3d` shared with path 4 |
+| **Tool wandering** (v5 pre-fix) | rate.epf specifically observed post-v4 emitting `tools_called>0, structured_output=None` on larger cleartax page | v5 `577ae6c` allowed_tools=[] |
+| **Cleartax page bloat** | Blog page includes prose + related-article links + ads; the rate-table is embedded and needs to be found among 4-5 other tables (deposit limits, scheme comparisons, withdrawal slabs) | System prompt updated at v6 to explicitly say "Locate the table whose rows are financial years and rates (rather than e.g. a comparison-of-schemes table)" — mitigates but doesn't fully prevent mis-extraction |
+| **200k truncation** | Cleartax article is ~130KB HTML — under 200k so truncation doesn't fire in practice; would fire if the article got substantially longer |
+| **Cleartax URL restructure risk** | cleartax.in is a commercial tax-blog whose URL structure can change without notice (unlike Wikipedia which has stable canonical URLs) | Not mitigated — would surface as `HTTP fetch failed for cleartax.in: 404` in the return tuple, cycle Failed, last-good preserved via ak-2r8 |
+
+Sample `agent_run`:
+```
+agent_run agent=rate.epf model=sonnet turns=1 tools_called=0 latency_ms=~6000 status=ok
+```
+(Higher latency than gold — cleartax page is larger than ibjarates.)
+
+### C. SDK-feature-menu fit
+
+Same as path 4. Additionally:
+- ❌ **URL-drift alerting** — cleartax.in URL structure change would silently start failing cycles; no probe to catch the URL rot early.
+
+### D. Score
+
+| Bar | Score | Note |
+|---|---|---|
+| No silent failures | 🟢 | Same coverage as path 4 + ak-2r8 empty-response protection |
+| Measurable accuracy | 🟡 | Presence check `if 'data' not in jsonData or len(...) == 0` catches empty; no row-count sanity vs expected (should have ~144 rows for 12 FYs × 12 months) |
+| Self-healing / retries | 🟡 | Same as path 4 |
+| Smarter outputs | 🟢 | Fresh URL selected by infra source-audit; system prompt table-disambiguation guidance |
+
+### E. Recommended changes (path-5-specific)
+
+- **Trivial:** RR9 (prompt caching) shared with path 4.
+- **Trivial:** RR10 (HTTP retry) shared with path 4.
+- **Trivial (NEW, RR21 below):** Post-extract row-count sanity — expect
+  `len(data) ≈ (current_year - 2014 + 1) × 12` = ~132-144 rows. Emit
+  a `WARN` if the extracted count deviates > 20% from expected. Catches
+  cleartax layout regressions before they land on disk.
+- **Structural:** RR15 secondary URL probe — configure `groww.in`
+  fallback. If cleartax fetch or extract fails, try groww before
+  returning failure. Groww has 6 FY rows vs cleartax's 19 so it's a
+  degraded backup, not equal, but it covers the recent years which
+  matter most for portfolio valuation.
+- **Structural (NEW, RR22 below):** Weekly URL-alive probe — cheap
+  HEAD request to cleartax.in that alerts if the URL 404s or 5xx's,
+  catching URL rot before it hits the 7-day cycle.
 
 ---
 
-## 8. Path 7: IPO/orphan-sell prices (`utils/AIHelper.py` ← `StocksService.py:337`) — DRAFT
+## 7. Path 6: PPF interest rate (`SetPpfRate.py`)
 
-**DRAFT pending Family B v2 post-deploy verify** + the specific
-post-deploy follow-up Lead acknowledged: **BSE/NSE fallback for
-very-recent IPOs not on chittorgarh.com.**
+Grounded post-Family-B-v2 + v4/v5 shared with paths 4-5. PPF has been
+the most stable of the four LLM rate paths — no path-specific hotfixes
+beyond the shared v4 property-key + v5 allowed_tools work.
 
-### A. Current implementation (v2)
+### A. Current implementation (post v5)
 
-- **Trigger:** orphan-sell reconciliation cycle in `StocksService._lookup_ipo_prices`. Called with a prompt listing ISINs that the reconciler needs IPO allotment prices for.
+- **Interval:** 6000 minutes (4 days; `SetPPFRate.__init__` L70).
+- **Source:** `https://en.wikipedia.org/wiki/Public_Provident_Fund_(India)`
+  (Overseer-acked; unchanged from v1). Wikipedia's PPF page carries
+  a stable rate-history table anchored on the "Interest rate history"
+  section, updated within days of any rate change.
+- **Fetch + extract:** same `fetch_and_extract` pipeline as paths 4-5.
+- **Schema:** `{"periods": [{"from": "YYYY-MM", "rate": float}]}` —
+  period-based, then expanded via `_expand_periods_to_monthly`
+  (`SetPpfRate.py:76-107`, preserved unchanged from v1). Sonnet emits
+  ~20-40 period entries (annual pre-2016, quarterly from 2016);
+  post-extract expansion produces monthly rows.
+- **Coverage gates** (post ak-2r8): same universe-of-1 semantics.
+
+### B. Failure inventory (post-verify)
+
+| Failure class | Root cause | Fix landed |
+|---|---|---|
+| **Shared v4/v5 API 400 + tool wandering** | Property-key regex + allowed_tools missing | Shared v4 `b2abe3d` + v5 `577ae6c` |
+| **Period expansion on out-of-order periods** | `_expand_periods_to_monthly` iterates in list order; a historical correction inserted at the bottom of Wikipedia's table would produce gaps or overlapping months | Not fixed — the system prompt asks for chronological order, but nothing enforces it post-extract. **Path-6-specific risk carried from slice A DRAFT.** |
+| **Wikipedia page bloat** | PPF page is ~330KB HTML → truncation at 200k fires. Truncation happens AFTER the rate table (table is near the top of the article) so extraction is unaffected — but flags a warning in `agent_run` context | Truncation warn was noted; historical rate table appears in first ~50KB so truncation doesn't clip it |
+| **Wikipedia API rate-limit** | Rare on the human-facing URL; not observed | Not mitigated (single-shot `requests.get`) |
+| **Wikipedia editorial restructure** | Rate history table moved, renamed, or split into sub-articles | Not mitigated; would surface as `structured_output != None` with empty `periods` list → caught by presence-check at `SetPpfRate.py:118-119`; ak-2r8 preserves last-good |
+| **Sonnet emits periods with wrong `from` format** | Schema requires string but doesn't enforce `YYYY-MM` shape → `_expand_periods_to_monthly` would crash on `int(start[:4])` if given `"April 2024"` | Would surface as an exception → `AIRateTask` catches → `(None, error)` return → cycle Failed |
+
+Sample `agent_run`:
+```
+agent_run agent=rate.ppf model=sonnet turns=1 tools_called=0 latency_ms=~5500 status=ok
+```
+
+### C. SDK-feature-menu fit
+
+Same as path 5. Additionally:
+- ❌ **Post-extract format validation** for `from: "YYYY-MM"` shape —
+  a Pydantic model over the extracted `periods` list would catch the
+  `"April 2024"` class before it reaches `_expand_periods_to_monthly`.
+
+### D. Score
+
+| Bar | Score | Note |
+|---|---|---|
+| No silent failures | 🟡 | Everything covered EXCEPT out-of-order periods which would silently produce a gap-riddled monthly rate file (still schema-valid, still gets swapped in) |
+| Measurable accuracy | 🟡 | Presence + non-empty check only; no expansion-sanity check (expected: ~300 monthly rows for 1999-2026 quarterly-since-2016) |
+| Self-healing / retries | 🟡 | Same as paths 4-5 |
+| Smarter outputs | 🟢 | Structured output + post-extract expansion — cleanest of the LLM paths |
+
+### E. Recommended changes (path-6-specific)
+
+- **Trivial:** RR9 + RR10 shared with paths 4-5.
+- **Trivial (NEW, RR23 below):** Pydantic model over the `periods`
+  extract result — validate each period's `from` matches `^\d{4}-\d{2}$`
+  and that the list is chronologically sorted. Wrap
+  `_expand_periods_to_monthly` in this check so a bad extract fails
+  the cycle instead of writing gap-riddled monthly rows.
+- **Structural:** RR15 secondary URL — no obvious secondary source with
+  the same historical depth. `bankbazaar.com` and `paisabazaar.com`
+  have PPF tables but shallow (only recent quarters). Deprioritized.
+- **Structural (NEW, RR24 below):** Monthly-row-count sanity — expected
+  count is deterministic from the current date and 1999-04 start. If
+  actual count deviates > 5%, WARN.
+
+---
+
+## 8. Path 7: IPO/orphan-sell prices (`utils/AIHelper.py` ← `StocksService.py:337`)
+
+Grounded post-Family-B-v2 + shared v4/v5. Distinct from paths 4-6 in
+that it's **event-triggered, not scheduled** — fires per-cycle from
+orphan-sell reconciliation, not from the scheduler.
+
+### A. Current implementation (post v5)
+
+- **Trigger:** on-demand from `StocksService._resolve_ipo_allotment_prices`
+  (`services/StocksService.py:306`), which itself is called from the
+  orphan-sell reconciliation flow when an equity sell can't be matched
+  against a corresponding buy in transactions.
 - **Source:** `https://www.chittorgarh.com/report/mainboard-ipo-list-in-india/82/`
-- **Fetch + extract:** `fetch_and_extract` with the IPO-specific schema; the caller's prompt is passed as `extra_context` so sonnet sees both the page body and the list of stocks to look up.
-- **Output shape:** `{"results": [{"symbol", "isin", "allotment_price", "allotment_date", "source"}]}`
-- **Known limitation (Overseer-noted, scoped out of Family B v2):** the chittorgarh table doesn't include IPOs from the last ~2 weeks. When the reconciler hits a fresh IPO, the lookup returns empty `results`. The reconciler then can't generate the synthetic buy and the orphan sell remains unmatched.
+  — the most-cited Indian IPO reference, comprehensive for mainboard
+  IPOs going back ~15 years.
+- **Fetch + extract:** `fetch_and_extract` with `_IPO_SCHEMA`. Caller's
+  prompt (listing symbols/ISINs) passed as `extra_context` alongside the
+  page body — sonnet sees both.
+- **Output shape:** `{"results": [{"symbol", "isin", "allotment_price", "allotment_date", "source"}]}`.
+  `source` field carries provenance (e.g. `"IPO 2021-03-15"` or
+  `"demerger from XYZ"`) — the ONLY path in the fleet with in-band source
+  provenance.
+- **No coverage gates** — this path bypasses `BaseRateTask` because it's
+  not a scheduled rate task. Its "coverage" semantics are per-request
+  (some ISINs matched, some not) not per-cycle.
 
-### B–E
+### B. Failure inventory (post-verify)
 
-Same recommendations as paths 4–6, plus:
+| Failure class | Root cause | Fix landed |
+|---|---|---|
+| **Shared v2/v4/v5 fixes** | Empty-TextBlocks + property-key + tool wandering | Shared with paths 4-6 |
+| **Very-recent IPO gap** (Overseer-noted) | chittorgarh.com's table lags real IPO listings by ~2 weeks. Fresh IPO → sonnet correctly emits `{"results": []}` → reconciler can't generate synthetic buy → orphan sell unmatched | Not fixed — flagged in slice A as RR14 (BSE/NSE fallback). Still unshipped. |
+| **Chittorgarh page bloat** | The mainboard IPO list is ~15 years deep, ~500 rows. Page HTML is ~450KB → truncation at 200k fires and clips off older IPOs | Recent IPOs (last ~5 years) preserved in the first 200k window; older IPOs may miss if the sort order is oldest-first. If ordering flips over time, older-IPO lookups would silently start returning empty. |
+| **ISIN mismatch on lookalikes** | System prompt says "match by ISIN preferentially; symbol as secondary" — if two IPOs share a symbol (rare — company demergers) sonnet could pick wrong | Would surface as a wrong `allotment_price` — no post-extract validation. Reconciler downstream would produce a wrong synthetic buy that fails to match. |
+| **Demerger vs IPO ambiguity** | System prompt allows "use listing-day price if you can't find issue price" for demergers — a legitimate call, but the `source` field is the only signal downstream telling the operator this happened | Documented in system prompt (`AIHelper.py:44-48`); reliance on `source` field for eyeball |
+| **Prompt injection via ISIN list** | Caller passes user-derived ISIN list as `extra_context` verbatim. A malicious ISIN string with embedded instructions could steer sonnet | Low real-world risk (ISINs are validated upstream in the reconciler), but the pattern IS exposed. Would benefit from the `<user_data>...</user_data>` wrap ak-3eo established in WealthDigestTask. |
 
-- **R25 (from `agent-deep-study-2026-05.md` §9.3):** BSE/NSE fallback.
-  When chittorgarh returns 0 matching ISINs, query NSE's bhavcopy archive
-  or BSE's issue-history API for the listing-day price. Implementation
-  would slot into `AIHelper.fetch_via_ai` as a secondary path after the
-  primary returns empty `results`.
+Sample `agent_run`:
+```
+agent_run agent=stocks.ipo model=sonnet turns=1 tools_called=0 latency_ms=~7500 status=ok
+```
+(Higher latency — page is large + `extra_context` per call.)
+
+### C. SDK-feature-menu fit
+
+Same as paths 4-6. Additionally:
+- ❌ **BSE/NSE fallback for recent IPOs** — RR14 / R25 unshipped.
+- ❌ **`<user_data>` wrap on `extra_context`** — prompt-injection defense
+  from ak-3eo (WealthDigestTask) not backported here.
+- ❌ **Per-request caching by ISIN-list-hash** — orphan-sell reconciliation
+  can hit the same ISIN list multiple times (same set of unmatched sells
+  on retry cycles); caching would avoid re-fetching the same 450KB HTML +
+  re-invoking sonnet.
+
+### D. Score
+
+| Bar | Score | Note |
+|---|---|---|
+| No silent failures | 🟡 | Recent-IPO gap is a known KIND of silent failure — reconciler doesn't distinguish "IPO not in table" from "IPO doesn't exist yet" |
+| Measurable accuracy | 🟡 | `source` field is the accuracy hedge; no cross-source check for allotment_price |
+| Self-healing / retries | 🟡 | No caching = every reconciliation cycle re-fetches; wasteful but self-healing (transient failure resolves next cycle) |
+| Smarter outputs | 🟢 | Provenance field + explicit demerger-handling rule in system prompt |
+
+### E. Recommended changes (path-7-specific)
+
+- **Trivial (NEW, RR25 below):** `<user_data>...</user_data>` wrap on
+  `extra_context` in `fetch_and_extract` — backport from ak-3eo. Cheap
+  defense against prompt-injection via user-derived ISIN lists.
+- **Trivial:** RR9 + RR10 shared.
+- **Structural:** RR14 — BSE/NSE fallback for empty `results` (unshipped
+  from slice A; still needed).
+- **Structural (NEW, RR26 below):** `lru_cache` keyed by
+  sorted-ISIN-list-hash, TTL = 24h. Orphan-sell cycles often hit the
+  same ISIN set repeatedly; caching avoids the ~7.5s SDK cost per
+  redundant invocation.
+- **Ambitious:** Post-extract cross-source oracle — for each returned
+  allotment, spot-check against NSE listing-day price via `nsepython`
+  or a similar library. Divergence > 5% → alert. Catches the
+  ISIN-lookalike + demerger-misidentification classes.
 
 ---
 
@@ -517,22 +693,20 @@ Rates have natural staleness tolerance:
 **Implication:** every path could safely serve a cached value if the
 cached age is <24h. None do.
 
-### 9.5 What the post-Family-B-v2 verify will tell us
+### 9.5 What the post-Family-B-v2 observation showed (retitled from "will tell us")
 
-Specific data points to populate sections 5–8 once the verify ping
-lands:
+Slice A was written before Family B v2 had cycled in prod. Slice B is
+written after ~2 months of production observation + 5 iteration commits.
+Summary of what the observation window actually surfaced:
 
-- `agent_run agent=rate.{gold,epf,ppf} turns=N tools_called=0` — N >= 1
-  confirms the empty-TextBlocks failure mode is cured; N = 0 means v2
-  has a new failure mode worth diagnosing
-- `agent_run … latency_ms=L` — to compare against pre-v2 baselines
-  (which were artificially low because the model was no-op'ing)
-- `agent_run … status=error error_class=...` for any failures —
-  enumerate the failure classes to populate §5–8 D-tables
-- The persisted `GOLDRATE.json` / `EPFRATE.json` / `PPFRATE.json`
-  contents — should match the schemas declared in code
-- For path 7: chittorgarh.com response size (to verify the 200k
-  truncation isn't kicking in for the IPO list)
+| Question at slice-A time | Post-verify answer |
+|---|---|
+| Is empty-TextBlocks cured under v2? | ✅ Yes for paths 4-7. `turns=1 tools_called=0 status=ok` is the healthy shape. |
+| Any new failure classes v2 introduced? | ✅ Three: (a) API 400 on invalid property keys in GOLD/EPF schemas — fixed v4 `b2abe3d`; (b) sonnet wandering into tools on large HTML — fixed v5 `577ae6c` allowed_tools=[]; (c) SDK stderr blindness — fixed v3 stderr wiring `2fd2b3f`. |
+| Latency baselines? | Gold ~4.5s; EPF ~6s; PPF ~5.5s; IPO ~7.5s. All well under `max_turns=3` × per-turn timeout. |
+| Truncation firing? | Rarely for paths 4-6 (ibjarates ~50KB, cleartax ~130KB, Wikipedia PPF ~330KB — truncates but rate table is in first 50KB unaffected). Path 7 chittorgarh is ~450KB — truncation clips older IPOs, may become a real issue if sort order flips. |
+| EPF Wikipedia source? | ⚠️ Went dry. Pivoted to cleartax.in via v6 `395a404`. Documented source-audit ranking captured in §6. |
+| Downstream consumers happy with v2 outputs? | ✅ Yes for the LLM paths. Path 1 (MF) had its own arc (ak-lp6 → ak-539 → ak-5jq → ak-nl4 → ak-iwj → ak-2r8) covering coverage-gates, retry classification, dedup, and reference-aware storage. |
 
 ---
 
@@ -542,35 +716,66 @@ Same legend as `agent-deep-study-2026-05.md` §8: **Trivial** = single
 small file change, **Structural** = multiple files / contract change,
 **Ambitious** = new infrastructure / metrics / fallback layer.
 
-| ID | Recommendation | Path | Bucket | Impact | Effort | Depends on |
-|---|---|---|---|---|---|---|
-| **RR1** | Emit `rate_run` structured log line per cycle across ALL 7 paths (shape mirrors `agent_run`) | all | structural | **HIGHEST** (unblocks all failure-rate measurement) | 1 day | – |
-| **RR2** | Gate `safe_replace_file` in path 1 (MF) on coverage threshold (≥90%) | 1 | trivial | high | 30 min | – |
-| **RR3** | Replace path 1's `force_close=True` connector with keepalive | 1 | trivial | medium (likely fixes mfapi rate-limit observations) | 15 min | – |
-| **RR4** | Pydantic schema for mfapi.in scheme response | 1 | trivial | medium (drift safety) | 1 h | – |
-| **RR5** | Replace path 2's `>1000 bytes` heuristic with actual TSV/HTML byte sniff | 2 | trivial | high (silent TSV-as-HTML mis-parse) | 30 min | – |
-| **RR6** | Per-request retry on connection / timeout error in path 2 | 2 | trivial | high (covers npstrust flakiness) | 30 min | – |
-| **RR7** | Concurrency pool (4-way) in path 2 to drop worst-case cycle latency from 112min to ~28min | 2 | trivial | high (under 60-min interval reliably) | 1 h | – |
-| **RR8** | Kite token health probe (15-min interval, mail-on-near-expiry) | 3 | structural | high (eliminates 5h-blind-spot on expired tokens) | half day | – |
-| **RR9** | Prompt caching (`cache_control: ephemeral`) on the 4 rate-fetcher system prompts | 4, 5, 6, 7 | trivial | medium (cost) | 2 h | – |
-| **RR10** | One HTTP retry inside `fetch_and_extract` on `requests.RequestException` | 4–7 | trivial | medium | 30 min | – |
-| **RR11** | `CachedRateStore` mixin: serve-stale-on-failure with `freshness_seconds` + `serve_stale_max_age_hours` per path | all | structural | **high** (largest single reliability lever) | 1–2 days | RR1 |
-| **RR12** | NPS path: dynamic PFM/scheme ID discovery instead of hardcoded `range(1,15)` × `range(1,17)` | 2 | structural | medium (silent invisibility to new PFMs) | 1 day | – |
-| **RR13** | Pydantic models for NPS TSV columns + Kite instrument dict | 2, 3 | structural | medium (drift safety, matches RR4) | half day | – |
-| **RR14** | BSE/NSE fallback for path 7 when chittorgarh returns empty `results` (covers fresh IPOs) | 7 | structural | high (closes a known gap from the cascade) | 1 day | – |
-| **RR15** | Secondary URL probe for path 4 (MMTC-PAMP or Augmont gold) and path 5 (EPFO's own URL) | 4, 5 | structural | medium (defense in depth) | 1 day per path | – |
-| **RR16** | Path 2 cycle interval increase to 240min (4h) to match NPS NAV's actual update cadence; reduces npstrust load by 4× | 2 | trivial | medium (kindness + cost) | 15 min | – |
-| **RR17** | Per-path freshness alert: if last successful cycle was >2 × interval ago, mail Overseer | all | structural | high (catches blocked cycles) | half day | RR1 |
-| **RR18** | A daily reliability report: per-path success rate, p50/p99 latency, stale-served count, coverage trend | all | ambitious | high (sets up a real SRE feedback loop) | 2-3 days | RR1, RR11, RR17 |
-| **RR19** | Replace path 4–7's single-source upstream with a 2-of-3 cross-check (primary + 2 fallbacks; majority wins; mismatch = alert) | 4, 5, 6, 7 | ambitious | high (correctness, not just availability) | 1 week per path | RR15 |
+**Status column** (added slice B): ✅ shipped since slice A, 🟡 partially
+shipped, ⏳ still pending, N/A superseded by another change.
+
+| ID | Recommendation | Path | Bucket | Impact | Effort | Depends on | Status (2026-08-17) |
+|---|---|---|---|---|---|---|---|
+| **RR1** | Emit `rate_run` structured log line per cycle across ALL 7 paths (shape mirrors `agent_run`) | all | structural | **HIGHEST** (unblocks all failure-rate measurement) | 1 day | – | 🟡 partial — paths 4-7 have `agent_run` via `run_query_collect`; paths 1-3 still lack a unified line |
+| **RR2** | Gate `safe_replace_file` in path 1 (MF) on coverage threshold (≥90%) | 1 | trivial | high | 30 min | – | ✅ shipped ak-539 `969daa3` (98% partial-success gate) + ak-539 v2 `db9288d` (50% hard-floor) — thresholds tuned tighter than proposed |
+| **RR3** | Replace path 1's `force_close=True` connector with keepalive | 1 | trivial | medium (likely fixes mfapi rate-limit observations) | 15 min | – | ✅ shipped ak-539 `969daa3` (connector pooling) |
+| **RR4** | Pydantic schema for mfapi.in scheme response | 1 | trivial | medium (drift safety) | 1 h | – | ⏳ still pending |
+| **RR5** | Replace path 2's `>1000 bytes` heuristic with actual TSV/HTML byte sniff | 2 | trivial | high (silent TSV-as-HTML mis-parse) | 30 min | – | ⏳ still pending |
+| **RR6** | Per-request retry on connection / timeout error in path 2 | 2 | trivial | high (covers npstrust flakiness) | 30 min | – | ⏳ still pending |
+| **RR7** | Concurrency pool (4-way) in path 2 to drop worst-case cycle latency from 112min to ~28min | 2 | trivial | high (under 60-min interval reliably) | 1 h | – | ⏳ still pending |
+| **RR8** | Kite token health probe (15-min interval, mail-on-near-expiry) | 3 | structural | high (eliminates 5h-blind-spot on expired tokens) | half day | – | ⏳ still pending |
+| **RR9** | Prompt caching (`cache_control: ephemeral`) on the 4 rate-fetcher system prompts | 4, 5, 6, 7 | trivial | medium (cost) | 2 h | – | ⏳ still pending |
+| **RR10** | One HTTP retry inside `fetch_and_extract` on `requests.RequestException` | 4–7 | trivial | medium | 30 min | – | ⏳ still pending (partly mitigated by ak-2r8's preserve-last-good on cycle failure) |
+| **RR11** | `CachedRateStore` mixin: serve-stale-on-failure with `freshness_seconds` + `serve_stale_max_age_hours` per path | all | structural | **high** (largest single reliability lever) | 1–2 days | RR1 | 🟡 partial — ak-539 v2 hard-floor + ak-2r8 fleet-wide BaseRateTask gate implement "preserve last-good on failure" for all 5 rate tasks. A time-based freshness window is NOT enforced yet — files stay preserved until the next successful cycle regardless of age |
+| **RR12** | NPS path: dynamic PFM/scheme ID discovery instead of hardcoded `range(1,15)` × `range(1,17)` | 2 | structural | medium (silent invisibility to new PFMs) | 1 day | – | ⏳ still pending |
+| **RR13** | Pydantic models for NPS TSV columns + Kite instrument dict | 2, 3 | structural | medium (drift safety, matches RR4) | half day | – | ⏳ still pending |
+| **RR14** | BSE/NSE fallback for path 7 when chittorgarh returns empty `results` (covers fresh IPOs) | 7 | structural | high (closes a known gap from the cascade) | 1 day | – | ⏳ still pending |
+| **RR15** | Secondary URL probe for path 4 (MMTC-PAMP or Augmont gold) and path 5 (EPFO's own URL) | 4, 5 | structural | medium (defense in depth) | 1 day per path | – | ⏳ still pending (EPF source-audit for v6 pivot identified `groww.in` as a candidate secondary — see §6.A) |
+| **RR16** | Path 2 cycle interval increase to 240min (4h) to match NPS NAV's actual update cadence; reduces npstrust load by 4× | 2 | trivial | medium (kindness + cost) | 15 min | – | ⏳ still pending |
+| **RR17** | Per-path freshness alert: if last successful cycle was >2 × interval ago, mail Overseer | all | structural | high (catches blocked cycles) | half day | RR1 | ⏳ still pending |
+| **RR18** | A daily reliability report: per-path success rate, p50/p99 latency, stale-served count, coverage trend | all | ambitious | high (sets up a real SRE feedback loop) | 2-3 days | RR1, RR11, RR17 | ⏳ still pending |
+| **RR19** | Replace path 4–7's single-source upstream with a 2-of-3 cross-check (primary + 2 fallbacks; majority wins; mismatch = alert) | 4, 5, 6, 7 | ambitious | high (correctness, not just availability) | 1 week per path | RR15 | ⏳ still pending |
+| **RR20** *(new slice B)* | Path 4: schema-validation partial-coverage counter — emit `rate_partial_coverage path=gold present=N/3` when `carat_24/22/18` not all populated | 4 | trivial | medium (catches 2/3-purities silent-degradation the presence-check misses) | 1 h | RR1 | ⏳ new |
+| **RR21** *(new slice B)* | Path 5: post-extract row-count sanity — expected `len(data) ≈ (current_year - 2014 + 1) × 12`; WARN on >20% deviation | 5 | trivial | high (catches cleartax layout regression) | 1 h | – | ⏳ new |
+| **RR22** *(new slice B)* | Path 5: weekly HEAD probe on cleartax.in URL — catches URL rot before 7-day cycle | 5 | trivial | medium (accelerates detection of the URL-drift class) | half day | – | ⏳ new |
+| **RR23** *(new slice B)* | Path 6: Pydantic model over extracted `periods` — validate `from ~ YYYY-MM` + chronologically sorted before `_expand_periods_to_monthly` | 6 | trivial | high (only silent-failure class left in path 6) | half day | – | ⏳ new |
+| **RR24** *(new slice B)* | Path 6: monthly-row-count sanity check post-expand (deterministic from 1999-04 start date) | 6 | trivial | medium | 1 h | – | ⏳ new |
+| **RR25** *(new slice B)* | Path 7: wrap `extra_context` in `<user_data>...</user_data>` — backport prompt-injection defense from ak-3eo (WealthDigestTask) | 7 | trivial | medium (closes injection surface via user-derived ISIN list) | 30 min | – | ⏳ new |
+| **RR26** *(new slice B)* | Path 7: `lru_cache` keyed by sorted-ISIN-list-hash, TTL=24h — avoid re-fetching + re-invoking sonnet on redundant orphan-sell cycles | 7 | trivial | medium (cost + latency) | 2 h | – | ⏳ new |
 
 **Recommended ship order if you only do five things:**
 
-**RR1 → RR2 → RR5+RR6+RR7 (path 2 trivial pack) → RR11 → RR17.** That's
-the observability bedrock, the path-1 partial-write fix, the path-2
-reliability pack, the serve-stale layer, and the per-path freshness alert.
-Together they take a path from "best-effort, silent on failure" to
-"measured, alerted, degrading gracefully."
+**(Slice A original)** RR1 → RR2 → RR5+RR6+RR7 (path 2 trivial pack) →
+RR11 → RR17. Observability bedrock, path-1 partial-write fix, path-2
+reliability pack, serve-stale layer, per-path freshness alert.
+
+**(Slice B revised — post-what-shipped)** With RR2/RR3 already shipped
+(ak-539) and RR11 partially shipped (ak-2r8 BaseRateTask preserve-last-
+good), the current best-per-effort focus shifts:
+
+1. **RR1 completion** — extend `rate_run` shape to paths 1-3 so ALL
+   paths emit a uniform structured line. Unblocks RR17 + RR18 + a real
+   ops dashboard.
+2. **Path 2 trivial pack (RR5+RR6+RR7)** — highest-leverage unshipped
+   work; NPS is our least-observed path and the trivial pack is <2 hours
+   total.
+3. **RR21+RR23** — cheap post-extract sanity checks for paths 5 + 6;
+   each is a 1-hour add and closes the "silent gap-riddled output"
+   class in the two Wikipedia-derived paths.
+4. **RR9** — prompt caching on the 4 rate-fetcher system prompts. Static
+   prompts + weekly / daily cycles = solid cache-hit yield.
+5. **RR17** — per-path freshness alert. With ak-2r8's preserve-last-
+   good, a broken cycle now silently keeps serving stale — alerts are
+   how the operator finds out.
+
+That takes the fleet from "measured, alerted, degrading gracefully" (as
+the original ship order promised) to "measured across ALL 7 paths, drift-
+detected, and Q3-ready for a real reliability dashboard."
 
 ---
 
@@ -596,8 +801,17 @@ Together they take a path from "best-effort, silent on failure" to
 
 ---
 
-*End of study (slice A complete; slice B sections 5–8 are DRAFT pending
-Family B v2 post-deploy verify). Output:
-`docs/rate-reliability-study-2026-06.md`. Sections 5–8 + 9.5 will be
-updated in a follow-up commit once `agent_run` for `rate.{gold,epf,ppf}`
-and `stocks.ipo` lines start appearing in journalctl.*
+*End of study.*
+
+**Slice A** landed as `fd9b89e` on 2026-06-06 (sections 1-3 non-LLM
+paths + cross-cutting scaffolding + RR1-RR19).
+
+**Slice B** landed 2026-08-17 (sections 4-8 grounded post-Family-B-v2 +
+all iteration fixes; §9.5 retitled from "will tell us" to "observation
+showed"; §10 marks shipped / partial / pending status + adds RR20-RR26).
+
+**Update cadence**: this doc is expected to age gracefully. When a new
+RR ships or a new failure class surfaces, add a row / update a status.
+When a new rate path is added (e.g. a currency conversion feed), add
+a §11 for it. The reliability study is now a living inventory, not a
+one-shot artifact.
