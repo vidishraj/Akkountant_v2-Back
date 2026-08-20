@@ -24,6 +24,48 @@ class JSONDownloadService:
     listType: str = "lists"
     ratesType: str = "rates"
 
+    # ak-znk Fix-A1: PROD hard-stale thresholds — files older than these
+    # values return False (truly ancient — stop serving), but are NEVER
+    # deleted by checkJsonInDirectory on read. Motivation: the prior
+    # PROD behavior deleted the file when a CONSUMER (dashboard) read
+    # it past the freshness threshold, defeating ak-2r8's "prefer stale
+    # over empty" invariant during any outage that lasted longer than
+    # the threshold (Claude API outage → SetIBJAGoldRate cycles Failed
+    # → file ages past 1d → dashboard read → file deleted → "no live
+    # data" for gold). See ak-znk bead + R17′ slice B RR27 (follow-up).
+    #
+    # Semantics (per-prefix):
+    #   * age <= freshness threshold (`_prod_freshness_td_for`)      → return True (fresh)
+    #   * freshness < age <= hard_stale                              → WARN + return True (serve stale)
+    #   * age > hard_stale                                           → ERROR + return False (NO delete)
+    # LOCAL retains its 30-day hard limit + AK_ALLOW_STALE_LIST escape.
+    #
+    # Default 7d covers the outage class Overseer described. Per-prefix
+    # overrides for prefixes that legitimately have longer publish
+    # cadences (PPF quarterly, Stock list rarely churns). Configurable
+    # via env override AK_PROD_HARD_STALE_DAYS=<int> for ops in-flight
+    # tuning without a code change.
+    _PROD_HARD_STALE_DEFAULT_DAYS = 7
+    _PROD_HARD_STALE_OVERRIDES: dict = {
+        # PPF rate changes quarterly at most; a 90-day hard-limit covers
+        # an entire quarterly cycle drought without evicting the file.
+        PPFRatePrefix: timedelta(days=120),
+        # NB: EPFRatePrefix is intentionally NOT listed here. EPF gets
+        # an unconditional early-return True at the top of
+        # checkJsonInDirectory (`if filename_prefix == EPFRatePrefix:
+        # return True`) — annual FY-scoped publish cadence makes strict
+        # staleness math false-alarm during the 6-11 month gaps between
+        # FY-end publishes. Adding an entry here would be dead config
+        # (never reached) and — per ak-znk v4 mayor catch — a dead
+        # bound reads as "covered" when it actually enforces nothing.
+        # Keep the exemption honest.
+        # Stock lists rarely change; the 20d freshness threshold + 60d
+        # hard-limit is conservative but avoids evicting during a
+        # multi-week Kite outage.
+        StockListPrefix: timedelta(days=60),
+        StockOldDetails: timedelta(days=60),
+    }
+
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = super().__new__(cls)
@@ -344,6 +386,45 @@ class JSONDownloadService:
             self.logger.error(f"Error while getting timestamp {ex}")
             return None
 
+    def _prod_hard_stale_for(self, filename_prefix):
+        """ak-znk Fix-A1: resolve the PROD hard-stale timedelta for a
+        given prefix.
+
+        Resolution order:
+          1. `AK_PROD_HARD_STALE_DAYS` env override (int days) — ops
+             in-flight tuning without a code change. Applies uniformly
+             to all prefixes.
+          2. `_PROD_HARD_STALE_OVERRIDES[prefix]` — per-prefix override
+             for prefixes with legitimately longer publish cadences
+             (PPF quarterly, Stock list rarely churns).
+          3. `_PROD_HARD_STALE_DEFAULT_DAYS` — fleet default (7 days).
+
+        Note: env override takes precedence over per-prefix because ops
+        needs the escape hatch during an active incident (e.g., "bump
+        all hard-limits to 30 while we fix the fetcher").
+
+        ak-znk v2 Fix-3 (reviewer clarification):
+        `AK_PROD_HARD_STALE_DAYS` uniformly REPLACES the per-prefix
+        override, it does NOT `max()` them. An in-incident value LOWER
+        than a per-prefix default TIGHTENS that type down (e.g. setting
+        =3 during an incident would tighten PPF's 120d default to 3d).
+        Intended shape is "bump up during outage recovery"; not for
+        per-type tuning. Per-type tuning requires editing
+        `_PROD_HARD_STALE_OVERRIDES` and redeploying.
+        """
+        env_override = os.getenv('AK_PROD_HARD_STALE_DAYS')
+        if env_override:
+            try:
+                return timedelta(days=int(env_override))
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    f"AK_PROD_HARD_STALE_DAYS not a valid int: "
+                    f"{env_override!r} — falling back to per-prefix defaults"
+                )
+        if filename_prefix in self._PROD_HARD_STALE_OVERRIDES:
+            return self._PROD_HARD_STALE_OVERRIDES[filename_prefix]
+        return timedelta(days=self._PROD_HARD_STALE_DEFAULT_DAYS)
+
     def checkJsonInDirectory(self, type, filename_prefix):
         """
                 Check if a file with the same prefix exists and is less than 6 hours old.
@@ -426,7 +507,38 @@ class JSONDownloadService:
                             f"hard limit)"
                         )
                         return True
-                    self.deleteFile(most_recent_file_path)
+                    # ak-znk Fix-A1: PROD stale handling.
+                    # Prior behavior: deleteFile + return False.
+                    # That defeats ak-2r8's preserve-last-good by
+                    # nuking the file mid-outage when a CONSUMER
+                    # (dashboard) reads it. New behavior:
+                    #   * stale but within hard-limit → WARN + True
+                    #     (serve stale; dashboard shows last-known
+                    #     rate rather than "no data")
+                    #   * beyond hard-limit → ERROR + False, do NOT
+                    #     delete (file preserved for forensics; disk
+                    #     retention capped by safe_replace_file's
+                    #     _sweep_historical when a fresh cycle lands)
+                    # Per-prefix hard-limits live in
+                    # `_PROD_HARD_STALE_OVERRIDES`; default
+                    # `_PROD_HARD_STALE_DEFAULT_DAYS` (7). Env
+                    # override `AK_PROD_HARD_STALE_DAYS` bumps the
+                    # default in-flight without a code change.
+                    hard_stale = self._prod_hard_stale_for(filename_prefix)
+                    if time_diff <= hard_stale:
+                        self.logger.warning(
+                            f"Stale file (age: {time_diff}): "
+                            f"{most_recent_file_path} — within PROD "
+                            f"hard-limit ({hard_stale}), serving "
+                            f"stale (ak-znk preserve-last-good)"
+                        )
+                        return True
+                    self.logger.error(
+                        f"Stale file (age: {time_diff}) exceeds PROD "
+                        f"hard-limit ({hard_stale}): "
+                        f"{most_recent_file_path} — returning False "
+                        f"(NOT deleted; file preserved for forensics)"
+                    )
                     return False
             return False
         except Exception as e:
