@@ -27,6 +27,7 @@ from controllers.customerEmailEP import CustomerEmailController
 from controllers.fileStorageEP import FileStorageController
 from controllers.jobEmailEP import JobEmailController
 from controllers.portfolioVisitorEP import PortfolioVisitorController
+from controllers.wealthDigestEP import WealthDigestController  # ak-5vg
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -44,6 +45,7 @@ from services.fileStorageService import FileStorageService
 from services.jobEmailService import JobEmailService
 from services.agentService import AgentService
 from services.agentConversationService import AgentConversationService  # ak-bq5
+from services.wealthDigestService import WealthDigestService  # ak-5vg
 from services.cronAgent import CronAgent
 from services.portfolioVisitorService import PortfolioVisitorService
 from services.mailProcessorService import MailProcessorService
@@ -218,6 +220,11 @@ class Akkountant(Flask):
         self.agentConversationsEP = AgentConversationsController(  # ak-bq5
             self.agentConversationService,
         )
+        # ak-5vg: read-side WealthDigest endpoints for the dedicated
+        # page (ak-hqm frontend companion). Wires to the same
+        # AgentConversation store the WealthDigestTask writes to.
+        self.wealthDigestService = WealthDigestService()
+        self.wealthDigestEP = WealthDigestController(self.wealthDigestService)
         self.portfolioVisitorService = PortfolioVisitorService()
         self.portfolioVisitorEP = PortfolioVisitorController(self.portfolioVisitorService)
 
@@ -483,6 +490,19 @@ class Akkountant(Flask):
                 self.agentConversationsEP.delete),
         ]
 
+        # ak-5vg: WealthDigest page endpoints. Read-side only —
+        # WealthDigestTask (services/tasks/WealthDigestTask.py) owns
+        # the write path unchanged. Auth via before_request middleware
+        # (g.firebase_id).
+        wealthDigestRoutes = [
+            ('/wealth-digest/latest', 'GET',
+                self.wealthDigestEP.latest),
+            ('/wealth-digest', 'GET',
+                self.wealthDigestEP.by_date),
+            ('/wealth-digest/mark-read', 'POST',
+                self.wealthDigestEP.mark_read),
+        ]
+
         # Register all routes
         all_routes = [
             *dashboardRoutes,
@@ -496,6 +516,7 @@ class Akkountant(Flask):
             *jobEmailRoutes,
             *portfolioRoutes,
             *agentRoutes,
+            *wealthDigestRoutes,
             *fileStorageRoutes,
         ]
 

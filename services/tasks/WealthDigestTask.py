@@ -276,11 +276,23 @@ class WealthDigestTask(BaseTask):
         Any DB error → returns False (fail-closed so we don't run a
         digest against an uncertain user state). Late-imports User to
         keep WealthDigestTask import-cheap.
+
+        ak-5vg v2: query narrowed to `User.userID` column only (not
+        `User`), so this SELECT never widens to include future columns
+        added to the User model. Prior shape (`query(User).filter(...)`)
+        coupled this write-path check to the full User model schema —
+        adding wealth_digest_last_read_at (ak-5vg) would have made the
+        SELECT include the new column, fail pre-ALTER-TABLE, and halt
+        new-digest generation until infra ran the migration. Narrow-
+        column query eliminates that coupling entirely; only USERS
+        table existence + the userID primary-key column are required.
+        Pattern to reuse for any future User-model additions that
+        affect write-path lookups.
         """
         try:
             from models.users import User
             row = (
-                self.investmentService.db.session.query(User)
+                self.investmentService.db.session.query(User.userID)
                 .filter(User.userID == user_id)
                 .first()
             )
