@@ -31,6 +31,7 @@ Preserves WealthDigestTask behavior: this bead is read-side only.
 
 from __future__ import annotations  # PEP 604 (`dict | None`) on 3.9
 
+import json
 import os
 from datetime import datetime, date
 
@@ -85,6 +86,69 @@ _AGENT_TYPE = "investment"
 # frontend can key off it without string-matching the message.
 ENV_UNSET_ERROR_CODE = "WEALTH_DIGEST_USER_ID_UNSET"
 
+# ak-6p4 Wave 3: the four fields the FE renders as distinct components.
+# `parse_digest_content` guarantees all four are present in the return
+# dict — the endpoint response can wire straight through without
+# per-field null-checking.
+_STRUCTURED_KEYS = ("text", "actions", "watch_items", "news")
+
+
+def parse_digest_content(raw: str | None) -> dict:
+    """Parse an AgentMessage.content into the structured Wave 3 shape.
+
+    Wave 3 digests are persisted as JSON strings containing
+    `{text, actions, watch_items, news}`. Pre-Wave-3 (legacy) digests
+    are pure markdown starting with the `[Personal use…]` header.
+    Both must render in the new page layout — legacy digests go
+    text-only (empty structured arrays), Wave 3 digests populate the
+    typed sections.
+
+    Recognition + fallback:
+      * Empty / None → `{text:"", actions:[], watch_items:[], news:[]}`
+      * Valid JSON with `text` key AND at least one of the array keys
+        → treat as structured; missing arrays fill with []; ignore
+        extras.
+      * Anything else (plain markdown, malformed JSON, JSON that isn't
+        the digest shape) → legacy wrap: full raw string goes into
+        `text`, arrays empty.
+
+    Returns dict guaranteed to have all four `_STRUCTURED_KEYS` present
+    with type-correct values (`text` is str, arrays are lists).
+    """
+    if not raw:
+        return {
+            "text": "",
+            "actions": [],
+            "watch_items": [],
+            "news": [],
+        }
+    stripped = raw.lstrip()
+    # Only try JSON parse when the payload looks like a JSON object —
+    # avoids false-positive on a legacy digest that happens to contain
+    # a JSON-shaped substring somewhere in its markdown body.
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict) and "text" in parsed and any(
+            k in parsed for k in ("actions", "watch_items", "news")
+        ):
+            # Structured shape recognized. Normalize types + fill
+            # missing arrays.
+            out = {"text": str(parsed.get("text") or "")}
+            for k in ("actions", "watch_items", "news"):
+                v = parsed.get(k)
+                out[k] = v if isinstance(v, list) else []
+            return out
+    # Legacy digest — wrap raw as text, arrays empty.
+    return {
+        "text": raw,
+        "actions": [],
+        "watch_items": [],
+        "news": [],
+    }
+
 
 class WealthDigestNotConfiguredError(Exception):
     """Raised when the WEALTH_DIGEST_USER_ID env var is unset. Caller
@@ -118,19 +182,38 @@ class WealthDigestService(BaseService):
     def get_latest(self, user_id: str) -> dict | None:
         """Return the latest WealthDigest for user_id or None.
 
-        Shape (matches frontend Wave 1 proposal + ak-5vg v3 last_error wrap):
+        Shape (Wave 3 structured — matches ak-753 FE component types):
           {
             "date": "YYYY-MM-DD",             # date of the digest message
             "generated_at": "ISO-8601",       # message ts
-            "text": "<markdown body>",        # assistant message content
+            "text": "<narrative markdown>",   # opening + patterns + close
+            "actions": [                      # typed action items
+              {"title", "detail",
+               "category" ∈ {cash,equity,debt,gold,other},
+               "priority" ∈ {high,medium,low}},
+              ...
+            ],
+            "watch_items": [                  # typed watch items
+              {"title", "detail",
+               "severity" ∈ {critical,warning,info}},
+              ...
+            ],
+            "news": [                         # typed market-context refs
+              {"headline", "detail",
+               "related_holdings": [...]},
+              ...
+            ],
             "last_error": {                   # from Jobs table if latest
               "at": "ISO-8601",               #   WealthDigest job Failed;
-              "message": "<Job.result>"       #   null otherwise. `at` is
-            } | null,                         #   Job.due_date (proxy for
-                                              #   failure time — see
-                                              #   _latest_job_error).
+              "message": "<Job.result>"       #   null otherwise.
+            } | null,
             "read_at": "ISO-8601" | None,     # user's mark-read timestamp
           }
+        Backwards compat: legacy (pre-Wave-3) digests were pure
+        markdown. `parse_digest_content` wraps those as
+        `{text: raw_markdown, actions:[], watch_items:[], news:[]}`
+        — FE renders text-only in the new component layout.
+
         Returns None if no digest has ever been generated for user_id
         (missing conversation OR conversation has zero assistant
         messages) — caller maps to HTTP 404.
@@ -381,14 +464,28 @@ class WealthDigestService(BaseService):
     def _shape_response(self, user_id: str, msg: AgentMessage,
                         source_label: str) -> dict:
         """Build the response dict from an AgentMessage row + look up
-        the user's read_at + latest job error."""
+        the user's read_at + latest job error.
+
+        ak-6p4 Wave 3: `msg.content` now carries a JSON string with the
+        structured shape `{text, actions, watch_items, news}`. Legacy
+        (pre-Wave-3) digests are pure markdown starting with the
+        `[Personal use…]` header. `parse_digest_content` recognizes
+        both and normalizes to the same output dict — legacy digests
+        fill `text` with the raw markdown and emit empty arrays for
+        the typed sections so the FE renders them as text-only in
+        the new component-based layout.
+        """
         ts = msg.ts
         read_at = self._get_user_read_at(user_id)
         last_error = self._latest_job_error(user_id)
+        parsed = parse_digest_content(msg.content)
         return {
             "date": ts.date().isoformat() if ts else None,
             "generated_at": ts.isoformat() + "Z" if ts else None,
-            "text": msg.content,
+            "text": parsed["text"],
+            "actions": parsed["actions"],
+            "watch_items": parsed["watch_items"],
+            "news": parsed["news"],
             "last_error": last_error,
             "read_at": read_at.isoformat() + "Z" if read_at else None,
         }

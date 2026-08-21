@@ -95,6 +95,18 @@ def _make_prog_error(msg: str) -> "ProgrammingError":
     return ProgrammingError("SELECT 1", {}, Exception(msg))
 
 
+class TestImportChannel(unittest.TestCase):
+    """ak-6p4 v2 (reviewer MINOR-1 backport): un-decorated guard that
+    fails LOUDLY if both real-import AND AST-lift channels break.
+    Without this, `@unittest.skipUnless(_IMPORT_OK, ...)` on the
+    behavioral class would SKIP every test and unittest would still
+    report OK — a regression could ship green. Recurring AST-lift
+    pattern; codify the guard now."""
+
+    def test_import_channel_is_live(self):
+        self.assertTrue(_IMPORT_OK, _SKIP_REASON)
+
+
 @unittest.skipUnless(_IMPORT_OK, _SKIP_REASON)
 class TestIsMigrationGap(unittest.TestCase):
     """5 cases pinning the pre-migration vs genuine-DB-error boundary."""
@@ -136,6 +148,21 @@ class TestIsMigrationGap(unittest.TestCase):
         instead of OperationalError — both must match."""
         exc = _make_prog_error("no such column: x")
         self.assertTrue(_is_migration_gap(exc))
+
+    def test_non_db_exception_with_matching_text_is_not_migration_gap(self):
+        """ak-6p4 v2 (reviewer isinstance-guard backport from ak-5vg
+        v3 landing pass): a plain Exception whose message HAPPENS to
+        contain 'unknown column' must NOT return True. The isinstance
+        check gates on the SQLAlchemy exception class hierarchy
+        (OperationalError / ProgrammingError only) so an application-
+        code raise like `raise ValueError('Unknown column x — user
+        input mismatch')` doesn't silently degrade to pre-migration
+        state. Pins the isinstance guard against future refactor."""
+        exc = Exception("Unknown column 'x' in 'field list'")
+        self.assertFalse(_is_migration_gap(exc))
+        # Also pin the SQLite variant on a plain Exception.
+        exc_sqlite = Exception("no such column: x")
+        self.assertFalse(_is_migration_gap(exc_sqlite))
 
 
 if __name__ == "__main__":  # pragma: no cover

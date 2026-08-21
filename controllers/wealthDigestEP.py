@@ -1,9 +1,21 @@
-"""ak-5vg: REST endpoints for the WealthDigest dedicated page (ak-hqm).
+"""ak-5vg + ak-6p4: REST endpoints for the WealthDigest dedicated page.
 
 Routes registered in app.py:
   GET  /wealth-digest/latest             → latest digest (or 404)
   GET  /wealth-digest?date=YYYY-MM-DD    → digest on that date (or 404)
   POST /wealth-digest/mark-read          → stamp read_at, echo
+
+Response shape (Wave 3):
+  {
+    "date", "generated_at",              # from the digest message
+    "text",                              # narrative markdown body
+    "actions", "watch_items", "news",    # typed component arrays
+    "last_error", "read_at",             # ak-5vg fields
+  }
+
+Backwards compat: pre-Wave-3 digests were pure markdown; endpoint
+wraps those as `text`+empty-arrays so the FE renders text-only in the
+new component-based layout.
 
 Auth: standard g.firebase_id from the before_request middleware. Every
 endpoint is user-scoped — the digest for a given firebase_id is derived
