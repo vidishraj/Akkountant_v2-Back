@@ -66,6 +66,17 @@ Read built-in available in this chat. Every field you cite from an
 attachment MUST appear verbatim in what read_attachment returned —
 never guess, never fill gaps from context.
 
+## Producing files the user should download
+
+Whenever you write a file to disk that the user should be able to open
+(CSV export, generated PDF, JSON dump, chart image, etc), you MUST call
+`attach_file_to_chat(local_path=<abs path>, display_name=<friendly name>)`.
+The chat UI will render the returned `file_attachment` content-block as
+an inline download card. Do NOT reply with a bare filesystem path like
+`/tmp/portfolio.csv` — the browser cannot reach server-local paths, so
+that message is a UX dead-end for the user. After the tool succeeds
+you do not need to repeat the URL in prose; the card carries it.
+
 ## Rules
 - Always fetch data via tools before answering. Never fabricate numbers.
 - ServiceType enum values: Stocks, Mutual_Funds, NPS (MSN) | EPF, PF, Gold (EPG)
@@ -237,6 +248,17 @@ You manage invoices, customers, and earnings analytics for a freelance consultan
 
 - `get_earnings_by_date_range(start_date, end_date)` — Earnings within a date range (YYYY-MM-DD format).
 
+## Producing files the user should download
+
+Whenever you write a file to disk that the user should be able to open
+(invoice CSV export, PDF render, JSON dump of receipts, etc), you MUST
+call `attach_file_to_chat(local_path=<abs path>, display_name=<friendly name>)`.
+The chat UI will render the returned `file_attachment` content-block as
+an inline download card. Do NOT reply with a bare filesystem path like
+`/tmp/july_2026_invoices.csv` — the browser cannot reach server-local
+paths, so that message is a UX dead-end for the user. After the tool
+succeeds you do not need to repeat the URL in prose; the card carries it.
+
 ## Rules
 - Always fetch data via tools before answering. Never fabricate invoice numbers, amounts, or customer data.
 - Invoice statuses: draft, sent, paid, overdue, cancelled.
@@ -252,6 +274,51 @@ You manage invoices, customers, and earnings analytics for a freelance consultan
 - Format all amounts with appropriate currency symbols and 2 decimal places."""
 
 # ─── Tool Definitions ─────────────────────────────────────────────────────────
+
+# ak-9dz: `attach_file_to_chat` is shared across agents that can produce
+# downloadable files during a chat turn (Freelance + Investment today).
+# Defined once here + spliced into both tool lists so the description +
+# input_schema stay in-sync.
+ATTACH_FILE_TO_CHAT_TOOL = {
+    "name": "attach_file_to_chat",
+    "description": (
+        "Attach a file you just wrote to disk so the user can download "
+        "it from the chat. Use this whenever you produce a file the user "
+        "should be able to open (CSV export, generated PDF, JSON dump, "
+        "chart image, etc). Do NOT reply with a bare filesystem path — "
+        "the browser cannot access server-local paths like /tmp/... . "
+        "This tool copies the file into user-scoped served storage and "
+        "returns a download URL the chat UI will render as a download "
+        "card. On success the tool result contains a `file_attachment` "
+        "content-block with url/name/size_bytes/mime_type/uuid — the "
+        "user does not need to be told the URL again in prose."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "local_path": {
+                "type": "string",
+                "description": (
+                    "Absolute path on the server where the file "
+                    "currently exists (e.g. /tmp/july_2026_invoices.csv). "
+                    "Must be an existing readable regular file."
+                ),
+            },
+            "display_name": {
+                "type": "string",
+                "description": (
+                    "Filename shown in the chat download card + used as "
+                    "the browser's save-as name (Content-Disposition "
+                    "filename). Should be human-friendly (e.g. "
+                    "'July 2026 Invoices.csv') — path characters and "
+                    "shell metacharacters are stripped for safety."
+                ),
+            },
+        },
+        "required": ["local_path", "display_name"],
+    },
+}
+
 
 INVESTMENT_TOOLS = [
     {
@@ -536,7 +603,10 @@ INVESTMENT_TOOLS = [
             "properties": {},
             "required": []
         }
-    }
+    },
+    # ak-9dz: file-download plumbing for CSV/PDF exports the investment
+    # agent may produce (e.g. portfolio snapshot dumps). Shared def.
+    ATTACH_FILE_TO_CHAT_TOOL,
 ]
 
 TRANSACTION_TOOLS = [
@@ -914,7 +984,10 @@ FREELANCE_TOOLS = [
             },
             "required": ["start_date", "end_date"]
         }
-    }
+    },
+    # ak-9dz: file-download plumbing for invoice PDFs / earnings CSVs
+    # the freelance agent commonly produces. Shared def with INVESTMENT.
+    ATTACH_FILE_TO_CHAT_TOOL,
 ]
 
 # ─── Lookup helpers ────────────────────────────────────────────────────────────

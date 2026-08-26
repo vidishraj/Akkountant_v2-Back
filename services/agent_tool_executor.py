@@ -179,16 +179,30 @@ def _make_serializable(obj):
 def execute_tool(agent_type, tool_name, tool_input, user_id,
                  investment_service=None, transaction_service=None,
                  invoice_service=None, customer_service=None,
-                 dashboard_service=None, mail_processor=None):
+                 dashboard_service=None, mail_processor=None,
+                 file_attachment_service=None, conversation_id=None):
     """
     Execute a tool call by routing to the appropriate existing service method.
     Returns a JSON-serializable dict with the tool result.
+
+    ak-9dz: `attach_file_to_chat` is agent-type-agnostic (registered in
+    both INVESTMENT_TOOLS + FREELANCE_TOOLS). It's handled BEFORE the
+    per-agent switch so both agents share the same executor path.
     """
     # Ensure flask g context has firebase_id for services that read it
     g.firebase_id = user_id
 
     try:
-        if agent_type == "investment":
+        # ak-9dz: shared MCP tool for agent-produced file downloads.
+        # Dispatched before the per-agent switch so any agent whose
+        # tool list contains this def routes through the same handler.
+        if tool_name == "attach_file_to_chat":
+            result = _execute_attach_file_to_chat(
+                tool_input, user_id,
+                file_attachment_service=file_attachment_service,
+                conversation_id=conversation_id,
+            )
+        elif agent_type == "investment":
             result = _execute_investment_tool(tool_name, tool_input, user_id, investment_service)
         elif agent_type == "transaction":
             result = _execute_transaction_tool(tool_name, tool_input, user_id, transaction_service, mail_processor)
@@ -480,3 +494,62 @@ def _execute_freelance_tool(tool_name, tool_input, user_id,
 
     else:
         return {"error": f"Unknown freelance tool: {tool_name}"}
+
+
+# ─── Shared handlers (agent-type-agnostic) ──────────────────────────────
+
+def _execute_attach_file_to_chat(tool_input, user_id, *,
+                                 file_attachment_service, conversation_id):
+    """ak-9dz: dispatch for the shared `attach_file_to_chat` MCP tool.
+
+    Registered in both INVESTMENT_TOOLS and FREELANCE_TOOLS (see
+    `services/agent_tools.py`). Routed BEFORE the per-agent switch in
+    `execute_tool` so both agents share the same handler.
+
+    Input contract (per tool schema):
+      * local_path: absolute filesystem path where the agent wrote the file
+      * display_name: human-friendly filename for the chat card + download
+
+    Returns the content-block dict emitted by AgentFileAttachmentService.attach
+    (`{type: "file_attachment", url, name, size_bytes, mime_type, uuid}`).
+    The SDK's MCP bridge serializes this into a tool result the FE
+    detects and renders as a download card.
+
+    Errors surface via ToolValidationError (missing args / sanitizer
+    rejection) so the LLM sees is_error=True and can retry; genuine
+    infra failures (FileNotFound / OSError / DB error) bubble as raw
+    Exception → caller wraps as {"error": str(e)}.
+    """
+    if file_attachment_service is None:
+        # Should be impossible in production (agentService wires it),
+        # but guard so the tool doesn't silently no-op if the wiring
+        # ever regresses.
+        raise RuntimeError(
+            "attach_file_to_chat: file_attachment_service not wired"
+        )
+    local_path = tool_input.get("local_path")
+    display_name = tool_input.get("display_name")
+    if not local_path or not isinstance(local_path, str):
+        raise ToolValidationError(
+            "attach_file_to_chat: `local_path` is required (absolute "
+            "filesystem path where the file exists)."
+        )
+    if not display_name or not isinstance(display_name, str):
+        raise ToolValidationError(
+            "attach_file_to_chat: `display_name` is required (filename "
+            "to show in the chat card)."
+        )
+    try:
+        return file_attachment_service.attach(
+            user_id=user_id,
+            local_path=local_path,
+            display_name=display_name,
+            conversation_id=conversation_id,
+            message_id=None,  # v1: assistant msg row is persisted post-turn
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        # Caller-visible input errors (bad display_name / missing source
+        # file) are ToolValidationError so the LLM can retry with
+        # corrected args. Distinguished from raw infra faults which
+        # bubble as generic Exception.
+        raise ToolValidationError(f"attach_file_to_chat: {exc}") from exc

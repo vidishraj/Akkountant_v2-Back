@@ -28,6 +28,7 @@ from controllers.fileStorageEP import FileStorageController
 from controllers.jobEmailEP import JobEmailController
 from controllers.portfolioVisitorEP import PortfolioVisitorController
 from controllers.wealthDigestEP import WealthDigestController  # ak-5vg
+from controllers.userFilesEP import UserFilesController  # ak-9dz
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -46,6 +47,7 @@ from services.jobEmailService import JobEmailService
 from services.agentService import AgentService
 from services.agentConversationService import AgentConversationService  # ak-bq5
 from services.wealthDigestService import WealthDigestService  # ak-5vg
+from services.agentFileAttachmentService import AgentFileAttachmentService  # ak-9dz
 from services.cronAgent import CronAgent
 from services.portfolioVisitorService import PortfolioVisitorService
 from services.mailProcessorService import MailProcessorService
@@ -206,6 +208,12 @@ class Akkountant(Flask):
         # conversation service BEFORE wiring it into AgentService so
         # set_services receives a ready instance.
         self.agentConversationService = AgentConversationService()
+        # ak-9dz: file-download plumbing for agent-produced files (CSV
+        # exports, PDFs, etc). Backs the shared `attach_file_to_chat`
+        # MCP tool + GET /api/user-files/<uuid> endpoint. Instantiate
+        # BEFORE AgentService.set_services so the wire-up sees a ready
+        # instance.
+        self.agentFileAttachmentService = AgentFileAttachmentService()
         self.agentService = AgentService()
         self.agentService.set_services(
             investment_service=self.investmentService,
@@ -215,10 +223,14 @@ class Akkountant(Flask):
             dashboard_service=self.dashboardService,
             mail_processor=self.mailProcessor,
             conversation_service=self.agentConversationService,  # ak-bq5
+            file_attachment_service=self.agentFileAttachmentService,  # ak-9dz
         )
         self.agentEP = AgentController(self.agentService)
         self.agentConversationsEP = AgentConversationsController(  # ak-bq5
             self.agentConversationService,
+        )
+        self.userFilesEP = UserFilesController(  # ak-9dz
+            self.agentFileAttachmentService,
         )
         # ak-5vg: read-side WealthDigest endpoints for the dedicated
         # page (ak-hqm frontend companion). Wires to the same
@@ -503,6 +515,16 @@ class Akkountant(Flask):
                 self.wealthDigestEP.mark_read),
         ]
 
+        # ak-9dz: user-scoped downloads for agent-produced files. Backs
+        # the shared `attach_file_to_chat` MCP tool (files written by
+        # Freelance / Investment agents mid-turn become downloadable
+        # here). Auth via before_request middleware (g.firebase_id);
+        # cross-user isolation enforced inside the controller/service.
+        userFilesRoutes = [
+            ('/api/user-files/<uuid>', 'GET',
+                self.userFilesEP.download),
+        ]
+
         # Register all routes
         all_routes = [
             *dashboardRoutes,
@@ -517,6 +539,7 @@ class Akkountant(Flask):
             *portfolioRoutes,
             *agentRoutes,
             *wealthDigestRoutes,
+            *userFilesRoutes,
             *fileStorageRoutes,
         ]
 

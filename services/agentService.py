@@ -429,11 +429,17 @@ class AgentService(BaseService):
         # loop runs cleanly even without it (useful in offline tests
         # that mock the heavy app boot).
         self.conversation_service = None
+        # ak-9dz: injected by app.py — backs the shared
+        # `attach_file_to_chat` MCP tool. None means the tool executor
+        # raises so the LLM sees a clean failure rather than silent
+        # no-op (see agent_tool_executor._execute_attach_file_to_chat).
+        self.file_attachment_service = None
 
     def set_services(self, investment_service=None, transaction_service=None,
                      invoice_service=None, customer_service=None,
                      dashboard_service=None, mail_processor=None,
-                     conversation_service=None):
+                     conversation_service=None,
+                     file_attachment_service=None):
         """Called from app.py to inject existing service instances."""
         self.investment_service = investment_service
         self.transaction_service = transaction_service
@@ -444,6 +450,10 @@ class AgentService(BaseService):
         # ak-bq5: optional — only wired when chat persistence is active.
         if conversation_service is not None:
             self.conversation_service = conversation_service
+        # ak-9dz: optional — only wired when file-download plumbing is
+        # active. Absent → attach_file_to_chat raises at call time.
+        if file_attachment_service is not None:
+            self.file_attachment_service = file_attachment_service
 
     def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None,
                     attachments=None, conversation_id=None):
@@ -650,10 +660,15 @@ class AgentService(BaseService):
 
             config = get_agent_config(agent_type)
 
-            # Build MCP tools from tool definitions
+            # Build MCP tools from tool definitions.
+            # ak-9dz: thread `active_conversation_id` into the handler
+            # closures so the `attach_file_to_chat` tool can populate
+            # agent_file_attachments.conversation_id at insert time
+            # (nullable — tool works when conversation_id is None too).
             sdk_tools = self._build_sdk_tools(
                 agent_type, config["tools"], user_id,
                 tool_events, mutations, confirmed_tools,
+                conversation_id=active_conversation_id,
             )
 
             # ak-1x4 pass 2: when this turn carries attachments, register
@@ -988,8 +1003,16 @@ class AgentService(BaseService):
         return ""
 
     def _build_sdk_tools(self, agent_type, tool_defs, user_id,
-                         tool_events, mutations, confirmed_tools):
-        """Build SdkMcpTool objects from tool definitions with handler closures."""
+                         tool_events, mutations, confirmed_tools,
+                         conversation_id=None):
+        """Build SdkMcpTool objects from tool definitions with handler closures.
+
+        ak-9dz: `conversation_id` is threaded into the closure so the
+        shared `attach_file_to_chat` tool can stamp
+        agent_file_attachments.conversation_id at insert time. Nullable
+        end-to-end; the tool still works when no conversation is
+        active (bootstrap turn before conversation_id is picked / created).
+        """
         sdk_tools = []
 
         for tool_def in tool_defs:
@@ -1020,6 +1043,10 @@ class AgentService(BaseService):
                 tool_events.append(("tool_exec", {"tool": _tn}))
 
                 # Execute via existing services
+                # ak-9dz: file_attachment_service + conversation_id are
+                # threaded through so the shared attach_file_to_chat
+                # tool can insert into agent_file_attachments with the
+                # active-conversation link populated.
                 result = execute_tool(
                     _at, _tn, args, user_id,
                     investment_service=self.investment_service,
@@ -1028,6 +1055,8 @@ class AgentService(BaseService):
                     customer_service=self.customer_service,
                     dashboard_service=self.dashboard_service,
                     mail_processor=self.mail_processor,
+                    file_attachment_service=self.file_attachment_service,
+                    conversation_id=conversation_id,
                 )
 
                 # ak-e7g: distinguish handler-layer validation failures

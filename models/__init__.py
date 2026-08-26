@@ -36,3 +36,7 @@ from .portfolioVisitors import PortfolioVisitor
 # in app.py so the schema is materialized.
 from .AgentConversation import AgentConversation
 from .AgentMessage import AgentMessage, AGENT_MESSAGE_ROLES
+# ak-9dz: agent-produced file downloads. Standalone table (no ALTER
+# on existing). Import order matters: AgentConversation + AgentMessage
+# must precede this so FK targets exist at create_all() time.
+from .agentFileAttachments import AgentFileAttachment
