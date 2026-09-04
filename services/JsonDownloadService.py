@@ -61,7 +61,16 @@ class JSONDownloadService:
         # Keep the exemption honest.
         # Stock lists rarely change; the 20d freshness threshold + 60d
         # hard-limit is conservative but avoids evicting during a
-        # multi-week Kite outage.
+        # prolonged gap in Kite instrument refreshes.
+        # NOTE (ak-w4p): the "multi-week Kite outage" this bound was
+        # originally written for was most likely NOT an outage. Kite access
+        # tokens expire at 6 AM IST daily and cannot be renewed
+        # programmatically, but the token store recorded expiry=0 ("never
+        # expires"), so SetKiteStockDetails silently failed on a dead token
+        # and this staleness tolerance masked it. The token now carries a
+        # real expiry and the job reports "reconnect required" instead of
+        # failing opaquely -- keep this bound, but a stale stock list now
+        # means someone needs to reconnect Kite.
         StockListPrefix: timedelta(days=60),
         StockOldDetails: timedelta(days=60),
     }

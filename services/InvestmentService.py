@@ -228,8 +228,13 @@ class InvestmentService(BaseService):
 
         # Fetch all stock rates once outside the loop to avoid N*N API calls
         stockRates = None
+        kiteHoldings = {}
         if securityType == MSNENUM.Stocks.value:
             stockRates = self.StockService.calculateStockRates(activeSecurities)
+            # Settlement / day-change detail from Kite. Best-effort: an expired
+            # Kite session leaves the index empty and every row simply renders
+            # without the optional fields.
+            kiteHoldings, _kiteStatus = self.StockService.kite_holdings_index(userId)
 
         for security in activeSecurities:
             if securityType == MSNENUM.Stocks.value:
@@ -238,6 +243,15 @@ class InvestmentService(BaseService):
                     'symbol': symbol, 'lastPrice': 0, 'change': 0,
                     'pChange': 0, 'previousClose': 0, 'error': 'NOT_FOUND'
                 })
+                # Kite settlement/day-change fields, snake_case at row top
+                # level. `buyQuant` deliberately stays settled-only and is not
+                # adjusted by t1_quantity -- consumers combine the two for
+                # display and disclose the split.
+                kiteHolding = kiteHoldings.get(symbol)
+                if kiteHolding:
+                    for field in self.StockService.KITE_ROW_FIELDS:
+                        if field in kiteHolding:
+                            security[field] = kiteHolding[field]
             elif securityType == MSNENUM.NPS.value:
                 try:
                     npsInfo = self.NPSService.findSecurity(security['buyCode'])
@@ -756,6 +770,22 @@ class InvestmentService(BaseService):
     def getKiteLoginUrl(self):
         """Get Kite Connect login URL"""
         return self.StockService.kite_service.get_login_url()
+
+    def getKiteTokenStatus(self, userId):
+        """Kite connection state plus the URL needed to re-authenticate.
+
+        Kite tokens die at 6 AM IST daily and cannot be renewed programmatically,
+        so the UI needs a cheap way to ask "do I need to show Reconnect?" without
+        first failing a data call.
+        """
+        status = self.StockService.kite_service.get_token_status(userId)
+        if status.get("reconnect_required"):
+            try:
+                status["login_url"] = self.StockService.kite_service.get_login_url()
+            except Exception as e:
+                self.logger.error(f"Could not build Kite login URL: {str(e)}")
+                status["login_url"] = None
+        return status
 
     def generateKiteSession(self, userId, request_token):
         """Generate Kite session and store access token for user"""

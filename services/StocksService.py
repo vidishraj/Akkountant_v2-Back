@@ -28,7 +28,7 @@ else:
     import nsepython
 from decimal import Decimal, ROUND_DOWN
 from utils.logger import Logger
-from services.KiteService import KiteService
+from services.KiteService import KiteService, KiteAuthError
 from utils.AIHelper import fetch_via_ai
 
 
@@ -437,30 +437,113 @@ class StocksService(Base_MSN, ABC):
         return False
 
     def fetch_kite_holdings(self, userId):
-        """Fetch holdings from Kite and sync with local database"""
+        """Fetch holdings from Kite and sync with local database.
+
+        Kite's holdings payload already carries settlement, day-change and
+        collateral detail; we used to drop all of it on the floor here. Keeping
+        it costs no extra API call and no extra auth surface.
+
+        Quantity semantics follow Kite's own (see ak-w4p contract with FE):
+          * ``quantity``      -- SETTLED shares only, never includes T+1
+          * ``t1_quantity``   -- bought but not yet in demat (the "why isn't my
+                                 Friday buy showing up until Monday" case)
+        Consumers that want the committed position display ``quantity +
+        t1_quantity`` with the split disclosed. They are deliberately NOT
+        summed here, and T+1 never enters profit/loss maths -- our cost basis
+        is statement-derived and only covers settled shares, so valuing T+1 at
+        market inside P&L would book its entire market value as profit.
+        """
         try:
             holdings = self.kite_service.get_holdings(userId)
             formatted_holdings = []
-            
+
             for holding in holdings:
+                t1_quantity = holding.get('t1_quantity', 0) or 0
+                last_price = holding.get('last_price', 0) or 0
                 formatted_holding = {
                     'symbol': holding.get('tradingsymbol'),
+                    # Settled-only. Do not fold t1_quantity in here.
                     'quantity': holding.get('quantity', 0),
                     'average_price': holding.get('average_price', 0),
-                    'last_price': holding.get('last_price', 0),
+                    'last_price': last_price,
                     'pnl': holding.get('pnl', 0),
                     'product': holding.get('product'),
                     'exchange': holding.get('exchange'),
-                    'isin': holding.get('isin')
+                    'isin': holding.get('isin'),
+
+                    # --- settlement / quantity breakdown ---
+                    't1_quantity': t1_quantity,
+                    'realised_quantity': holding.get('realised_quantity', 0) or 0,
+                    'authorised_quantity': holding.get('authorised_quantity', 0) or 0,
+                    'collateral_quantity': holding.get('collateral_quantity', 0) or 0,
+                    'collateral_type': holding.get('collateral_type'),
+                    # Market value of shares still pending settlement. Surfaced
+                    # as its own figure so the UI can show a "Pending (T+1)"
+                    # stat; excluded from currentValue/profit by design.
+                    'pending_t1_value': float(t1_quantity) * float(last_price),
+
+                    # --- day change (previously recomputed against a stale close) ---
+                    'close_price': holding.get('close_price', 0) or 0,
+                    'day_change': holding.get('day_change', 0) or 0,
+                    'day_change_percentage': holding.get('day_change_percentage', 0) or 0,
+
+                    # --- margin trading facility (zeros when MTF is unused) ---
+                    'mtf_quantity': (holding.get('mtf') or {}).get('quantity', 0) or 0,
+                    'mtf_average_price': (holding.get('mtf') or {}).get('average_price', 0) or 0,
                 }
                 formatted_holdings.append(formatted_holding)
-            
+
             self.logger.info(f"Fetched {len(formatted_holdings)} holdings from Kite for user {userId}")
             return formatted_holdings
-            
+
         except Exception as e:
             self.logger.error(f"Error fetching Kite holdings for user {userId}: {str(e)}")
             raise
+
+    #: Fields copied from a Kite holding onto a securities-list row. Kept
+    #: snake_case and at the row's top level per the ak-w4p wire contract.
+    KITE_ROW_FIELDS = (
+        't1_quantity',
+        'realised_quantity',
+        'authorised_quantity',
+        'collateral_quantity',
+        'close_price',
+        'day_change',
+        'day_change_percentage',
+        'average_price',
+        'last_price',
+        'pending_t1_value',
+        'mtf_quantity',
+    )
+
+    def kite_holdings_index(self, userId):
+        """Kite holdings keyed by trading symbol, for enriching securities rows.
+
+        Returns ``(index, status)``. Enrichment is strictly best-effort: an
+        expired Kite session must NOT take down the securities list, which is
+        otherwise built entirely from our own DB plus the NSE price feed. On
+        any Kite failure we return an empty index and let every row render
+        without the optional fields.
+        """
+        try:
+            holdings = self.fetch_kite_holdings(userId)
+        except KiteAuthError as e:
+            self.logger.warning(
+                f"Skipping Kite enrichment of securities list for {userId}: {str(e)}"
+            )
+            return {}, {"connected": False, "reconnect_required": True}
+        except Exception as e:
+            self.logger.error(
+                f"Skipping Kite enrichment of securities list for {userId}: {str(e)}"
+            )
+            return {}, {"connected": False, "reconnect_required": False}
+
+        index = {}
+        for holding in holdings:
+            symbol = holding.get('symbol')
+            if symbol:
+                index[symbol] = holding
+        return index, {"connected": True, "reconnect_required": False}
 
     def fetch_kite_positions(self, userId):
         """Fetch positions from Kite"""

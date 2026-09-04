@@ -372,6 +372,7 @@ class Akkountant(Flask):
             ('/fetchEmailBody', 'GET', self.investmentEP.fetchEmailBody),
             ('/fetchInvestmentSnapshots', 'GET', self.investmentEP.fetchInvestmentSnapshots),
             ('/kite/login-url', 'GET', self.investmentEP.getKiteLoginUrl),
+            ('/kite/status', 'GET', self.investmentEP.fetchKiteTokenStatus),
             ('/kite/generate-session', 'POST', self.investmentEP.generateKiteSession),
             ('/kite/holdings', 'GET', self.investmentEP.fetchKiteHoldings),
             ('/kite/positions', 'GET', self.investmentEP.fetchKitePositions),

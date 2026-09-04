@@ -6,6 +6,7 @@ from werkzeug.utils import secure_filename
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from services.InvestmentService import InvestmentService
+from services.KiteService import KiteAuthError
 from utils.logger import Logger
 from flask import request, jsonify, g
 
@@ -390,16 +391,38 @@ class InvestmentController:
             self.logger.error(f"Error fetching email body: {str(e)}")
             return jsonify({"error": "Failed to fetch email body"}), 500
 
+    def _kiteReconnectResponse(self, exc):
+        """401 payload telling the UI to walk the Kite login flow again.
+
+        Kite access tokens expire at 6 AM IST every day and there is no
+        programmatic renewal available to us, so this is an expected daily
+        state, not a server fault -- it must not surface as a 500.
+        """
+        self.logger.warning(f"Kite reconnect required: {str(exc)}")
+        payload = {
+            "error": str(exc),
+            "reconnect_required": True,
+            "kite_connected": False,
+        }
+        try:
+            payload["login_url"] = self.InvestmentService.getKiteLoginUrl()
+        except Exception as urlErr:
+            self.logger.error(f"Could not build Kite login URL: {str(urlErr)}")
+            payload["login_url"] = None
+        return jsonify(payload), 401
+
     @Logger.standardLogger
     def fetchKiteHoldings(self):
         """Fetch holdings from Kite Connect API"""
         user_id = g.get('firebase_id')
         if not user_id:
             return jsonify({"error": "User ID not found"}), 400
-        
+
         try:
             holdings = self.InvestmentService.fetchKiteHoldings(user_id)
             return jsonify({"holdings": holdings}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
         except Exception as e:
             self.logger.error(f"Error fetching Kite holdings: {str(e)}")
             return jsonify({"error": "Failed to fetch holdings"}), 500
@@ -410,10 +433,12 @@ class InvestmentController:
         user_id = g.get('firebase_id')
         if not user_id:
             return jsonify({"error": "User ID not found"}), 400
-        
+
         try:
             positions = self.InvestmentService.fetchKitePositions(user_id)
             return jsonify({"positions": positions}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
         except Exception as e:
             self.logger.error(f"Error fetching Kite positions: {str(e)}")
             return jsonify({"error": "Failed to fetch positions"}), 500
@@ -424,16 +449,31 @@ class InvestmentController:
         user_id = g.get('firebase_id')
         if not user_id:
             return jsonify({"error": "User ID not found"}), 400
-        
+
         try:
             result = self.InvestmentService.syncKiteHoldings(user_id)
             return jsonify({
-                "message": "Holdings synced successfully", 
+                "message": "Holdings synced successfully",
                 "result": result
             }), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
         except Exception as e:
             self.logger.error(f"Error syncing Kite holdings: {str(e)}")
             return jsonify({"error": "Failed to sync holdings"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteTokenStatus(self):
+        """Report whether the Kite session is live, and how to reconnect."""
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            return jsonify(self.InvestmentService.getKiteTokenStatus(user_id)), 200
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite token status: {str(e)}")
+            return jsonify({"error": "Failed to fetch Kite status"}), 500
 
     @Logger.standardLogger
     def getKiteLoginUrl(self):

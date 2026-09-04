@@ -31,7 +31,20 @@ class SetKiteStockDetails(BaseTask):
             
             if not user_id:
                 return 'No user found with Kite access token', "Failed", self.interval
-            
+
+            # This job runs inside the scheduler's 1-7 AM IST window, which
+            # straddles Kite's 6 AM IST token expiry -- so a dead token here is
+            # routine, not exceptional. Probe with the cheapest authenticated
+            # call first so the failure is reported as "reconnect required"
+            # rather than surfacing as an opaque instruments error (which is
+            # what previously looked like a multi-week "Kite outage").
+            if not self.kite_service.check_token_liveness(user_id):
+                self.logger.warning(
+                    "Kite token expired or missing; skipping instrument refresh. "
+                    "User must re-run the Kite login flow (tokens expire 6 AM IST daily)."
+                )
+                return 'Kite token expired - reconnect required', "Failed", self.interval
+
             # Fetch instruments from Kite
             instruments = self.kite_service.get_all_instruments(user_id)
             
