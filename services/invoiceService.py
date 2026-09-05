@@ -727,14 +727,36 @@ class InvoiceService(BaseService):
             self.logger.debug(
                 "ak-lvu: pre-migration payment row, returning None FX metadata"
             )
-        # Legacy backfill: if FX metadata absent but amount_received set,
-        # surface amount_received as both inr_amount + original_amount
-        # (they were equal on pre-ak-lvu writes — the AC-1 shape was the
-        # bug on RE-writes, not the initial shape).
+        # ── ak-lvu v5 V5.1 (CRITICAL) — read-side backfill of currency ──
+        # Pre-ak-lvu writes stored payment.amount_received AS the INR
+        # value (post-conversion). Backfilling `original_amount` from
+        # amount_received on a legacy row is CORRECT only if we ALSO
+        # tag `original_currency = 'INR'` — because the value we're
+        # exposing IS in INR, not in invoice.currency.
+        #
+        # Pre-v5 bug (V4-1 CRITICAL): backfilled original_amount without
+        # setting original_currency → `_format_invoice` returned
+        # `{originalAmount: 8325, originalCurrency: null}`. FE round-
+        # tripped this verbatim. `_replace_payment` saw
+        # originalAmount=8325 (present) → F-1 guard SKIPPED. Then the
+        # fresh-write branch defaulted `original_currency` to
+        # `invoice.currency` (USD) → converted 8325 as USD → 693,056.25
+        # INR stored. 83.2× amount-space corruption on first FE touch,
+        # silent + permanent. Super-reviewer v4 verdict caught this.
+        #
+        # Fix: when we backfill from amount_received, tag INR. Downstream
+        # round-trip converts INR→INR identity (fx_rate=1) → byte-stable.
+        # Payment then routes through recompute's mixed-currency branch
+        # (INR ≠ invoice.currency), where the v4 anti-flap guard holds
+        # `paid` status.
         if result["inr_amount"] is None and payment.amount_received is not None:
             result["inr_amount"] = float(payment.amount_received)
             if result["original_amount"] is None:
                 result["original_amount"] = float(payment.amount_received)
+            # V5.1: the backfilled value IS an INR value — say so.
+            # Prevents FE round-trip from re-converting as invoice.currency.
+            if result["original_currency"] is None:
+                result["original_currency"] = "INR"
         return result
 
     def _replace_payment(self, invoice_id, payment_data):
@@ -768,7 +790,7 @@ class InvoiceService(BaseService):
         payload_original_currency = payment_data.get('originalCurrency')
         payload_amount_received = payment_data.get('amountReceived')
 
-        # ── ak-lvu v2 F-1 (CRITICAL) — legacy-shape safety guard ──────
+        # ── ak-lvu v2 F-1 + v5 V5.2 (CRITICAL) — legacy-shape guard ──
         # Pre-v2 flaw: when the caller (LLM via FREELANCE_SYSTEM_PROMPT,
         # or a legacy FE build) sends `payment: {amountReceived: X}`
         # WITHOUT `originalAmount` / `originalCurrency`, the code fell
@@ -787,7 +809,24 @@ class InvoiceService(BaseService):
         # If the amount VALUE differs from the existing INR-side, we
         # can't safely infer intent — reject loudly and require
         # `originalAmount` + `originalCurrency` explicitly.
-        if payload_original_amount is None and existing_payment is not None:
+        #
+        # v5 V5.2 (CRITICAL) — extend the guard to ALSO fire on
+        # `originalAmount`-present-but-`originalCurrency`-absent shape
+        # when the amount matches the existing INR-side value. That's
+        # the exact V4-1 shape: pre-v5 read-side backfilled
+        # `originalAmount = amount_received` without `originalCurrency`,
+        # FE round-tripped `{originalAmount: 8325}` (with no currency),
+        # payload_original_amount was PRESENT so the v2 guard skipped,
+        # and the fresh-write path defaulted currency to invoice.currency
+        # (USD) → 83.2× amount-space corruption. Belt-and-suspenders:
+        # trigger the no-op path regardless of which alias the client
+        # echoed, as long as the amount lines up with the stored INR.
+        legacy_shape_no_currency = (
+            payload_original_amount is not None
+            and payload_original_currency is None
+            and existing_payment is not None
+        )
+        if (payload_original_amount is None or legacy_shape_no_currency) and existing_payment is not None:
             existing_inr = None
             try:
                 existing_inr = (
@@ -801,12 +840,18 @@ class InvoiceService(BaseService):
             if existing_inr is None and existing_payment.amount_received is not None:
                 existing_inr = money(existing_payment.amount_received)
 
+            # v5 V5.2: the "amount to compare against stored INR-side"
+            # comes from either alias. FE / LLM may echo either
+            # `amountReceived` (legacy alias) or `originalAmount` (new
+            # contract). If neither is present, guard is inapplicable.
             payload_inr = None
-            if payload_amount_received is not None:
-                try:
-                    payload_inr = money(payload_amount_received)
-                except MoneyError:
-                    payload_inr = None
+            for candidate in (payload_amount_received, payload_original_amount):
+                if candidate is not None:
+                    try:
+                        payload_inr = money(candidate)
+                        break
+                    except MoneyError:
+                        continue
 
             if (
                 existing_inr is not None
@@ -814,8 +859,13 @@ class InvoiceService(BaseService):
                 and within_epsilon(existing_inr, payload_inr)
             ):
                 # No-op / metadata-only PUT — preserve FX metadata.
+                shape_label = (
+                    "originalAmount-no-currency"
+                    if legacy_shape_no_currency
+                    else "amountReceived-only"
+                )
                 self.logger.info(
-                    f"ak-lvu v2 F-1: legacy amountReceived-only PUT "
+                    f"ak-lvu v2 F-1 + v5 V5.2: legacy {shape_label} PUT "
                     f"detected (value {payload_inr} matches existing "
                     f"inr_amount) — treating as no-op, preserving FX "
                     f"metadata for {existing_payment.id}"
@@ -837,14 +887,13 @@ class InvoiceService(BaseService):
                 # legacy shape. Cannot infer whether this is invoice-
                 # currency or a new INR value — refuse.
                 raise ValueError(
-                    "_replace_payment (ak-lvu v2 F-1): payment payload "
-                    "has `amountReceived` but no `originalAmount` / "
-                    "`originalCurrency`. To CHANGE the payment amount, "
-                    "provide explicit `originalAmount` + "
-                    "`originalCurrency` (bead ak-lvu wire contract). "
-                    "Legacy `amountReceived`-only PUTs are only accepted "
-                    "as no-op metadata patches (value matches stored "
-                    f"inr_amount). Got amountReceived={payload_inr}, "
+                    "_replace_payment (ak-lvu v2 F-1 + v5 V5.2): payment "
+                    "payload has amount but no `originalCurrency`. To "
+                    "CHANGE the payment amount, provide explicit "
+                    "`originalAmount` + `originalCurrency` (bead ak-lvu "
+                    "wire contract). Legacy amount-only PUTs are only "
+                    "accepted as no-op metadata patches (value matches "
+                    f"stored inr_amount). Got payload amount={payload_inr}, "
                     f"stored inr_amount={existing_inr}."
                 )
 
@@ -1051,30 +1100,20 @@ class InvoiceService(BaseService):
                     total_inr = money(invoice.total) * money(latest.fx_rate)
                 else:
                     # Mixed-original-currencies genuinely need today's
-                    # rate — same v4 anti-flap policy applies here as
-                    # in the no-fx_rate branch below: refuse to downgrade
-                    # 'paid' on an unreliable today's-rate compare.
-                    if invoice.status == InvoiceStatusEnum.paid:
-                        self.logger.info(
-                            f"ak-lvu v4 anti-flap: {invoice.invoice_number} "
-                            f"is paid with mixed-original-currency payments; "
-                            f"refusing today's-rate downgrade to preserve status"
-                        )
-                        return
-                    try:
-                        fx = self.currency_service.convert_to_inr_with_source(
-                            money(invoice.total), invoice_currency_str,
-                            allow_fallback=True,
-                        )
-                        total_inr = fx["inr_amount"]
-                    except Exception:
-                        self.logger.warning(
-                            f"ak-lvu v2 F-2: mixed-currency status recompute "
-                            f"for {invoice.invoice_number}: no consistent "
-                            f"vintage anchor + FX unavailable; leaving "
-                            f"status as {invoice.status}"
-                        )
-                        return
+                    # rate. v4 policy refused downgrade-from-paid only.
+                    # v5 V4-3 (both reviewers' MINOR): symmetric — refuse
+                    # ANY status change on this unreliable path when
+                    # payments exist. A legacy `sent`/`partially_paid`
+                    # non-INR row shouldn't be promoted to `paid` by
+                    # favourable-drift today's-rate compare any more
+                    # than a `paid` row should be downgraded.
+                    self.logger.info(
+                        f"ak-lvu v5 V4-3 anti-flap (symmetric): "
+                        f"{invoice.invoice_number} has mixed-original-"
+                        f"currency payments; refusing today's-rate "
+                        f"status change (was {invoice.status})"
+                    )
+                    return
             else:
                 # ── ak-lvu v4 anti-flap: conservative-on-legacy ────────
                 # No fx_rate on any payment (pre-migration legacy row).
@@ -1093,32 +1132,28 @@ class InvoiceService(BaseService):
                 # gap Lead's mutation-testing pass surfaced.
                 #
                 # Defense: when we're FORCED onto the today's-rate
-                # fallback path AND the current status is 'paid', refuse
-                # to downgrade. Preserve the historical decision. A
-                # genuine "you're now partial" transition would require
-                # a real payment mutation that landed with fresh FX
-                # metadata — not a phantom today's-rate compare.
-                if invoice.status == InvoiceStatusEnum.paid:
-                    self.logger.info(
-                        f"ak-lvu v4 anti-flap: {invoice.invoice_number} "
-                        f"is legacy paid non-INR (no vintage fx_rate on "
-                        f"any payment); refusing today's-rate downgrade "
-                        f"to preserve paid status"
-                    )
-                    return
-                try:
-                    fx = self.currency_service.convert_to_inr_with_source(
-                        money(invoice.total), invoice_currency_str,
-                        allow_fallback=True,
-                    )
-                    total_inr = fx["inr_amount"]
-                except Exception as exc:
-                    self.logger.warning(
-                        f"ak-lvu A.4: status recompute for {invoice.invoice_number}: "
-                        f"total-in-INR conversion failed ({exc}); leaving status "
-                        f"as {invoice.status}"
-                    )
-                    return
+                # fallback path (no vintage fx_rate on any payment),
+                # refuse to change status. Preserve the historical
+                # decision.
+                #
+                # v5 V4-3 (both reviewers' MINOR): symmetric guard —
+                # this branch used to guard only downgrade-from-paid,
+                # but the underlying "today's-rate compare is unreliable
+                # for status derivation" invariant is direction-agnostic.
+                # A legacy `sent`/`partially_paid` non-INR row can
+                # equally spuriously flip UP to `paid` on favourable
+                # drift. Both directions closed.
+                #
+                # A genuine status change requires a real payment
+                # mutation that lands with fresh FX metadata — not a
+                # phantom today's-rate compare.
+                self.logger.info(
+                    f"ak-lvu v5 V4-3 anti-flap (symmetric): "
+                    f"{invoice.invoice_number} is legacy non-INR with "
+                    f"no vintage fx_rate on any payment; refusing "
+                    f"today's-rate status change (stays {invoice.status})"
+                )
+                return
 
         if paid_inr <= Decimal("0"):
             if invoice.due_date and invoice.due_date < datetime.now().date():

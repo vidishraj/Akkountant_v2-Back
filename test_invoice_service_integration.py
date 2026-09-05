@@ -614,44 +614,51 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
         self.assertEqual(again['payment']['inrAmount'], 12487.50)
         self.assertEqual(again['payment']['fxRate'], 83.25)
 
+    def _mimic_true_legacy_row(self, invoice_number):
+        """v5 V5.3 fixture correction — align to REAL pre-migration shape.
+
+        A true pre-ALTER legacy `invoice_payments` row has ALL SIX new
+        columns NULL (not just the five vintage fields). Only
+        `amount_received` (populated, holding the INR value) survives
+        from the pre-ak-lvu schema.
+
+        Prior fixtures kept `inr_amount` populated "for convenience" —
+        but the read-side backfill falls back to `amount_received` anyway
+        when inr_amount is NULL, so convenience wasn't even needed. And
+        it caused the V4-1 CRITICAL to be masked: the "legacy" shape
+        the tests simulated wasn't the true production legacy shape.
+        """
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number=invoice_number,
+        ).first()
+        payment_row = invoice_row.payments[0]
+        # NULL all 6 new columns (real pre-migration shape).
+        payment_row.original_amount = None
+        payment_row.original_currency = None
+        payment_row.inr_amount = None
+        payment_row.fx_rate = None
+        payment_row.fx_rate_source = None
+        payment_row.converted_at = None
+        # amount_received (legacy pre-ak-lvu column) stays populated.
+        self.db.session.commit()
+
     def test_minimal_patch_notes_only_no_flap_on_legacy_row(self):
         """v3 V2-1(a) — the DISCRIMINATING anti-flap canary.
 
-        v2 → v3 mutation-testing evidence: this test must FAIL on v2
-        (a55d715) and PASS on v3+ (8503d9f+). Send a truly minimal
-        patch payload (just `{notes: "..."}`, NO payment section) — on
-        v2 recompute always runs → today's-rate flap fires; on v3 the
-        gate skips recompute → paid preserved.
-
-        Lead's mutation-testing pass on the v3 handoff caught that
-        my prior canary used `dict(initial)` which copied the payment
-        section — so `_replace_payment` fresh-write repopulated FX
-        metadata on both v2 and v3, erasing the "legacy" simulation.
-        This version sends ONLY notes: the LLM's minimal-patch shape.
+        Sends a truly minimal patch payload (just `{notes: "..."}`, NO
+        payment section) — on v2 recompute always runs → today's-rate
+        flap fires; on v3+ the gate skips recompute → paid preserved.
         """
         initial = self._create_usd_invoice_with_payment()
         self.assertEqual(initial['status'], 'paid')
 
-        # Mimic legacy row: NULL out FX metadata on the stored payment.
-        invoice_row = self.db.session.query(Invoice).filter_by(
-            invoice_number=initial['invoiceNumber'],
-        ).first()
-        payment_row = invoice_row.payments[0]
-        payment_row.original_amount = None
-        payment_row.original_currency = None
-        payment_row.fx_rate = None
-        payment_row.fx_rate_source = None
-        payment_row.converted_at = None
-        # amount_received + inr_amount stay populated (legacy shape).
-        self.db.session.commit()
+        # v5 V5.3: true legacy shape (all 6 new cols NULL).
+        self._mimic_true_legacy_row(initial['invoiceNumber'])
 
         # Simulate FX drift.
         self.svc.currency_service.rates['USD'] = Decimal("95.00")
 
-        # TRULY MINIMAL patch — just notes, no payment / items / tax /
-        # currency. On v2: recompute always fires → today's-rate compare
-        # on legacy row → paid_inr=8325 vs total_inr=9500 → partially_paid.
-        # On v3+: gate skips recompute → paid preserved.
+        # TRULY MINIMAL patch — just notes.
         result = self.svc.update_invoice(
             initial['invoiceNumber'],
             {"notes": "just editing notes on a legacy paid invoice"},
@@ -664,99 +671,119 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
         )
 
     def test_fe_realistic_notes_edit_on_legacy_row_no_flap(self):
-        """v4 anti-flap: FE-realistic shape. FE always sends the full
-        invoice object on every PUT (per Lead's audit of ak-awp) — even
-        for a notes-only edit the payload includes the payment section.
+        """v4 anti-flap + v5 V5.1 amount-space fix.
 
-        This is the case v3's gate does NOT protect: `payment_supplied`
-        fires True, recompute triggers. The v4 anti-flap guard inside
-        `_recompute_invoice_status` catches this from the other side:
-        when the today's-rate fallback would downgrade a paid invoice,
-        refuse.
+        The v3-era version of this test built the payload from
+        `dict(initial)` — that was a PRE-nulling snapshot with true
+        `originalAmount=100/USD`, i.e. an FX-metadata-intact payload
+        that no real client can possess for a truly-legacy row.
 
-        Would fail on v3 without the v4 conservative-on-legacy guard.
+        v5 V5.3 corrected version: mimic true legacy row (NULL all 6
+        cols), then rebuild the payload by calling `get_invoice_by_number`
+        — that's what an FE round-trip receives. Post-V5.1 fix the
+        legacy backfill tags `originalCurrency: 'INR'`, so
+        `_replace_payment` converts INR→INR identity and inr_amount
+        stays byte-stable. Pre-V5.1 (v4 code) the payload had
+        `originalCurrency: null`, F-1 guard skipped, fresh-write
+        defaulted currency to invoice.currency (USD), and 8325 was
+        converted as USD → 693,056.25 (V4-1 CRITICAL).
+
+        Super-reviewer's pre-specified discriminator: this test MUST
+        fail on v4 with `inrAmount = 693,056.25` and pass on v5.
+
+        Plus the second-round-trip equilibrium check (Lead's follow-up):
+        post-V5.1 rewrites payment as INR-tagged → second round-trip
+        must still be byte-stable + status stays paid, verifying that
+        V5.1 + v4 anti-flap compose correctly at equilibrium.
         """
         initial = self._create_usd_invoice_with_payment()
         self.assertEqual(initial['status'], 'paid')
 
-        # Mimic legacy row.
-        invoice_row = self.db.session.query(Invoice).filter_by(
-            invoice_number=initial['invoiceNumber'],
-        ).first()
-        payment_row = invoice_row.payments[0]
-        payment_row.original_amount = None
-        payment_row.original_currency = None
-        payment_row.fx_rate = None
-        payment_row.fx_rate_source = None
-        payment_row.converted_at = None
-        self.db.session.commit()
+        # v5 V5.3: TRUE legacy shape.
+        self._mimic_true_legacy_row(initial['invoiceNumber'])
 
-        # Simulate FX drift.
+        # FX drift.
         self.svc.currency_service.rates['USD'] = Decimal("95.00")
 
-        # FE-realistic payload: FULL invoice dict + edited notes. Payload
-        # includes payment section with populated originalAmount +
-        # originalCurrency (from the pre-legacy _format_invoice snapshot).
-        # This triggers `payment_supplied=True` → gate says recompute
-        # runs. On v4 the anti-flap guard inside recompute preserves the
-        # paid status despite the today's-rate fallback.
-        #
-        # Note: `_replace_payment` under this payload will FRESH-WRITE
-        # a new payment row (existing row's original_amount is NULL, so
-        # V2-5 idempotency doesn't match). The new row gets today's rate
-        # (95.00) — which fully repopulates FX metadata AND restores
-        # the same-currency vintage-free path. So this specific case
-        # actually recovers automatically. Test asserts the recovery.
-        payload = dict(initial)
+        # v5 V5.3: rebuild payload from what FE actually receives.
+        legacy_view = self.svc.get_invoice_by_number(initial['invoiceNumber'])
+        # Post-V5.1: `originalCurrency = 'INR'` because we backfilled it.
+        # Pre-V5.1 (v4): it would be null.
+        self.assertEqual(
+            legacy_view['payment']['originalCurrency'], 'INR',
+            f"v5 V5.1 read-side backfill: legacy row's originalCurrency "
+            f"should be 'INR' (the value in amount_received IS an INR "
+            f"value). Got: {legacy_view['payment']['originalCurrency']}"
+        )
+
+        payload = dict(legacy_view)
         payload['notes'] = "editing notes on a legacy invoice, FE-real shape"
         result = self.svc.update_invoice(initial['invoiceNumber'], payload)
+
+        # The AC-1-in-amount-space assertion: on v4 this would be
+        # 693,056.25 (83.2× drift). On v5 it stays at the legacy INR value.
+        legacy_inr_value = legacy_view['payment']['amountReceived']
+        self.assertEqual(
+            result['payment']['inrAmount'], legacy_inr_value,
+            f"v5 V5.1 CRITICAL: FE round-trip on true-legacy row corrupted "
+            f"inrAmount. Expected {legacy_inr_value}, got "
+            f"{result['payment']['inrAmount']} (super-reviewer's predicted "
+            f"v4-shape corruption value: 693056.25 = 8325 × 83.25). Read-"
+            f"side backfill of originalCurrency='INR' should route "
+            f"through identity conversion."
+        )
         self.assertEqual(
             result['status'], 'paid',
-            f"v4 anti-flap: FE-realistic notes edit on legacy paid non-INR "
-            f"invoice ended up at {result['status']} — expected 'paid'. "
-            f"Either the fresh-write FX repopulation broke or the anti-flap "
-            f"guard didn't fire."
+            f"v4 anti-flap: notes edit on legacy paid non-INR invoice "
+            f"ended at {result['status']}"
+        )
+
+        # ── Second-round-trip equilibrium (Lead's follow-up) ──────────
+        # Post-V5.1 rewrite: payment is now INR-tagged. Second PUT of
+        # the same shape must ALSO preserve inrAmount + status. Exercises
+        # the new steady-state: INR-on-USD-invoice routes recompute
+        # through mixed-currency branch, where v4 anti-flap (v5 V4-3
+        # symmetric) guards status.
+        second_view = self.svc.get_invoice_by_number(initial['invoiceNumber'])
+        second_payload = dict(second_view)
+        second_payload['notes'] = "second round-trip"
+        second_result = self.svc.update_invoice(
+            initial['invoiceNumber'], second_payload,
+        )
+        self.assertEqual(
+            second_result['payment']['inrAmount'], legacy_inr_value,
+            f"v5 V5.1 equilibrium: second round-trip drifted inrAmount "
+            f"from {legacy_inr_value} to {second_result['payment']['inrAmount']}"
+        )
+        self.assertEqual(
+            second_result['status'], 'paid',
+            f"v5 V4-3 symmetric guard: second round-trip flipped status "
+            f"to {second_result['status']}"
         )
 
     def test_legacy_shape_amount_only_put_preserves_paid_status(self):
-        """v4 anti-flap CORE case: legacy row + LLM sends F-1 legacy shape
-        (`amountReceived` only, matches stored inr_amount) + FX drift.
+        """v4 anti-flap CORE case + v5 fixture correction: legacy row +
+        LLM sends F-1 legacy shape (`amountReceived` only, matches
+        stored INR-side value) + FX drift.
 
-        This is the specific scenario v3's gate misses: F-1 guard's
-        idempotent-match path fires (payload.amountReceived == stored
-        inr_amount → treated as no-op metadata patch), payment_supplied
-        stays True → recompute fires → legacy row still has NULL
-        original_amount → cross-currency fallback → today's-rate compare
-        → without v4 anti-flap, would flap paid → partially_paid.
-
-        This test MUST fail on v3 (8503d9f) and pass on v4.
+        This test MUST fail on v3 (8503d9f) and pass on v4+.
         """
         initial = self._create_usd_invoice_with_payment()
         self.assertEqual(initial['status'], 'paid')
 
-        # Mimic legacy row (NULL only the vintage fields; keep inr_amount
-        # populated so F-1 guard can match on it).
-        invoice_row = self.db.session.query(Invoice).filter_by(
-            invoice_number=initial['invoiceNumber'],
-        ).first()
-        payment_row = invoice_row.payments[0]
-        payment_row.original_amount = None
-        payment_row.original_currency = None
-        payment_row.fx_rate = None
-        payment_row.fx_rate_source = None
-        payment_row.converted_at = None
-        self.db.session.commit()
+        # v5 V5.3: TRUE legacy shape (all 6 new cols NULL).
+        self._mimic_true_legacy_row(initial['invoiceNumber'])
 
-        # Simulate FX drift.
+        # FX drift.
         self.svc.currency_service.rates['USD'] = Decimal("95.00")
 
-        # Legacy-shape LLM payload: `payment: {amountReceived: X}` matching
-        # the STORED inr_amount, no originalAmount. F-1 guard's no-op
-        # path fires → existing_payment returned unmodified (still legacy).
-        legacy_shape_payload = dict(initial)
+        # Legacy-shape LLM payload from what FE would receive.
+        legacy_view = self.svc.get_invoice_by_number(initial['invoiceNumber'])
+        legacy_shape_payload = dict(legacy_view)
         legacy_shape_payload['payment'] = {
-            "amountReceived": initial['payment']['amountReceived'],  # 8325.00 INR
-            "paymentMethod": "wise_updated",  # metadata-only change
+            # `amountReceived` alias only, no originalAmount / originalCurrency
+            "amountReceived": legacy_view['payment']['amountReceived'],
+            "paymentMethod": "wise_updated",
         }
         legacy_shape_payload['notes'] = "editing on legacy row via LLM legacy shape"
 
@@ -766,10 +793,111 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
         self.assertEqual(
             result['status'], 'paid',
             f"v4 anti-flap CORE: LLM legacy-shape PUT on legacy paid row "
-            f"flapped to {result['status']}. F-1 guard's no-op path fires "
-            f"correctly but recompute still runs on the unmutated legacy "
-            f"payment → today's-rate flap. v4 anti-flap guard inside "
-            f"_recompute_invoice_status must catch this."
+            f"flapped to {result['status']}."
+        )
+
+    def test_legacy_sent_with_partial_payment_stays_sent_after_edit(self):
+        """v5 V4-3 symmetric guard: legacy `sent` invoice with a
+        partial-payment row must NOT be promoted to `paid` by a
+        favourable-drift today's-rate compare.
+
+        Pre-v5 asymmetric guard: v4 refused only downgrade-from-paid.
+        A legacy sent invoice with amount_received = 8000 on a 100 USD
+        invoice would (at USD=95): total_inr=9500 vs paid_inr=8000 →
+        partially_paid on v4 (OK — legit under-payment surfacing). But
+        with different drift (USD=80): total_inr=8000 vs paid_inr=8000
+        → paid ← spurious promotion.
+
+        v5 V4-3 symmetric: refuses ANY status change on today's-rate
+        fallback for rows with payments, not just downgrade from paid.
+        """
+        # Create a sent invoice with an amount_received of 8000 INR
+        # (mimics a legacy partial-payment scenario).
+        payload = {
+            "invoiceNumber": "INV-LEGACY-PARTIAL",
+            "projectName": "legacy sent w/ partial",
+            "issueDate": "2026-06-01",
+            "dueDate": "2026-06-30",
+            "from": {"name": "V", "email": "v@example.com", "address": "..."},
+            "to": {"name": "C", "email": "c@example.com", "address": "..."},
+            "currency": "USD",
+            "items": [{"description": "x", "quantity": 1, "rate": 100}],
+            "tax": {"rate": 0, "amount": 0},
+            "subtotal": 100,
+            "total": 100,
+            "status": "sent",
+            "payment": {
+                "originalAmount": 8000,  # partial
+                "originalCurrency": "INR",  # so recompute mixed branch fires later
+                "paymentMethod": "bank_transfer",
+                "paymentDate": "2026-06-15",
+            },
+        }
+        # v5 V4-3: creating this puts payment at 8000 INR on USD invoice.
+        # Same-currency check fails (INR ≠ USD invoice). Cross-currency
+        # branch: latest payment's fx_rate = 1.0 (INR identity),
+        # total_inr = 100 × 1 = 100 → 8000 >= 100 → paid.
+        # Not the legacy-sent scenario. Skip create-with-payment, use
+        # direct DB write to simulate real legacy state.
+        initial = self.svc.create_invoice({
+            **payload,
+            "payment": {
+                "originalAmount": 100,
+                "originalCurrency": "USD",
+                "paymentMethod": "bank_transfer",
+                "paymentDate": "2026-06-15",
+            },
+        })
+        # Now force it to be a legacy row with partial payment: NULL FX
+        # metadata AND set amount_received to a partial value.
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number="INV-LEGACY-PARTIAL",
+        ).first()
+        payment_row = invoice_row.payments[0]
+        payment_row.original_amount = None
+        payment_row.original_currency = None
+        payment_row.inr_amount = None
+        payment_row.fx_rate = None
+        payment_row.fx_rate_source = None
+        payment_row.converted_at = None
+        payment_row.amount_received = Decimal("8000.00")  # partial INR value
+        # Force status to sent (bypassing recompute — mimics real production
+        # row that was 'sent' pre-ak-lvu with an incomplete payment).
+        invoice_row.status = InvoiceStatusEnum.sent
+        self.db.session.commit()
+
+        # Favourable FX drift: USD strengthens; today's rate would make
+        # 8000 INR look like it covers a 100 USD invoice (8000 / 80 = 100).
+        self.svc.currency_service.rates['USD'] = Decimal("80.00")
+
+        # Notes-only edit (via full payload — FE-realistic).
+        legacy_view = self.svc.get_invoice_by_number("INV-LEGACY-PARTIAL")
+        put_payload = dict(legacy_view)
+        put_payload['notes'] = "editing notes on legacy partial-paid row"
+        result = self.svc.update_invoice("INV-LEGACY-PARTIAL", put_payload)
+
+        # Post-V5.1 backfill: originalCurrency='INR' on the read. FE
+        # round-trip converts INR→INR identity, preserves 8000 INR
+        # payment. Recompute runs (payment_supplied=True). Payment is
+        # INR-tagged; invoice is USD. all_same_currency=False → mixed
+        # branch. Latest payment's fx_rate=1.0 (identity, from V5.1
+        # write). total_inr = 100 × 1.0 = 100. paid_inr = 8000. 8000 >
+        # 100 → would compute PAID — but V4-3 symmetric refuses status
+        # change in this branch because payment.original_currency
+        # (INR) ≠ invoice.currency (USD) → not the same-currency vintage
+        # path.
+        #
+        # Actually wait — with V5.1's INR-tag + identity fx_rate, the
+        # mixed-currency branch DOES have a stored fx_rate (1.0), so
+        # V4-3 symmetric only applies if we FURTHER lack that rate. Let
+        # me re-trace: `latest.original_currency.upper() == 'USD'`? INR
+        # != USD → else branch → symmetric V4-3 refuse. Status stays 'sent'.
+        self.assertEqual(
+            result['status'], 'sent',
+            f"v5 V4-3 symmetric: legacy sent invoice with partial payment "
+            f"and favourable FX drift was promoted to {result['status']}. "
+            f"Should stay sent — today's-rate compare on mismatched-"
+            f"currency payment is unreliable in both directions."
         )
 
 
