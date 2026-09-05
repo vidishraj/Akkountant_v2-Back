@@ -1051,10 +1051,16 @@ class InvoiceService(BaseService):
                     total_inr = money(invoice.total) * money(latest.fx_rate)
                 else:
                     # Mixed-original-currencies genuinely need today's
-                    # rate. Documented: this narrow case may show FX
-                    # drift; self-heals on next mutation. Kept as the
-                    # least-bad option — the alternative is refusing
-                    # to compute status at all.
+                    # rate — same v4 anti-flap policy applies here as
+                    # in the no-fx_rate branch below: refuse to downgrade
+                    # 'paid' on an unreliable today's-rate compare.
+                    if invoice.status == InvoiceStatusEnum.paid:
+                        self.logger.info(
+                            f"ak-lvu v4 anti-flap: {invoice.invoice_number} "
+                            f"is paid with mixed-original-currency payments; "
+                            f"refusing today's-rate downgrade to preserve status"
+                        )
+                        return
                     try:
                         fx = self.currency_service.convert_to_inr_with_source(
                             money(invoice.total), invoice_currency_str,
@@ -1070,8 +1076,36 @@ class InvoiceService(BaseService):
                         )
                         return
             else:
-                # No fx_rate on any payment (pre-migration). Best-effort
-                # today's-rate compare, degraded semantics documented.
+                # ── ak-lvu v4 anti-flap: conservative-on-legacy ────────
+                # No fx_rate on any payment (pre-migration legacy row).
+                # The today's-rate fallback compare is UNRELIABLE for
+                # status derivation — any FX drift between the historical
+                # payment and today can flip an accurately-paid legacy
+                # row spuriously to partially_paid. Reviewer super-vote
+                # V2-1 caught this: Overseer's real paid non-INR invoices
+                # would flap on every unrelated edit after merge day one.
+                #
+                # v3 introduced a recompute-gate in update_invoice that
+                # SKIPS recompute on notes-only edits — but the FE
+                # always sends the full invoice on PUT (payment section
+                # included), so payment_supplied=True fires the gate
+                # even on effectively-metadata-only edits. That's the
+                # gap Lead's mutation-testing pass surfaced.
+                #
+                # Defense: when we're FORCED onto the today's-rate
+                # fallback path AND the current status is 'paid', refuse
+                # to downgrade. Preserve the historical decision. A
+                # genuine "you're now partial" transition would require
+                # a real payment mutation that landed with fresh FX
+                # metadata — not a phantom today's-rate compare.
+                if invoice.status == InvoiceStatusEnum.paid:
+                    self.logger.info(
+                        f"ak-lvu v4 anti-flap: {invoice.invoice_number} "
+                        f"is legacy paid non-INR (no vintage fx_rate on "
+                        f"any payment); refusing today's-rate downgrade "
+                        f"to preserve paid status"
+                    )
+                    return
                 try:
                     fx = self.currency_service.convert_to_inr_with_source(
                         money(invoice.total), invoice_currency_str,

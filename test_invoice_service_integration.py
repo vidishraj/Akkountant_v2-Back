@@ -614,17 +614,20 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
         self.assertEqual(again['payment']['inrAmount'], 12487.50)
         self.assertEqual(again['payment']['fxRate'], 83.25)
 
-    def test_notes_only_edit_does_not_flap_status_on_legacy_row(self):
-        """v3 V2-1(a): recompute-gate. A legacy paid non-INR invoice
-        (payment.original_amount NULL, no fx_rate stored) should NOT
-        flap paid→partially_paid when the user edits notes only.
+    def test_minimal_patch_notes_only_no_flap_on_legacy_row(self):
+        """v3 V2-1(a) — the DISCRIMINATING anti-flap canary.
 
-        Simulate legacy state: create a normal invoice with payment,
-        then manually NULL out the FX metadata columns on the payment
-        row (mimics a pre-migration row that got populated by the ALTER
-        but never re-written with FX metadata). Then simulate an FX
-        drift by mutating the stub currency rate. Notes-only edit
-        should preserve `paid` status.
+        v2 → v3 mutation-testing evidence: this test must FAIL on v2
+        (a55d715) and PASS on v3+ (8503d9f+). Send a truly minimal
+        patch payload (just `{notes: "..."}`, NO payment section) — on
+        v2 recompute always runs → today's-rate flap fires; on v3 the
+        gate skips recompute → paid preserved.
+
+        Lead's mutation-testing pass on the v3 handoff caught that
+        my prior canary used `dict(initial)` which copied the payment
+        section — so `_replace_payment` fresh-write repopulated FX
+        metadata on both v2 and v3, erasing the "legacy" simulation.
+        This version sends ONLY notes: the LLM's minimal-patch shape.
         """
         initial = self._create_usd_invoice_with_payment()
         self.assertEqual(initial['status'], 'paid')
@@ -645,16 +648,128 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
         # Simulate FX drift.
         self.svc.currency_service.rates['USD'] = Decimal("95.00")
 
-        # Notes-only edit — should NOT trigger recompute.
-        payload = dict(initial)
-        payload['notes'] = "just editing notes on a legacy paid invoice"
+        # TRULY MINIMAL patch — just notes, no payment / items / tax /
+        # currency. On v2: recompute always fires → today's-rate compare
+        # on legacy row → paid_inr=8325 vs total_inr=9500 → partially_paid.
+        # On v3+: gate skips recompute → paid preserved.
+        result = self.svc.update_invoice(
+            initial['invoiceNumber'],
+            {"notes": "just editing notes on a legacy paid invoice"},
+        )
+        self.assertEqual(
+            result['status'], 'paid',
+            f"v3 V2-1(a) discrimination: minimal-patch notes-only edit "
+            f"on legacy paid non-INR invoice triggered recompute + "
+            f"today's-rate flap. Expected 'paid', got {result['status']}."
+        )
 
+    def test_fe_realistic_notes_edit_on_legacy_row_no_flap(self):
+        """v4 anti-flap: FE-realistic shape. FE always sends the full
+        invoice object on every PUT (per Lead's audit of ak-awp) — even
+        for a notes-only edit the payload includes the payment section.
+
+        This is the case v3's gate does NOT protect: `payment_supplied`
+        fires True, recompute triggers. The v4 anti-flap guard inside
+        `_recompute_invoice_status` catches this from the other side:
+        when the today's-rate fallback would downgrade a paid invoice,
+        refuse.
+
+        Would fail on v3 without the v4 conservative-on-legacy guard.
+        """
+        initial = self._create_usd_invoice_with_payment()
+        self.assertEqual(initial['status'], 'paid')
+
+        # Mimic legacy row.
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number=initial['invoiceNumber'],
+        ).first()
+        payment_row = invoice_row.payments[0]
+        payment_row.original_amount = None
+        payment_row.original_currency = None
+        payment_row.fx_rate = None
+        payment_row.fx_rate_source = None
+        payment_row.converted_at = None
+        self.db.session.commit()
+
+        # Simulate FX drift.
+        self.svc.currency_service.rates['USD'] = Decimal("95.00")
+
+        # FE-realistic payload: FULL invoice dict + edited notes. Payload
+        # includes payment section with populated originalAmount +
+        # originalCurrency (from the pre-legacy _format_invoice snapshot).
+        # This triggers `payment_supplied=True` → gate says recompute
+        # runs. On v4 the anti-flap guard inside recompute preserves the
+        # paid status despite the today's-rate fallback.
+        #
+        # Note: `_replace_payment` under this payload will FRESH-WRITE
+        # a new payment row (existing row's original_amount is NULL, so
+        # V2-5 idempotency doesn't match). The new row gets today's rate
+        # (95.00) — which fully repopulates FX metadata AND restores
+        # the same-currency vintage-free path. So this specific case
+        # actually recovers automatically. Test asserts the recovery.
+        payload = dict(initial)
+        payload['notes'] = "editing notes on a legacy invoice, FE-real shape"
         result = self.svc.update_invoice(initial['invoiceNumber'], payload)
         self.assertEqual(
             result['status'], 'paid',
-            f"v3 V2-1(a): notes-only edit on legacy paid non-INR invoice "
-            f"triggered recompute + FX-vintage flap. Expected 'paid', "
-            f"got {result['status']}."
+            f"v4 anti-flap: FE-realistic notes edit on legacy paid non-INR "
+            f"invoice ended up at {result['status']} — expected 'paid'. "
+            f"Either the fresh-write FX repopulation broke or the anti-flap "
+            f"guard didn't fire."
+        )
+
+    def test_legacy_shape_amount_only_put_preserves_paid_status(self):
+        """v4 anti-flap CORE case: legacy row + LLM sends F-1 legacy shape
+        (`amountReceived` only, matches stored inr_amount) + FX drift.
+
+        This is the specific scenario v3's gate misses: F-1 guard's
+        idempotent-match path fires (payload.amountReceived == stored
+        inr_amount → treated as no-op metadata patch), payment_supplied
+        stays True → recompute fires → legacy row still has NULL
+        original_amount → cross-currency fallback → today's-rate compare
+        → without v4 anti-flap, would flap paid → partially_paid.
+
+        This test MUST fail on v3 (8503d9f) and pass on v4.
+        """
+        initial = self._create_usd_invoice_with_payment()
+        self.assertEqual(initial['status'], 'paid')
+
+        # Mimic legacy row (NULL only the vintage fields; keep inr_amount
+        # populated so F-1 guard can match on it).
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number=initial['invoiceNumber'],
+        ).first()
+        payment_row = invoice_row.payments[0]
+        payment_row.original_amount = None
+        payment_row.original_currency = None
+        payment_row.fx_rate = None
+        payment_row.fx_rate_source = None
+        payment_row.converted_at = None
+        self.db.session.commit()
+
+        # Simulate FX drift.
+        self.svc.currency_service.rates['USD'] = Decimal("95.00")
+
+        # Legacy-shape LLM payload: `payment: {amountReceived: X}` matching
+        # the STORED inr_amount, no originalAmount. F-1 guard's no-op
+        # path fires → existing_payment returned unmodified (still legacy).
+        legacy_shape_payload = dict(initial)
+        legacy_shape_payload['payment'] = {
+            "amountReceived": initial['payment']['amountReceived'],  # 8325.00 INR
+            "paymentMethod": "wise_updated",  # metadata-only change
+        }
+        legacy_shape_payload['notes'] = "editing on legacy row via LLM legacy shape"
+
+        result = self.svc.update_invoice(
+            initial['invoiceNumber'], legacy_shape_payload,
+        )
+        self.assertEqual(
+            result['status'], 'paid',
+            f"v4 anti-flap CORE: LLM legacy-shape PUT on legacy paid row "
+            f"flapped to {result['status']}. F-1 guard's no-op path fires "
+            f"correctly but recompute still runs on the unmutated legacy "
+            f"payment → today's-rate flap. v4 anti-flap guard inside "
+            f"_recompute_invoice_status must catch this."
         )
 
 
