@@ -3,9 +3,7 @@
 -- ==========================================================================
 --
 -- Applies the ak-lvu (Freelance money-math) schema changes + backfills legacy
--- rows with the correct `original_currency` semantics. Run atomically. The
--- backfills BELOW ARE ORDER-DEPENDENT and NON-REPAIRABLE if executed out of
--- order — see rationale under "CORRUPTION RISK IF SPLIT / REORDERED" below.
+-- rows with the correct `original_currency` semantics.
 --
 -- Supersedes the runbook SQL in the v3 (8503d9f) + v5 (3a65fd8) commit
 -- bodies. This is the definitive, mayor-audited script.
@@ -15,13 +13,32 @@
 --
 --
 -- ┌────────────────────────────────────────────────────────────────────────┐
--- │ CORRUPTION RISK IF SPLIT / REORDERED                                   │
+-- │ RE-RUN SEMANTICS (v7 correction — mayor audit)                         │
+-- ├────────────────────────────────────────────────────────────────────────┤
+-- │ * STEP 1 (ALTERs) auto-commits in MySQL — DDL is NOT transactional.    │
+-- │   Re-running this file after STEP 1 succeeded will FAIL at ALTER       │
+-- │   with error 1060 "Duplicate column name" / 1091 "Can't DROP".         │
+-- │ * STEP 2 (procedure with pre-flight + backfills + post-flight) is      │
+-- │   idempotent — the WHERE clauses skip already-populated rows AND the   │
+-- │   pre-flight ABORTS if rows this script owns are already populated    │
+-- │   (partial prior run or manual intervention).                          │
+-- │                                                                        │
+-- │ Consequence: THE FILE AS A WHOLE IS NOT RE-RUNNABLE.                   │
+-- │                                                                        │
+-- │ Recovery from a partial failure (e.g. procedure aborted mid-run after  │
+-- │ STEP 1 committed): DO NOT re-run the whole file. Re-run STEP 2 only    │
+-- │ (the DELIMITER $$ ... DROP PROCEDURE block). STEP 1 is already applied │
+-- │ and the ALTERs would fail on re-run.                                   │
+-- └────────────────────────────────────────────────────────────────────────┘
+--
+--
+-- ┌────────────────────────────────────────────────────────────────────────┐
+-- │ CORRUPTION RISK IF SPLIT / REORDERED (v7: frozen-status FIRST)         │
 -- ├────────────────────────────────────────────────────────────────────────┤
 -- │ Both backfills below skip rows that are already populated (the WHERE   │
 -- │ clauses include `original_amount IS NULL`). This makes each half       │
--- │ INDIVIDUALLY idempotent — safe to re-run.                              │
--- │                                                                        │
--- │ BUT the PAIR is order-dependent. v5's WHERE is a SUPERSET of v3's:     │
+-- │ INDIVIDUALLY idempotent. BUT the PAIR is order-dependent because       │
+-- │ v5's WHERE is a SUPERSET of v3's:                                      │
 -- │                                                                        │
 -- │   * v3 half → sets original_currency = invoice.currency (real value)   │
 -- │              for PAID + single-payment invoices only                   │
@@ -32,27 +49,72 @@
 -- │   → v5 claims EVERY legacy row (including paid single-payment USD/GBP) │
 -- │   → v3 then matches NOTHING (rows no longer NULL)                      │
 -- │   → paid single-payment USD/GBP invoices are STAMPED `INR`             │
--- │   → next FE touch: `_replace_payment` sees originalCurrency='INR' →    │
--- │     converts 8325 INR-value as INR (identity) — WAIT, actually with    │
--- │     the v5 code (V5.1 read-side backfill) this is now safe on that     │
--- │     side too because both read and write agree on INR semantics.       │
 -- │                                                                        │
--- │   HOWEVER: the invoice.currency remains USD/GBP. The `paid_in_currency │
--- │   vs invoice.total` compare in `_recompute_invoice_status` requires    │
--- │   `all_same_currency` — payment.original_currency must equal           │
--- │   invoice.currency for the vintage-free path. If v5-first stamps INR   │
--- │   onto a USD invoice's payment, we lose the vintage-free path and      │
--- │   fall into the mixed-currency branch. The v5 V4-3 symmetric guard     │
--- │   then refuses status changes → status FROZEN at whatever it was       │
--- │   pre-migration → Overseer can never legitimately transition it.       │
+-- │ ▼ DANGEROUS CONSEQUENCE — status becomes FROZEN                        │
 -- │                                                                        │
--- │ This is why v3 MUST run first: paid single-payment invoices get their  │
--- │ real invoice.currency stamped on the payment, matching the invoice —   │
--- │ vintage-free path stays available. Only the ambiguous remaining        │
--- │ legacy rows fall through to the INR-tagged safe default.               │
+-- │   Payment `original_currency = INR` on a USD-currency invoice means    │
+-- │   the payment currency does NOT match the invoice currency. The v2    │
+-- │   F-2 recompute path requires `all_same_currency` for the vintage-    │
+-- │   free comparison; the v5-first stamp permanently forces this         │
+-- │   invoice into the mixed-currency fallback branch. The v5 V4-3        │
+-- │   symmetric anti-flap guard THEN refuses ANY today's-rate status      │
+-- │   change on that branch.                                               │
 -- │                                                                        │
--- │ Re-running does NOT repair the wrong answer because both halves skip   │
--- │ non-NULL rows.                                                         │
+-- │   Result: status FROZEN at whatever it was pre-migration. Overseer    │
+-- │   can never legitimately transition it via edit — a real payment     │
+-- │   mutation would need to land with fresh FX metadata to escape.       │
+-- │                                                                        │
+-- │ ▼ Amount side is SAFE (reassurance only, not the load-bearing risk)   │
+-- │                                                                        │
+-- │   The v5 code (V5.1 read-side backfill + F-1 guard extension) makes   │
+-- │   FE round-trips byte-stable regardless of currency tag: converting  │
+-- │   an INR-value tagged as INR is identity (fx_rate=1). So the 83×     │
+-- │   amount-space corruption V4-1 flagged does NOT reappear from a v5-  │
+-- │   first backfill. Amount-space is closed by the code alone.           │
+-- │                                                                        │
+-- │ ▼ Why v3 MUST run first                                                │
+-- │                                                                        │
+-- │   Paid single-payment invoices get their REAL invoice.currency        │
+-- │   stamped on the payment. Payment currency = invoice currency →      │
+-- │   vintage-free same-currency path stays available. Only the           │
+-- │   ambiguous remaining legacy rows fall through to the INR-tagged      │
+-- │   safe default via the v5 half.                                        │
+-- │                                                                        │
+-- │ ▼ Not self-repairing                                                   │
+-- │                                                                        │
+-- │   Re-running does NOT repair the wrong answer because both halves     │
+-- │   skip non-NULL rows. Frozen-status once written is sticky.            │
+-- └────────────────────────────────────────────────────────────────────────┘
+--
+--
+-- ┌────────────────────────────────────────────────────────────────────────┐
+-- │ v7 ANTI-PATTERN SWEEP (mayor Item 5)                                   │
+-- ├────────────────────────────────────────────────────────────────────────┤
+-- │ Full-file grep applied for two anti-patterns:                          │
+-- │                                                                        │
+-- │   1. TEST-NOT-INFERENCE: predicates that reason from a count being     │
+-- │      zero (the v6 pre-flight bug: v3_target = 0 inferred "populated    │
+-- │      by something else" when it could also mean "MP-3 legacy row       │
+-- │      with no payment to backfill" — false positive on healthy data).   │
+-- │                                                                        │
+-- │      Fix pattern: DIRECTLY count the rows the predicate wants to       │
+-- │      detect, not infer them from the absence of others. Applied at     │
+-- │      the pre-flight guard (v_already_populated).                       │
+-- │                                                                        │
+-- │   2. LIKE-WITH-LIKE: assertions comparing counts of different kinds    │
+-- │      (the v6 post-deploy checklist bug: v3+v5 payment-row updates      │
+-- │      compared to paid_invoices_total, which is an invoice count —     │
+-- │      false failure after a correct migration on any DB with MP-3       │
+-- │      legacy rows).                                                     │
+-- │                                                                        │
+-- │      Fix pattern: assertions compare same-kind counts. Applied at the  │
+-- │      post-deploy checklist (v3_updated=v3_target, v5_updated=v5_target,│
+-- │      post_flight_orphan_rows=0).                                       │
+-- │                                                                        │
+-- │ Sweep result: no other instances found. All remaining `IS NULL` /      │
+-- │ `IS NOT NULL` / `= 0` uses are same-kind direct-test semantics (WHERE  │
+-- │ clauses on the actual rows being UPDATE'd; the post-flight orphan     │
+-- │ check counts exactly the rows the assertion targets).                  │
 -- └────────────────────────────────────────────────────────────────────────┘
 
 
@@ -86,21 +148,36 @@ DROP PROCEDURE IF EXISTS _aklvu_apply_backfill$$
 
 CREATE PROCEDURE _aklvu_apply_backfill()
 BEGIN
-    -- Diagnostic locals.
+    -- Diagnostic locals (all counts held for the SELECT at the end;
+    -- pre-flight abort predicate uses ONLY v_already_populated per
+    -- mayor's v7 test-directly correction).
     DECLARE v_paid_invoices INT DEFAULT 0;
     DECLARE v_v3_target INT DEFAULT 0;
     DECLARE v_v5_target INT DEFAULT 0;
+    DECLARE v_already_populated INT DEFAULT 0;
     DECLARE v_v3_updated INT DEFAULT 0;
     DECLARE v_v5_updated INT DEFAULT 0;
     DECLARE v_post_null INT DEFAULT 0;
 
-    -- ── Pre-flight ────────────────────────────────────────────────────
+    -- ── Pre-flight (v7 mayor audit — test-directly, not infer-from-absence) ──
+    --
+    -- ORIGINAL v6 predicate (WRONG on real data): "paid_invoices > 0 AND
+    -- v3_target = 0" inferred "populated by something else" from the
+    -- ABSENCE of un-populated rows. But that predicate ALSO fires on
+    -- innocent data: an MP-3 legacy invoice (pre-ak-lvu mark_invoice_paid
+    -- flipped status='paid' on email say-so WITHOUT writing a payment
+    -- row) → paid_invoices > 0, v3_target = 0 → false-positive ABORT on
+    -- healthy prod data. The email-path legacy row has no payment to
+    -- backfill; both halves correctly no-op on it, no risk exists.
+    --
+    -- v7 CORRECTED predicate: DIRECTLY count rows this script would own
+    -- that are already populated. Fires only when something genuinely
+    -- populated the rows we're claiming — silent on any legacy shape
+    -- that has nothing to backfill.
+    --
+    -- Diagnostic counters (kept for SELECT at end, NOT abort inputs):
     SELECT COUNT(*) INTO v_paid_invoices FROM invoices WHERE status = 'paid';
 
-    -- v3 target: paid + single-payment + still NULL original_amount.
-    -- Derived-table wrapper on the inner subquery to sidestep MySQL error
-    -- 1093 (ER_UPDATE_TABLE_USED) — "You can't specify target table for
-    -- update in FROM clause". Applied here + at the UPDATE below.
     SELECT COUNT(*) INTO v_v3_target
         FROM invoice_payments p JOIN invoices i ON p.invoice_id = i.id
         WHERE i.status = 'paid'
@@ -114,19 +191,33 @@ BEGIN
               ) AS single_pay_derived
           );
 
-    -- v5 target: any remaining row with NULL original_amount + populated
-    -- amount_received (legacy pre-ak-lvu shape).
     SELECT COUNT(*) INTO v_v5_target
         FROM invoice_payments
         WHERE original_amount IS NULL AND amount_received IS NOT NULL;
 
-    -- Pre-flight abort: if paid invoices exist but the v3 half has ZERO
-    -- targets, the original_currency column has been populated by something
-    -- OTHER than this script. Running the backfills now risks corruption.
-    -- Halt with a clear error so a human can investigate before proceeding.
-    IF v_paid_invoices > 0 AND v_v3_target = 0 THEN
+    -- v7 abort predicate (mayor's test-directly formulation).
+    -- Count rows in the v3 SCOPE (paid + single-payment invoices) whose
+    -- original_amount IS ALREADY POPULATED. If any exist, either a prior
+    -- run partially completed or someone manually populated the columns.
+    -- Same derived-table 1093 workaround as the target count above.
+    SELECT COUNT(*) INTO v_already_populated
+        FROM invoice_payments p JOIN invoices i ON p.invoice_id = i.id
+        WHERE i.status = 'paid'
+          AND p.original_amount IS NOT NULL
+          AND i.id IN (
+              SELECT * FROM (
+                  SELECT invoice_id
+                    FROM invoice_payments
+                    GROUP BY invoice_id
+                    HAVING COUNT(*) = 1
+              ) AS single_pay_derived
+          );
+
+    -- Confident SIGNAL — this message describes the ONE thing the
+    -- predicate detects (not "may have been ... or ...").
+    IF v_already_populated > 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT =
-            'ak-lvu pre-flight ABORT: paid invoices exist but v3 backfill has no target rows. The original_amount column may have been populated by manual intervention or a partial prior run. Investigate before proceeding.';
+            'ak-lvu pre-flight ABORT: paid single-payment invoices already have original_amount populated. This means a prior run of this script partially completed, or the columns were manually populated. Do NOT re-run this file whole — inspect state and re-run only the STEP 2 procedure block if the prior partial run needs completion. See re-run semantics header.';
     END IF;
 
     -- ── STEP 2A: v3 backfill (paid single-payment invoices) ───────────
@@ -205,15 +296,37 @@ DROP PROCEDURE _aklvu_apply_backfill;
 -- ==========================================================================
 -- Post-deploy verification (manual — infra runs these after the script)
 -- ==========================================================================
--- 1. Confirm the diagnostic SELECT above showed sensible counts (v3+v5
---    updated ≥ paid_invoices_total, post_flight_orphan_rows = 0).
+--
+-- v7 mayor audit — checklist assertions are now LIKE-WITH-LIKE. The
+-- v6 shape compared v3+v5 payment-row counts against paid_invoices_total
+-- (an invoice count) — those are only equal when every paid invoice
+-- has a payment row, which is EXACTLY the MP-3 email-path legacy shape
+-- (paid invoice with no payment row) that innocently fails the check
+-- after a correct migration. Wrong prompt for a tired human at end of
+-- an outage window.
+--
+-- Each assertion below compares like-with-like counts + has exactly
+-- one cause when it fails.
+--
+-- 1. Confirm the diagnostic SELECT from STEP 2 shows all three
+--    like-with-like invariants:
+--        post_flight_orphan_rows         = 0
+--        v3_backfill_rows_updated        = v3_backfill_target_rows
+--        v5_backfill_rows_updated        = v5_backfill_target_rows
+--    (Diagnostic-only counters — paid_invoices_total, v3/v5 targets —
+--    are useful context for reading the shape of prod data, but they
+--    are NOT assertion inputs. Comparing v3+v5 payment-row updates to
+--    paid_invoices_total was the v6 bug.)
+--
 -- 2. Confirm the status enum expansion took effect:
 --        SHOW COLUMNS FROM invoices LIKE 'status';
 --    Expected: enum('draft','sent','paid','overdue','partially_paid')
+--
 -- 3. Confirm all 6 new payment columns exist:
 --        SHOW COLUMNS FROM invoice_payments
 --          WHERE Field IN ('original_amount','original_currency','inr_amount',
 --                          'fx_rate','fx_rate_source','converted_at');
 --    Expected: 6 rows, all Null=YES.
+--
 -- 4. Restart app.service (pending_payment_claims table auto-created by
 --    db.create_all() on next boot).
