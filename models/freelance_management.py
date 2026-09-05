@@ -13,6 +13,11 @@ class InvoiceStatusEnum(enum.Enum):
     sent = 'sent'
     paid = 'paid'
     overdue = 'overdue'
+    # ak-lvu A.4: server-computed intermediate state — payments exist but
+    # Σ(inr_amount) < invoice.total. Written by invoiceService's status
+    # recompute helper on any payment insert/update/delete. Migration:
+    # ALTER TABLE invoices MODIFY status ENUM('draft','sent','paid','overdue','partially_paid') NOT NULL DEFAULT 'draft';
+    partially_paid = 'partially_paid'
 
 class CurrencyEnum(enum.Enum):
     USD = 'USD'
@@ -152,13 +157,100 @@ class InvoicePayment(Base):
     id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     invoice_id = Column(CHAR(36), ForeignKey('invoices.id', ondelete='CASCADE'), nullable=False)
     payment_method = Column(String(100))
+    # LEGACY (ak-lvu retained for backward compat): historically stored
+    # the INR-converted value. New writes populate this + inr_amount
+    # identically so old readers keep working during the deploy window.
+    # After migration lands + old readers switched over, this column is
+    # a candidate for drop in a follow-up cleanup bead (NOT here).
     amount_received = Column(DECIMAL(12, 2), nullable=False)
     payment_date = Column(Date, nullable=True)
     breakdown = Column(JSON, nullable=True)
     notes = Column(Text)
+    # ak-lvu A.1 FX idempotency — five new columns pin the currency
+    # semantics so round-tripping an invoice never re-converts an
+    # already-INR value as invoice-currency again (the AC-1 CRITICAL).
+    # All nullable so `db.create_all()` picks up the model diff without
+    # requiring a data backfill for pre-migration rows; service reads
+    # tolerate NULL via money_utils / migration-gap helper.
+    #
+    # Deploy prereq (documented in commit body):
+    #   ALTER TABLE invoice_payments
+    #     ADD COLUMN original_amount    DECIMAL(12,2) NULL,
+    #     ADD COLUMN original_currency  VARCHAR(3)    NULL,
+    #     ADD COLUMN inr_amount         DECIMAL(12,2) NULL,
+    #     ADD COLUMN fx_rate            DECIMAL(12,4) NULL,
+    #     ADD COLUMN fx_rate_source     VARCHAR(100)  NULL,
+    #     ADD COLUMN converted_at       DATETIME      NULL;
+    original_amount = Column(DECIMAL(12, 2), nullable=True)
+    original_currency = Column(String(3), nullable=True)
+    inr_amount = Column(DECIMAL(12, 2), nullable=True)
+    fx_rate = Column(DECIMAL(12, 4), nullable=True)
+    fx_rate_source = Column(String(100), nullable=True)
+    converted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     invoice = relationship('Invoice', back_populates='payments')
+
+
+class PendingPaymentClaim(Base):
+    """ak-lvu A.8 — claim-not-fact record for inbound mail "paid" signals.
+
+    Before ak-lvu, `mark_invoice_paid` flipped invoice.status='paid' on
+    email say-so alone — no reconciliation, no confirmation, no audit
+    trail. That's the MP-3 CRITICAL from the super-review.
+
+    New semantics: an inbound mail signal creates a PendingPaymentClaim
+    row here and does NOT touch invoice.status. The claim is confirmed
+    (and the real payment written + status flipped) via either
+      (a) bank-credit auto-match — a future bank-transaction ingest hook
+          will match Σ credited within an N-day window against
+          unresolved claims (follow-up BE bead, out of scope here),
+      (b) manual confirm — Overseer clicks a per-claim confirm button
+          in a claims-review UI (follow-up FE bead, out of scope here).
+
+    Only after confirmation does invoiceService write the actual
+    InvoicePayment row + trigger the status recompute helper.
+
+    Migration prereq (auto-picked-up by db.create_all() since this is a
+    brand-new table, not a column add):
+      No manual step needed — table appears on next boot.
+    """
+    __tablename__ = 'pending_payment_claims'
+    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
+    user_id = Column(CHAR(36), ForeignKey('users.userID', ondelete='CASCADE'), nullable=False)
+    invoice_id = Column(CHAR(36), ForeignKey('invoices.id', ondelete='CASCADE'), nullable=False)
+    # source_email_id: the email that surfaced the claim. Nullable so a
+    # manual "I got paid" flow (no email source) could also file a claim
+    # in future. Text (not FK) so email-thread schema churn doesn't cascade.
+    source_email_id = Column(String(255), nullable=True)
+    # Claimed amount + currency as the mail said. The LLM extracts these
+    # from the mail body; server-side reconciliation compares against
+    # bank credits or Overseer confirmation. Stored as Decimal to match
+    # the money-safety invariant even before confirmation.
+    claimed_amount = Column(DECIMAL(12, 2), nullable=True)
+    claimed_currency = Column(String(3), nullable=True)
+    # Free-form context from the mail LLM: sender, subject snippet,
+    # payment_method / payment_date if extracted. Not authoritative
+    # until confirmation.
+    claim_metadata = Column(JSON, nullable=True)
+    # Lifecycle: created_at set on insert; resolved_at + resolution set
+    # when the claim is either confirmed (→ real payment row written) or
+    # rejected (Overseer decides it was a mis-classified mail). NULL
+    # resolved_at means "still pending review".
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    resolved_at = Column(DateTime, nullable=True)
+    # 'pending' | 'confirmed' | 'rejected' — string not enum so future
+    # values (e.g. 'auto_matched') don't require another ALTER.
+    resolution = Column(String(30), nullable=False, default='pending')
+    # If confirmed, the InvoicePayment row that was written. NULL for
+    # pending / rejected. Nullable FK with SET NULL on delete so removing
+    # the payment doesn't cascade-delete the historical claim record.
+    resolved_payment_id = Column(
+        CHAR(36),
+        ForeignKey('invoice_payments.id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    resolution_note = Column(Text, nullable=True)
 
 class InvoiceItem(Base):
     __tablename__ = 'invoice_items'

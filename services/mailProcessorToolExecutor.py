@@ -570,19 +570,126 @@ def _handle_insert_investment(args, user_id, investment_service):
 
 
 def _handle_mark_invoice_paid(args, invoice_service):
-    """Mark a freelance invoice as paid."""
-    invoice_number = args["invoice_number"]
-    update_data = {"status": "paid"}
-    if args.get("payment_date") or args.get("amount_received") or args.get("payment_method"):
-        update_data["payment"] = {}
-        if args.get("payment_date"):
-            update_data["payment"]["payment_date"] = args["payment_date"]
-        if args.get("amount_received"):
-            update_data["payment"]["amount_received"] = args["amount_received"]
-        if args.get("payment_method"):
-            update_data["payment"]["payment_method"] = args["payment_method"]
+    """ak-lvu A.7 + A.8 + MP-3: FILE A CLAIM, do NOT flip status.
 
-    return invoice_service.update_invoice(invoice_number, update_data)
+    Pre-ak-lvu semantics: this tool set `status="paid"` and wrote a
+    payment row on email say-so alone (super-review MP-3 CRITICAL). Also
+    the payment payload used snake_case field names but `_replace_payment`
+    read camelCase, causing a silent KeyError that partial-masked the
+    payment while leaving the status flip in place (AC-7).
+
+    New semantics (ak-lvu A.8):
+      * Do NOT touch invoice.status.
+      * Do NOT write an InvoicePayment row.
+      * DO write a `PendingPaymentClaim` row with the LLM's extracted
+        amount / currency / method / date.
+      * Return {status: "pending", claim_id: <uuid>} so the LLM surfaces
+        an accurate "payment claim recorded, pending reconciliation"
+        response to Overseer rather than falsely reporting "invoice
+        marked paid".
+
+    Confirmation flow (separate follow-up beads):
+      * FE bead — claims-review UI + per-claim confirm button
+      * BE bead — bank-transaction ingest hook to auto-match on
+        (amount + N-day window)
+
+    Only after confirmation does the actual payment row + status flip
+    happen — closes MP-3.
+    """
+    from flask import g as _flask_g
+    from services.Base_Service import BaseService
+    from models.freelance_management import PendingPaymentClaim, Invoice
+
+    invoice_number = args["invoice_number"]
+    user_id = _flask_g.get('firebase_id') if _flask_g else None
+    if not user_id:
+        # Mail executor is always called inside a request context via
+        # agentEP so g.firebase_id should be set. If not, surface loudly.
+        raise RuntimeError(
+            "mark_invoice_paid: no firebase_id on request context"
+        )
+
+    # Resolve invoice → id. Use invoice_service.db.session so the same
+    # SQLAlchemy session serves both lookups.
+    session = invoice_service.db.session
+    invoice = session.query(Invoice).filter_by(
+        invoice_number=invoice_number, user_id=user_id,
+    ).first()
+    if not invoice:
+        return {
+            "status": "error",
+            "error": f"Invoice {invoice_number!r} not found",
+        }
+
+    # Extract claim metadata from LLM tool args (snake_case per the tool
+    # schema — see mailProcessorTools.py:280-320).
+    claimed_amount_raw = args.get("amount_received")
+    claimed_currency = args.get("currency") or (
+        invoice.currency.value if hasattr(invoice.currency, 'value')
+        else str(invoice.currency)
+    )
+    payment_method = args.get("payment_method")
+    payment_date = args.get("payment_date")
+    source_email_id = args.get("source_email_id") or args.get("email_id")
+
+    # Parse claimed_amount tolerantly (LLM may pass float / str / omit).
+    from services.money_utils import money, q2, MoneyError
+    claimed_amount = None
+    if claimed_amount_raw is not None:
+        try:
+            claimed_amount = q2(money(claimed_amount_raw))
+        except MoneyError:
+            logger.warning(
+                f"ak-lvu A.8: mark_invoice_paid: non-numeric amount "
+                f"{claimed_amount_raw!r} for invoice {invoice_number}; "
+                f"filing claim without amount"
+            )
+
+    # Write the claim row.
+    claim = PendingPaymentClaim(
+        user_id=user_id,
+        invoice_id=invoice.id,
+        source_email_id=source_email_id,
+        claimed_amount=claimed_amount,
+        claimed_currency=str(claimed_currency).upper() if claimed_currency else None,
+        claim_metadata={
+            "payment_method": payment_method,
+            "payment_date": payment_date,
+            "invoice_number": invoice_number,
+        },
+        resolution='pending',
+    )
+    try:
+        session.add(claim)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.error(
+            f"ak-lvu A.8: failed to persist PendingPaymentClaim for "
+            f"invoice {invoice_number}: {exc}"
+        )
+        return {
+            "status": "error",
+            "error": f"Failed to record payment claim: {exc}",
+        }
+
+    logger.info(
+        f"ak-lvu A.8: payment claim {claim.id} filed for invoice "
+        f"{invoice_number} (amount={claimed_amount} {claimed_currency}, "
+        f"method={payment_method}, date={payment_date}); status NOT flipped"
+    )
+
+    return {
+        "status": "pending",
+        "claim_id": claim.id,
+        "invoice_number": invoice_number,
+        "message": (
+            "Payment claim recorded from email — pending reconciliation. "
+            "Invoice status not changed until either (a) bank credit "
+            "matches the claimed amount or (b) Overseer manually confirms "
+            "the claim from the claims-review UI."
+        ),
+    }
 
 
 def _parse_page_range(page_range_str, total_pages):

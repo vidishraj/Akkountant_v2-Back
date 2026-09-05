@@ -23,7 +23,7 @@ from models.statementPeriods import StatementPeriod
 from models.transferLinks import TransferLink
 from models.investmentSnapshot import InvestmentSnapshot
 from models.Base import Base
-from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum
+from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PendingPaymentClaim
 from .customer_emails import CustomerEmail
 from .stockTrade import TradeAssociation
 from .user_files import UserFolder, UserFile

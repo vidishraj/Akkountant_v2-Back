@@ -1,8 +1,14 @@
+from decimal import Decimal
 from flask import g
 from sqlalchemy import func, extract, and_, or_
 from sqlalchemy.orm import joinedload
 from models.freelance_management import Invoice, Customer, InvoiceStatusEnum, InvoicePayment, CurrencyEnum
 from services.Base_Service import BaseService
+from services.earningsService import (
+    get_earnings_in_inr, get_earnings_by_month, get_earnings_by_client,
+    _sum_inr_payments,
+)
+from services.money_utils import money, q2
 from utils.logger import Logger
 from datetime import datetime, timedelta
 
@@ -25,137 +31,85 @@ class DashboardService(BaseService):
             if not user_id:
                 raise ValueError("User ID is required")
 
-            # Get all paid invoices with payments for calculation
-            paid_invoices = self.db.session.query(Invoice).options(
-                joinedload(Invoice.payments),
-                joinedload(Invoice.customer)
-            ).filter_by(
-                user_id=user_id,
-                status=InvoiceStatusEnum.paid
-            ).all()
+            from services.currencyService import CurrencyService
+            currency_service = CurrencyService()
+            session = self.db.session
+            now = datetime.now()
+            current_month_start = datetime(now.year, now.month, 1).date()
 
-            # Calculate total earnings in INR (use payment amounts which are already in INR)
-            total_earnings = sum(sum(float(payment.amount_received) for payment in invoice.payments)
-                               for invoice in paid_invoices if invoice.payments)
+            # ak-lvu A.3 + A.5: canonical earnings function used for every
+            # money aggregate. No `int()` truncation; Decimal throughout.
+            # Casts to float at the very end for JSON serialization only.
 
-            # Monthly earnings (current month paid invoices in INR)
-            current_month = datetime.now().month
-            current_year = datetime.now().year
-            current_month_paid = [inv for inv in paid_invoices 
-                                if inv.issue_date and inv.issue_date.month == current_month 
-                                and inv.issue_date.year == current_year]
-            
-            monthly_earnings = sum(sum(float(payment.amount_received) for payment in invoice.payments)
-                                 for invoice in current_month_paid if invoice.payments)
+            # Total earnings: Σ payments (INR) of PAID + PARTIALLY_PAID invoices, all-time.
+            total_earnings = get_earnings_in_inr(session, user_id)
 
-            # Pending amount - estimate all unpaid invoices in INR equivalent
-            unpaid_invoices = self.db.session.query(Invoice).filter(
+            # Monthly earnings: same, current month only.
+            monthly_earnings = get_earnings_in_inr(
+                session, user_id,
+                start_date=current_month_start, end_date=now.date(),
+            )
+
+            # Earnings by month (last 12, in INR).
+            earnings_by_month_data = get_earnings_by_month(
+                session, user_id, months_back=12,
+            )
+            earnings_by_month = [
+                {"month": row["month"], "earnings": float(row["earnings"])}
+                for row in earnings_by_month_data
+            ]
+
+            # Earnings by client (paid only, top 10).
+            earnings_by_client_data = get_earnings_by_client(
+                session, user_id, limit=10, include_unpaid=False,
+            )
+            earnings_by_client = [
+                {"client": row["client"], "earnings": float(row["earnings"])}
+                for row in earnings_by_client_data
+            ]
+
+            # Earnings by client combined (paid + unpaid, top 10).
+            earnings_by_client_combined_data = get_earnings_by_client(
+                session, user_id, limit=10, include_unpaid=True,
+                currency_service=currency_service,
+            )
+            # ak-lvu A.5: NO int() truncation — was
+            # `"earnings": int(earnings)` at old L142 dropping the paisa.
+            earnings_by_client_combined = [
+                {"client": row["client"], "earnings": float(row["earnings"])}
+                for row in earnings_by_client_combined_data
+            ]
+
+            # Completed projects = count of paid + partially_paid invoices.
+            completed_projects = session.query(Invoice).filter(
                 Invoice.user_id == user_id,
-                or_(Invoice.status == InvoiceStatusEnum.sent, Invoice.status == InvoiceStatusEnum.overdue)
-            ).all()
-            
-            # For simplicity, assume unpaid amounts are worth their face value converted to INR
-            # (in real scenario you'd use exchange rates)
-            pending_amount = sum(float(invoice.total) for invoice in unpaid_invoices)
-
-            # Completed projects = count of paid invoices
-            completed_projects = len(paid_invoices)
+                Invoice.status.in_((
+                    InvoiceStatusEnum.paid, InvoiceStatusEnum.partially_paid,
+                )),
+            ).count()
 
             # Active clients = unique clients with invoices in last 90 days
-            recent_date = datetime.now() - timedelta(days=90)
-            active_clients = self.db.session.query(Invoice.customer_id).filter(
+            recent_date = now - timedelta(days=90)
+            active_clients = session.query(Invoice.customer_id).filter(
                 Invoice.user_id == user_id,
                 Invoice.issue_date >= recent_date,
                 Invoice.customer_id.isnot(None)
             ).distinct().count()
 
-            # Earnings by month (last 12 months, paid only, in INR)
-            earnings_by_month = []
-            current = datetime.now()
-            for i in range(11, -1, -1):
-                # Properly calculate months by adjusting month/year
-                target_month = current.month - i
-                target_year = current.year
-                
-                # Handle year rollover
-                while target_month <= 0:
-                    target_month += 12
-                    target_year -= 1
-                
-                month_invoices = [inv for inv in paid_invoices 
-                                if inv.issue_date and inv.issue_date.month == target_month 
-                                and inv.issue_date.year == target_year]
-                
-                # Use payment amounts directly (already in INR)
-                month_earnings = sum(sum(float(payment.amount_received) for payment in invoice.payments)
-                                   for invoice in month_invoices if invoice.payments)
-                
-                earnings_by_month.append({
-                    "month": f"{target_year:04d}-{target_month:02d}",
-                    "earnings": float(month_earnings)
-                })
-
-            # Earnings by client (paid invoices only, using payment amounts in INR)
-            all_invoices = self.db.session.query(Invoice).options(
-                joinedload(Invoice.payments),
-                joinedload(Invoice.customer)
-            ).filter_by(user_id=user_id).all()
-            
-            client_earnings = {}
-            for invoice in all_invoices:
-                client_name = invoice.customer.name if invoice.customer else invoice.to_name
-                if client_name not in client_earnings:
-                    client_earnings[client_name] = 0
-                
-                if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
-                    # Use payment amounts (already in INR)
-                    earnings = sum(float(payment.amount_received) for payment in invoice.payments)
-                    client_earnings[client_name] += earnings
-
-            earnings_by_client = [
-                {"client": client, "earnings": earnings}
-                for client, earnings in sorted(client_earnings.items(), 
-                                             key=lambda x: x[1], reverse=True)[:10]
-            ]
-
-            # Earnings by client combined (paid + unpaid with currency conversion to INR)
-            from services.currencyService import CurrencyService
-            currency_service = CurrencyService()
-
-            client_earnings_combined = {}
-            for invoice in all_invoices:
-                client_name = invoice.customer.name if invoice.customer else invoice.to_name
-                if client_name not in client_earnings_combined:
-                    client_earnings_combined[client_name] = 0
-
-                if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
-                    # For paid invoices, use payment amounts (already in INR)
-                    earnings_inr = sum(float(payment.amount_received) for payment in invoice.payments)
-                else:
-                    # For unpaid invoices, convert using CurrencyService
-                    currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
-                    earnings_inr = currency_service.convert_to_inr(float(invoice.total), currency)
-
-                client_earnings_combined[client_name] += earnings_inr
-
-            earnings_by_client_combined = [
-                {"client": client, "earnings": int(earnings)}
-                for client, earnings in sorted(client_earnings_combined.items(), 
-                                             key=lambda x: x[1], reverse=True)[:10]
-            ]
-
-            # Recent invoices (last 5 from all statuses)
-            recent_invoices = self.db.session.query(Invoice).options(
+            # Recent invoices (last 5 from all statuses).
+            recent_invoices = session.query(Invoice).options(
                 joinedload(Invoice.payments),
                 joinedload(Invoice.customer)
             ).filter_by(user_id=user_id).order_by(Invoice.created_at.desc()).limit(5).all()
 
             recent_invoices_formatted = []
             for invoice in recent_invoices:
-                # Calculate paid amount in INR
+                # ak-lvu A.3: canonical — payment sum in INR whenever
+                # payments exist, regardless of status. FE renders this
+                # as `paidAmount`; None means no payments so far.
                 paid_amount = None
-                if invoice.status == InvoiceStatusEnum.paid and invoice.payments:
-                    paid_amount = sum(float(payment.amount_received) for payment in invoice.payments)
+                if invoice.payments:
+                    paid_amount = float(_sum_inr_payments(invoice.payments))
 
                 recent_invoices_formatted.append({
                     "invoiceNumber": invoice.invoice_number,
@@ -168,28 +122,35 @@ class DashboardService(BaseService):
                     "date": invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else ""
                 })
 
-            # Unpaid by currency breakdown
-            unpaid_by_currency = {}
+            # Unpaid by currency breakdown (unchanged shape — sums in ORIGINAL
+            # currency per-bucket, no cross-currency mixing).
+            unpaid_invoices = session.query(Invoice).filter(
+                Invoice.user_id == user_id,
+                Invoice.status.in_((
+                    InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue,
+                )),
+            ).all()
+            unpaid_by_currency: dict = {}
             for invoice in unpaid_invoices:
                 currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
                 if currency not in unpaid_by_currency:
-                    unpaid_by_currency[currency] = {"amount": 0, "count": 0}
-                
-                unpaid_by_currency[currency]["amount"] += float(invoice.total)
+                    unpaid_by_currency[currency] = {"amount": Decimal("0"), "count": 0}
+                unpaid_by_currency[currency]["amount"] += money(invoice.total)
                 unpaid_by_currency[currency]["count"] += 1
 
             unpaid_by_currency_formatted = [
                 {
                     "currency": currency,
-                    "amount": data["amount"],
+                    "amount": float(q2(data["amount"])),
                     "count": data["count"]
                 }
                 for currency, data in unpaid_by_currency.items()
             ]
 
+            # ak-lvu A.5: no int() truncation on top-level totals.
             return {
-                "totalEarnings": int(total_earnings),
-                "monthlyEarnings": int(monthly_earnings),
+                "totalEarnings": float(total_earnings),
+                "monthlyEarnings": float(monthly_earnings),
                 "completedProjects": completed_projects,
                 "activeClients": active_clients,
                 "earningsByMonth": earnings_by_month,
@@ -212,26 +173,37 @@ class DashboardService(BaseService):
             start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
             end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
 
-            earnings = self.db.session.query(func.sum(Invoice.total)).filter(
-                Invoice.user_id == user_id,
-                Invoice.status == InvoiceStatusEnum.paid,
-                Invoice.issue_date.between(start_dt, end_dt)
-            ).scalar() or 0
+            # ak-lvu A.3: was `func.sum(Invoice.total)` — sums invoice
+            # TOTAL in original currency treating all as INR. Now uses
+            # the canonical earnings function which sums payments in INR
+            # (correct on multi-currency). Includes partially_paid too
+            # so the sum reflects money actually received.
+            earnings = get_earnings_in_inr(
+                self.db.session, user_id,
+                start_date=start_dt, end_date=end_dt,
+            )
 
-            # Get detailed breakdown by invoice
-            invoices = self.db.session.query(Invoice).filter(
+            # Get detailed breakdown by invoice — paid + partially_paid.
+            invoices = self.db.session.query(Invoice).options(
+                joinedload(Invoice.payments), joinedload(Invoice.customer),
+            ).filter(
                 Invoice.user_id == user_id,
-                Invoice.status == InvoiceStatusEnum.paid,
+                Invoice.status.in_((
+                    InvoiceStatusEnum.paid, InvoiceStatusEnum.partially_paid,
+                )),
                 Invoice.issue_date.between(start_dt, end_dt)
             ).order_by(Invoice.issue_date.desc()).all()
 
             invoice_details = []
             for invoice in invoices:
+                # Per-invoice paid amount in INR (canonical).
+                paid_inr = float(_sum_inr_payments(invoice.payments)) if invoice.payments else 0.0
                 invoice_dict = {
                     "invoiceNumber": invoice.invoice_number,
                     "projectName": invoice.project_name,
                     "clientName": invoice.customer.name if invoice.customer else invoice.to_name,
                     "amount": float(invoice.total),
+                    "paidAmountINR": paid_inr,
                     "currency": invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency),
                     "status": invoice.status.value if hasattr(invoice.status, 'value') else str(invoice.status),
                     "issueDate": invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else "",

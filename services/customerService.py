@@ -3,6 +3,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import func
 from models.freelance_management import Customer, Invoice, InvoiceStatusEnum, CurrencyEnum
 from services.Base_Service import BaseService
+from services.earningsService import get_earnings_in_inr
 from utils.logger import Logger
 
 
@@ -272,43 +273,40 @@ class CustomerService(BaseService):
             raise
 
     def _calculate_customer_analytics(self, customer_id, user_id):
-        """Calculate customer analytics from invoices"""
+        """Calculate customer analytics from invoices.
+
+        ak-lvu A.3: uses the canonical `get_earnings_in_inr` — same
+        formula as dashboardService, no more per-currency branch that
+        was double-counting INR invoices via invoice.total while foreign
+        invoices used payment.amount_received.
+        """
         try:
-            from sqlalchemy.orm import joinedload
-            
-            # Get all invoices for this customer
-            invoices = self.db.session.query(Invoice).options(
-                joinedload(Invoice.payments)
-            ).filter_by(
-                customer_id=customer_id,
-                user_id=user_id
+            # Canonical earnings (paid + partially_paid, in INR).
+            total_earnings = get_earnings_in_inr(
+                self.db.session, user_id, customer_id=customer_id,
+            )
+
+            # Paid-invoice count + last-invoice-date derived from a
+            # single query (no relationship-eager-load needed for these
+            # counts).
+            invoices = self.db.session.query(Invoice).filter_by(
+                customer_id=customer_id, user_id=user_id,
             ).all()
-
-            # Calculate total earnings (paid invoices only, in INR)
-            total_earnings = 0.0
-            paid_invoice_count = 0
+            paid_invoice_count = sum(
+                1 for inv in invoices
+                if inv.status in (
+                    InvoiceStatusEnum.paid, InvoiceStatusEnum.partially_paid,
+                )
+            )
             last_invoice_date = None
-
-            for invoice in invoices:
-                # Update last invoice date
-                if invoice.issue_date:
-                    if last_invoice_date is None or invoice.issue_date > last_invoice_date:
-                        last_invoice_date = invoice.issue_date
-
-                # Calculate earnings for paid invoices
-                if invoice.status == InvoiceStatusEnum.paid:
-                    paid_invoice_count += 1
-                    
-                    if invoice.currency == CurrencyEnum.INR:
-                        # INR invoice - use total directly
-                        total_earnings += float(invoice.total)
-                    else:
-                        # Foreign currency - use payment amount (assumed to be INR)
-                        payment_total = sum(float(payment.amount_received) for payment in invoice.payments)
-                        total_earnings += payment_total
+            for inv in invoices:
+                if inv.issue_date and (
+                    last_invoice_date is None or inv.issue_date > last_invoice_date
+                ):
+                    last_invoice_date = inv.issue_date
 
             return {
-                'total_earnings': total_earnings,
+                'total_earnings': float(total_earnings),
                 'project_count': paid_invoice_count,
                 'last_invoice_date': last_invoice_date.strftime('%Y-%m-%d') if last_invoice_date else None
             }
