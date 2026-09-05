@@ -2,7 +2,7 @@
 SSE endpoint for the AI agent chat + attachment upload (ak-1x4).
 """
 
-from flask import request, jsonify, Response, stream_with_context, g
+from flask import request, jsonify, Response, stream_with_context, g, copy_current_request_context
 from services.agentService import AgentService
 from utils.agent_attachments import (
     MAX_PER_MESSAGE,
@@ -10,6 +10,7 @@ from utils.agent_attachments import (
     sweep_stale,
 )
 from utils.logger import Logger
+from utils.sse_heartbeat import wrap_with_heartbeats, DEFAULT_HEARTBEAT_INTERVAL_SEC
 
 
 class AgentController:
@@ -75,14 +76,60 @@ class AgentController:
                     "error": "conversation_id must be an integer"
                 }), 400
 
-        def generate():
-            for event in self.agent_service.stream_chat(
+        # ── ak-iove SSE keep-alive heartbeats ────────────────────────
+        # iOS 26 CriOS reaps `fetch()` streams on ANY silent gap of a
+        # few seconds after headers-received. The SDK's blocking
+        # anyio.run inside stream_chat can go silent for tens of seconds
+        # → iOS drops the connection → FE sees "Error: Load failed"
+        # even though backend + LLM + tool calls all completed clean.
+        #
+        # Fix: wrap the inner generator with heartbeat frames emitted
+        # every 5s of silence. `: keep-alive\n\n` is a standard SSE
+        # comment — polyfill parser discards, browser ignores, TCP
+        # flush keeps the connection alive from iOS's perspective.
+        # See utils/sse_heartbeat.py + bead ak-iove for full rationale.
+        #
+        # The producer runs in a daemon thread — wrap the factory with
+        # copy_current_request_context so it inherits flask.g +
+        # request state (needed for the SDK's tool executor which
+        # reads g.firebase_id + conversation context).
+
+        @copy_current_request_context
+        def _stream_chat_producer():
+            return self.agent_service.stream_chat(
                 agent_type=agent_type,
                 messages=messages,
                 user_id=user_id,
                 confirmed_tools=confirmed_tools,
                 attachments=attachments,
                 conversation_id=conversation_id,
+            )
+
+        def _producer_error_to_sse(exc: BaseException):
+            """Convert a producer-thread crash to an SSE error event
+            the FE renders. Without this, an exception inside
+            stream_chat (before it can yield its own error event) would
+            silently terminate the stream with no client-visible
+            reason."""
+            self.logger.exception(
+                "agent chat producer thread crashed: %s", exc
+            )
+            # Mirror `agentService._sse_event` shape without importing
+            # its formatter (keeps agentEP → agentService coupling minimal).
+            import json as _json
+            payload = _json.dumps({
+                "message": (
+                    f"Internal server error during agent stream: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            })
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+
+        def generate():
+            for event in wrap_with_heartbeats(
+                _stream_chat_producer,
+                interval_sec=DEFAULT_HEARTBEAT_INTERVAL_SEC,
+                on_producer_error=_producer_error_to_sse,
             ):
                 yield event
 
