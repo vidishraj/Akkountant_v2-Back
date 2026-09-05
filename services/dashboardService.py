@@ -122,12 +122,21 @@ class DashboardService(BaseService):
                     "date": invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else ""
                 })
 
-            # Unpaid by currency breakdown (unchanged shape — sums in ORIGINAL
-            # currency per-bucket, no cross-currency mixing).
-            unpaid_invoices = session.query(Invoice).filter(
+            # ak-lvu v2 F-11: unpaid-by-currency includes partially_paid
+            # OUTSTANDING balances too (a 10%-paid invoice shouldn't
+            # vanish from the "unpaid by currency" view). For a
+            # partially_paid invoice the outstanding portion is
+            # `invoice.total - paid_in_invoice_currency`; if the payment
+            # currency doesn't match, we approximate by subtracting
+            # `Σ payment.original_amount` (same-currency case common).
+            unpaid_invoices = session.query(Invoice).options(
+                joinedload(Invoice.payments),
+            ).filter(
                 Invoice.user_id == user_id,
                 Invoice.status.in_((
-                    InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue,
+                    InvoiceStatusEnum.sent,
+                    InvoiceStatusEnum.overdue,
+                    InvoiceStatusEnum.partially_paid,
                 )),
             ).all()
             unpaid_by_currency: dict = {}
@@ -135,7 +144,21 @@ class DashboardService(BaseService):
                 currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
                 if currency not in unpaid_by_currency:
                     unpaid_by_currency[currency] = {"amount": Decimal("0"), "count": 0}
-                unpaid_by_currency[currency]["amount"] += money(invoice.total)
+                # v2 F-11: for partially_paid, subtract same-currency
+                # payments from invoice.total to get the outstanding.
+                if invoice.status == InvoiceStatusEnum.partially_paid:
+                    same_currency_paid = sum(
+                        (money(p.original_amount) for p in invoice.payments
+                         if p.original_amount is not None
+                         and (p.original_currency or '').upper() == currency),
+                        Decimal("0"),
+                    )
+                    outstanding = money(invoice.total) - same_currency_paid
+                    if outstanding < Decimal("0"):
+                        outstanding = Decimal("0")
+                    unpaid_by_currency[currency]["amount"] += outstanding
+                else:
+                    unpaid_by_currency[currency]["amount"] += money(invoice.total)
                 unpaid_by_currency[currency]["count"] += 1
 
             unpaid_by_currency_formatted = [

@@ -278,25 +278,41 @@ MAIL_PROCESSOR_TOOLS = [
     },
     {
         "name": "mark_invoice_paid",
-        "description": "Mark a freelance invoice as paid based on payment confirmation email.",
+        # ak-lvu v2 F-8: terminology aligned with MP-3 claim-not-fact
+        # semantics. Files a payment CLAIM — does NOT flip status.
+        "description": (
+            "File a payment CLAIM against a freelance invoice based on "
+            "a payment-confirmation email. Does NOT flip the invoice "
+            "status — writes a pending_payment_claim row that will be "
+            "reconciled later (auto-matched against bank credits or "
+            "manually confirmed via the claims-review UI). Return value "
+            "includes claim_id for audit."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "invoice_number": {
                     "type": "string",
-                    "description": "The invoice number to mark as paid"
+                    "description": "Invoice number the claim references."
                 },
                 "payment_date": {
                     "type": "string",
-                    "description": "Payment date in YYYY-MM-DD format"
+                    "description": "Claimed payment date in YYYY-MM-DD (as stated in mail)."
                 },
                 "amount_received": {
                     "type": "number",
-                    "description": "Amount received"
+                    "description": "Claimed amount received (in mail's currency)."
+                },
+                "currency": {
+                    "type": "string",
+                    "description": (
+                        "Currency of the claimed amount (e.g. 'USD', "
+                        "'INR'). Optional — defaults to invoice.currency."
+                    ),
                 },
                 "payment_method": {
                     "type": "string",
-                    "description": "Payment method (e.g. 'bank_transfer', 'paypal', 'wise')"
+                    "description": "Claimed payment method (e.g. 'bank_transfer', 'paypal', 'wise')."
                 },
             },
             "required": ["invoice_number"]
@@ -434,7 +450,10 @@ You will receive a batch of financial emails. For each email, classify it and ex
 
 ### For freelance_payment:
 - Extract date, client, amount, currency, invoice_number
-- Try to match against existing invoices using mark_invoice_paid
+- Try to match against existing invoices using mark_invoice_paid (ak-lvu:
+  this tool FILES A CLAIM — it does NOT flip the invoice status to paid.
+  The claim gets reconciled later via bank-credit match or Overseer
+  manual confirmation. Return value includes claim_id for audit trail.)
 
 ### For freelance_contract:
 - Extract client name, contract type (SOW/NDA/agreement), date, key terms if visible

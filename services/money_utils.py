@@ -174,23 +174,35 @@ def recompute_invoice_totals(
     Returns:
       (subtotal, tax_amount, total), all Decimal quantized to 2dp.
     """
+    # ak-lvu v2 F-9: subtotal = Σ(q2 per-line). Pre-v2 summed
+    # UN-quantized qty×rate then q2'd once at end — but stored per-line
+    # amount is q2(qty×rate). N fractional lines could each round
+    # differently and drift by ~N × 0.005 between "sum of stored lines"
+    # and "computed subtotal". Standard accounting convention: sum the
+    # already-rounded per-line amounts so lines foot to subtotal.
     subtotal = Decimal("0")
     for item in items:
         qty = _item_get(item, "quantity")
         rate = _item_get(item, "rate")
-        subtotal += money(qty) * money(rate)
+        line_amount = q2(money(qty) * money(rate))
+        subtotal += line_amount
 
     if tax_rate is None:
         tax_pct = Decimal("0")
     else:
-        tax_pct = money(tax_rate)
+        # ak-lvu v2 F-10: q2 the tax rate at ingress so the recompute
+        # uses the SAME rate that's stored on the invoice — otherwise a
+        # subsequent no-op PUT recomputes with the 2dp stored rate and
+        # drifts by an epsilon from the create-time raw-precision rate.
+        tax_pct = q2(money(tax_rate))
 
     # Tax rate is a percent (e.g. 18 for 18%), so divide by 100. Using
     # Decimal("100") keeps the result Decimal without any float ops.
+    # Subtotal is already quantized; tax_amount quantizes on return.
     tax_amount = subtotal * (tax_pct / Decimal("100"))
-    total = subtotal + tax_amount
+    total = subtotal + q2(tax_amount)
 
-    return q2(subtotal), q2(tax_amount), q2(total)
+    return subtotal, q2(tax_amount), q2(total)
 
 
 def _item_get(item, key: str):
@@ -209,28 +221,31 @@ def _item_get(item, key: str):
     return getattr(item, key)
 
 
-# ── migration-gap helper (ak-lvu Q1 A: declared-nullable + tolerant-service) ──
-# The 6 new InvoicePayment columns (original_amount, original_currency,
-# inr_amount, fx_rate, fx_rate_source, converted_at) are declared nullable
-# in the ORM so `db.create_all()` picks up any missing TABLE (the new
-# PendingPaymentClaim) automatically — but the ADD COLUMN on existing
-# invoice_payments rows is a manual ALTER TABLE step. Between BE deploy
-# and infra running the ALTER, service reads that touch these columns
-# would raise `sqlalchemy.exc.OperationalError: Unknown column ...`.
+# ── migration-gap helper (ak-lvu Q1 A → v2 F-5 hardened) ─────────────
+# The 6 new InvoicePayment columns are declared nullable in the ORM so
+# `db.create_all()` picks up the new PendingPaymentClaim table
+# automatically. Existing `invoice_payments` rows need a manual ALTER
+# TABLE.
 #
-# The `_is_migration_gap` helper (borrowed pattern from ak-5vg wealth-
-# digest arc, and originally ak-ifc reconciliation_fallback) lets service
-# code catch that specific error and gracefully return None / skip the
-# new-column path — so a slightly-out-of-order deploy is a "feature
-# temporarily degraded" rather than a "money endpoint 500s".
+# v1 pattern (a1111f9): catch OperationalError / ProgrammingError at
+# attribute access on the payment row. That was UNREACHABLE: SQLAlchemy
+# includes every mapped column in the SELECT list at query emission
+# (joinedload lists them all), so a missing column raises before
+# attribute access. Reviewer F-5: reads DO NOT degrade — every invoice
+# GET / list 500s during the deploy window. Wrong-shape safety.
 #
-# Kept in money_utils so both invoiceService (write path) and
-# paymentService (read path) can import from one place without a
-# circular dep.
+# v2 policy (per F-5 recommendation for single-user + short deploy
+# window): ALTER runs BEFORE app.service restart — hard deploy prereq.
+# Documented in commit body. The tolerant-catch shape is retained
+# BUT the helper now also checks the exception class (defense-in-depth
+# per ak-5vg discipline / std reviewer MINOR-1) so a stray unrelated
+# error message containing "unknown column" as text never triggers a
+# false-positive downgrade.
+#
+# Callers keep the try/except only where the operation is genuinely
+# column-touching. Dead catches at plain attribute access removed
+# in services/invoiceService.py.
 
-# String fragments MySQL / SQLAlchemy emit on missing-column errors.
-# Matched case-insensitively so a driver-specific casing difference
-# ("Unknown column" vs "unknown column") doesn't skip the catch.
 _MIGRATION_GAP_SIGNATURES = (
     "unknown column",           # MySQL — the common case
     "no such column",           # SQLite fallback for local dev
@@ -243,16 +258,22 @@ def _is_migration_gap(exc: BaseException) -> bool:
     """True if `exc` looks like the "column not yet added by ALTER"
     error rather than a genuine DB fault.
 
-    Caller pattern (invoiceService / paymentService):
-        try:
-            return payment.inr_amount
-        except OperationalError as exc:
-            if _is_migration_gap(exc):
-                self.logger.warning("ak-lvu: pre-migration payment row, degrading gracefully")
-                return None
-            raise
+    v2 F-5 + std reviewer MINOR-1: isinstance gate restored per ak-5vg
+    discipline. Message string match alone let unrelated failures (e.g.
+    connection-drop with "unknown" in a driver trace) trigger a false-
+    positive downgrade. The class check pins the failure surface to
+    genuine DB-shape errors.
     """
     if exc is None:
         return False
+    try:
+        from sqlalchemy.exc import OperationalError, ProgrammingError
+        if not isinstance(exc, (OperationalError, ProgrammingError)):
+            return False
+    except ImportError:
+        # SQLAlchemy not on path (bare-env pure-code contexts). Fall
+        # through to message-only match; caller code can't have hit
+        # a SQLA-typed error anyway.
+        pass
     msg = str(exc).lower()
     return any(sig in msg for sig in _MIGRATION_GAP_SIGNATURES)

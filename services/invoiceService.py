@@ -129,11 +129,32 @@ class InvoiceService(BaseService):
             if 'customFields' in invoice_data and invoice_data['customFields']:
                 self._create_custom_fields(invoice.id, invoice_data['customFields'])
 
-            # ak-lvu A.4: derive status from payments post-write. Only
-            # override the client-supplied initial status if payments
-            # actually determine a different value (partially_paid /
-            # paid on create-with-payment case).
-            self._recompute_invoice_status(invoice)
+            # ak-lvu A.4 + v2 F-4 + F-12: derive status from payments
+            # post-write only when a payment was supplied.
+            #   * No-payment + client-declared status → preserve
+            #     (historical-import case; recompute would mis-flip).
+            #   * With-payment + declared status='draft' → auto-transition
+            #     to sent BEFORE recompute so the money-received-in-draft
+            #     invoice becomes visible in earnings + status derives
+            #     properly (F-12: money received but invisible closed).
+            #   * With-payment + declared status='sent'/other → recompute
+            #     from Σ payments vs total (may end up partially_paid /
+            #     paid).
+            if 'payment' in invoice_data and invoice_data['payment']:
+                if invoice.status == InvoiceStatusEnum.draft:
+                    self.logger.info(
+                        f"ak-lvu v2 F-12: create-with-payment on draft "
+                        f"{invoice.invoice_number} — auto-transitioning "
+                        f"to sent so recompute can derive final status"
+                    )
+                    invoice.status = InvoiceStatusEnum.sent
+                self._recompute_invoice_status(invoice)
+            else:
+                self.logger.debug(
+                    f"ak-lvu v2 F-4: skipping post-create recompute for "
+                    f"{invoice.invoice_number}: no payment supplied "
+                    f"(honouring client-declared status {invoice.status})"
+                )
 
             self.db.session.commit()
             self.logger.info(f"Invoice created successfully: {invoice.id}")
@@ -297,17 +318,39 @@ class InvoiceService(BaseService):
                 invoice.notes = invoice_data['notes']
             if 'terms' in invoice_data:
                 invoice.terms = invoice_data['terms']
-            # ak-lvu A.4: on UPDATE, status is server-computed from payments
-            # via `_recompute_invoice_status` — do NOT honour client status
-            # override on PUT (that's exactly how the mail-signal MP-3 CRITICAL
-            # let receivables flip on email say-so). Client status field on
-            # PUT is IGNORED with a warning to spot broken callers.
+            # ak-lvu A.4 + v2 F-3: client-supplied status on PUT.
+            # v1 ignored every status client-side (draft-lock regression:
+            # no draft→sent path). v2 accepts the SPECIFIC forward
+            # transition draft→sent (a declaration server can't derive)
+            # + reveals-only-then draft→partially_paid or draft→paid if
+            # the same PUT supplies a payment. All other client-supplied
+            # statuses are still IGNORED — `_recompute_invoice_status`
+            # owns everything from sent onward.
             if 'status' in invoice_data:
-                self.logger.info(
-                    f"ak-lvu A.4: ignoring client-supplied status "
-                    f"{invoice_data['status']!r} on PUT for {invoice_number}; "
-                    f"status is server-computed from payments"
+                client_status = str(invoice_data['status'])
+                current_status = (
+                    invoice.status.value if hasattr(invoice.status, 'value')
+                    else str(invoice.status)
                 )
+                if current_status == 'draft' and client_status == 'sent':
+                    # F-3: allow explicit draft→sent transition. Recompute
+                    # will still run at end and can override to
+                    # partially_paid / paid if payment was also supplied.
+                    invoice.status = InvoiceStatusEnum.sent
+                    self.logger.info(
+                        f"ak-lvu v2 F-3: draft→sent transition accepted "
+                        f"for {invoice_number}"
+                    )
+                elif current_status == 'draft' and client_status == 'draft':
+                    # No-op stay-as-draft.
+                    pass
+                else:
+                    self.logger.info(
+                        f"ak-lvu A.4: ignoring client-supplied status "
+                        f"{client_status!r} on PUT for {invoice_number} "
+                        f"(current={current_status}); status is "
+                        f"server-computed from payments"
+                    )
 
             # Update from fields
             if from_data:
@@ -374,31 +417,49 @@ class InvoiceService(BaseService):
                     self.db.session.add(item)
                 self.db.session.flush()
 
+            # ak-lvu v2 F-13: divergence warnings fire on EVERY PUT that
+            # touches subtotal/tax_amount/total, not just when items/tax
+            # change. A PUT that just re-sends the totals unchanged
+            # against a server-computed baseline should log if the client
+            # value drifted (broken client rounding, LLM hallucination).
+            # Actual overwrite still only happens when items/tax change
+            # (server-authoritative recompute).
             if items_changed or tax_changed:
-                # Recompute against current items (fresh from DB after any
-                # replace) and current tax_rate. Payload subtotal/total/
-                # tax_amount are only used to warn on divergence.
                 current_items = self.db.session.query(InvoiceItem).filter_by(
                     invoice_id=invoice.id
                 ).all()
                 server_subtotal, server_tax_amount, server_total = recompute_invoice_totals(
                     current_items, tax_rate=invoice.tax_rate,
                 )
-                self._warn_if_client_disagrees(
-                    invoice_data.get('subtotal'), server_subtotal, "subtotal",
-                    invoice.invoice_number,
-                )
-                self._warn_if_client_disagrees(
-                    tax_data.get('amount') if tax_data else None,
-                    server_tax_amount, "tax_amount", invoice.invoice_number,
-                )
-                self._warn_if_client_disagrees(
-                    invoice_data.get('total'), server_total, "total",
-                    invoice.invoice_number,
-                )
                 invoice.subtotal = server_subtotal
                 invoice.tax_amount = server_tax_amount
                 invoice.total = server_total
+            else:
+                # No items/tax change → recompute against CURRENT stored
+                # items just for divergence logging (no write-back).
+                current_items = list(invoice.items or [])
+                if current_items:
+                    server_subtotal, server_tax_amount, server_total = recompute_invoice_totals(
+                        current_items, tax_rate=invoice.tax_rate,
+                    )
+                else:
+                    server_subtotal = money(invoice.subtotal)
+                    server_tax_amount = money(invoice.tax_amount or 0)
+                    server_total = money(invoice.total)
+
+            # v2 F-13: log divergence on EVERY PUT, not just recompute path.
+            self._warn_if_client_disagrees(
+                invoice_data.get('subtotal'), server_subtotal, "subtotal",
+                invoice.invoice_number,
+            )
+            self._warn_if_client_disagrees(
+                tax_data.get('amount') if tax_data else None,
+                server_tax_amount, "tax_amount", invoice.invoice_number,
+            )
+            self._warn_if_client_disagrees(
+                invoice_data.get('total'), server_total, "total",
+                invoice.invoice_number,
+            )
 
             # Handle payment if provided (ak-lvu A.1: idempotent).
             if 'payment' in invoice_data and invoice_data['payment']:
@@ -649,16 +710,107 @@ class InvoiceService(BaseService):
             invoice_id=invoice_id
         ).first()
 
-        # Parse payload: prefer explicit originalAmount/originalCurrency
-        # (new contract), fall back to amountReceived + invoice.currency
-        # (legacy FE / mail LLM omission).
+        # Parse payload.
         payload_id = payment_data.get('id')
-        original_amount_raw = payment_data.get('originalAmount', payment_data.get('amountReceived'))
+        payload_original_amount = payment_data.get('originalAmount')
+        payload_original_currency = payment_data.get('originalCurrency')
+        payload_amount_received = payment_data.get('amountReceived')
+
+        # ── ak-lvu v2 F-1 (CRITICAL) — legacy-shape safety guard ──────
+        # Pre-v2 flaw: when the caller (LLM via FREELANCE_SYSTEM_PROMPT,
+        # or a legacy FE build) sends `payment: {amountReceived: X}`
+        # WITHOUT `originalAmount` / `originalCurrency`, the code fell
+        # back to treating `amountReceived` as invoice-currency and
+        # re-converted. But `_format_invoice`'s legacy alias also
+        # returns the STORED INR value under `amountReceived` — so a
+        # routine PUT-back of an unchanged returned payload triggered
+        # ~83× compounding on the first round-trip. AC-1 lived here.
+        #
+        # v2 guard: if the caller omits `originalAmount` AND there's an
+        # existing payment row AND the payload's `amountReceived`
+        # matches the existing INR-side value (inr_amount, or legacy
+        # amount_received), treat this as a no-op / metadata-only PUT.
+        # Preserve original_amount + original_currency + fx_rate +
+        # fx_rate_source + converted_at from the existing row untouched.
+        # If the amount VALUE differs from the existing INR-side, we
+        # can't safely infer intent — reject loudly and require
+        # `originalAmount` + `originalCurrency` explicitly.
+        if payload_original_amount is None and existing_payment is not None:
+            existing_inr = None
+            try:
+                existing_inr = (
+                    money(existing_payment.inr_amount)
+                    if existing_payment.inr_amount is not None
+                    else None
+                )
+            except (OperationalError, ProgrammingError) as exc:
+                if not _is_migration_gap(exc):
+                    raise
+            if existing_inr is None and existing_payment.amount_received is not None:
+                existing_inr = money(existing_payment.amount_received)
+
+            payload_inr = None
+            if payload_amount_received is not None:
+                try:
+                    payload_inr = money(payload_amount_received)
+                except MoneyError:
+                    payload_inr = None
+
+            if (
+                existing_inr is not None
+                and payload_inr is not None
+                and within_epsilon(existing_inr, payload_inr)
+            ):
+                # No-op / metadata-only PUT — preserve FX metadata.
+                self.logger.info(
+                    f"ak-lvu v2 F-1: legacy amountReceived-only PUT "
+                    f"detected (value {payload_inr} matches existing "
+                    f"inr_amount) — treating as no-op, preserving FX "
+                    f"metadata for {existing_payment.id}"
+                )
+                if 'paymentMethod' in payment_data:
+                    existing_payment.payment_method = payment_data['paymentMethod']
+                if 'paymentDate' in payment_data:
+                    existing_payment.payment_date = (
+                        datetime.strptime(payment_data['paymentDate'], '%Y-%m-%d').date()
+                        if payment_data['paymentDate'] else None
+                    )
+                if 'notes' in payment_data:
+                    existing_payment.notes = payment_data['notes']
+                if 'breakdown' in payment_data:
+                    existing_payment.breakdown = payment_data['breakdown']
+                return existing_payment
+            elif payload_inr is not None:
+                # Value differs from stored INR-side but caller only sent
+                # legacy shape. Cannot infer whether this is invoice-
+                # currency or a new INR value — refuse.
+                raise ValueError(
+                    "_replace_payment (ak-lvu v2 F-1): payment payload "
+                    "has `amountReceived` but no `originalAmount` / "
+                    "`originalCurrency`. To CHANGE the payment amount, "
+                    "provide explicit `originalAmount` + "
+                    "`originalCurrency` (bead ak-lvu wire contract). "
+                    "Legacy `amountReceived`-only PUTs are only accepted "
+                    "as no-op metadata patches (value matches stored "
+                    f"inr_amount). Got amountReceived={payload_inr}, "
+                    f"stored inr_amount={existing_inr}."
+                )
+
+        # Fresh write / explicit new payment: originalAmount is the
+        # authoritative field. Fall back to amountReceived ONLY when no
+        # existing payment exists AND the invoice currency is INR (in
+        # that case there's no double-convert risk because INR→INR is
+        # identity). All other legacy-shape cases handled above.
+        original_amount_raw = (
+            payload_original_amount
+            if payload_original_amount is not None
+            else payload_amount_received
+        )
         if original_amount_raw is None:
             raise ValueError("_replace_payment: originalAmount (or amountReceived) required")
         original_amount = money(original_amount_raw)
         original_currency = str(
-            payment_data.get('originalCurrency')
+            payload_original_currency
             or (invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency))
         ).upper()
 
@@ -745,22 +897,27 @@ class InvoiceService(BaseService):
         return payment
 
     def _recompute_invoice_status(self, invoice):
-        """ak-lvu A.4 — server-side status derivation.
+        """ak-lvu A.4 + v2 F-2 — vintage-free status derivation.
 
-        Status is derived from Σ(payment.inr_amount) vs invoice.total-in-INR:
-          Σ == 0                          → 'sent' or 'overdue' (per due_date)
-          0 < Σ < total                   → 'partially_paid'
-          Σ >= total                      → 'paid'
+        v1 mixed FX vintages: Σ(payment.inr_amount at capture-time rate)
+        vs total_inr at TODAY's rate. Any FX drift between when the
+        payment was made and when Overseer edits an unrelated field weeks
+        later would spuriously flip paid → partially_paid.
 
-        Called after every mutation on invoice or its payments.
-        `invoice.total` is in invoice CURRENCY; we compare it in INR
-        space by converting invoice.total via the same live-rate FX
-        lookup used at payment write (idempotent because the invoice's
-        stored total doesn't change and the rate is fresh at each recompute).
-
-        NOTE: on 'draft' status, this method is a no-op — draft invoices
-        haven't been "sent" yet, so a status flip to 'sent'/'overdue' is
-        premature.
+        v2 policy:
+          * **Same-currency path (common case)** — every payment's
+            original_currency matches invoice.currency AND all
+            original_amount values are populated → compare in that
+            original currency (Σ original_amount vs invoice.total). No
+            FX involved; vintage-free by construction.
+          * **Cross-currency / pre-migration fallback** — compare in
+            INR space using the sum of PAYMENT-TIME fx_rate-derived
+            inr_amount vs a total_inr computed from the WEIGHTED
+            payment-time rate (approximated as the rate on the most
+            recent payment). If no payments exist, invoice.total is
+            converted at today's rate (allow_fallback) but that only
+            affects the "still sent / already overdue" branch which
+            doesn't depend on the paid_inr threshold anyway.
         """
         # Draft stays draft. Everything else is dynamic.
         if invoice.status == InvoiceStatusEnum.draft:
@@ -772,38 +929,105 @@ class InvoiceService(BaseService):
             invoice_id=invoice.id
         ).all()
 
-        # Sum inr_amount across all payments. Tolerant of pre-migration
-        # NULL rows: they contribute 0 to the paid sum, which correctly
-        # keeps a pre-migration paid invoice as 'partially_paid' or 'sent'
-        # rather than silently claiming 'paid' when we can't audit it.
-        paid_inr = self._sum_paid_inr_safe(payments)
+        invoice_currency_str = (
+            invoice.currency.value if hasattr(invoice.currency, 'value')
+            else str(invoice.currency)
+        )
 
-        # Compare against total-in-INR. If invoice currency is INR,
-        # the compare is direct.
-        currency_str = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
-        if currency_str == 'INR':
+        if not payments:
+            # No payments — sent or overdue based on due date.
+            if invoice.due_date and invoice.due_date < datetime.now().date():
+                invoice.status = InvoiceStatusEnum.overdue
+            else:
+                invoice.status = InvoiceStatusEnum.sent
+            return
+
+        # v2 F-2: same-currency fast path — vintage-free.
+        all_same_currency = all(
+            (p.original_currency or invoice_currency_str).upper() == invoice_currency_str
+            and p.original_amount is not None
+            for p in payments
+        )
+
+        if all_same_currency:
+            paid_in_currency = sum_money(p.original_amount for p in payments)
+            invoice_total = money(invoice.total)
+            if paid_in_currency <= Decimal("0"):
+                if invoice.due_date and invoice.due_date < datetime.now().date():
+                    invoice.status = InvoiceStatusEnum.overdue
+                else:
+                    invoice.status = InvoiceStatusEnum.sent
+            elif (
+                paid_in_currency < invoice_total
+                and not within_epsilon(paid_in_currency, invoice_total)
+            ):
+                invoice.status = InvoiceStatusEnum.partially_paid
+            else:
+                invoice.status = InvoiceStatusEnum.paid
+            return
+
+        # v2 F-2: cross-currency / pre-migration fallback path.
+        # Sum inr_amount (payment-time vintage) and compare against
+        # invoice.total converted at THE MOST-RECENT PAYMENT'S vintage
+        # fx_rate — same vintage on both sides. If invoice is INR,
+        # direct compare with no FX.
+        paid_inr = self._sum_paid_inr_safe(payments)
+        if invoice_currency_str == 'INR':
             total_inr = money(invoice.total)
         else:
-            # Read-side lookup — allow fallback because status recompute
-            # runs on every mutation and we don't want a transient
-            # FX-API outage to prevent Overseer editing an unrelated
-            # field on a non-INR invoice. Vintage source is tagged;
-            # audit can spot the degraded window.
-            try:
-                fx_result = self.currency_service.convert_to_inr_with_source(
-                    money(invoice.total), currency_str, allow_fallback=True,
-                )
-                total_inr = fx_result["inr_amount"]
-            except Exception as exc:
-                self.logger.warning(
-                    f"ak-lvu A.4: status recompute for {invoice.invoice_number}: "
-                    f"total-in-INR conversion failed ({exc}); leaving status "
-                    f"as {invoice.status}"
-                )
-                return
+            # Pick the most recent payment's stored fx_rate as the
+            # comparison-vintage anchor.
+            latest = max(
+                (p for p in payments if p.fx_rate is not None),
+                key=lambda p: p.converted_at or datetime.min,
+                default=None,
+            )
+            if latest is not None and latest.original_currency:
+                # Convert invoice.total from invoice_currency to INR via
+                # the latest payment's INR-per-original-currency rate.
+                # If invoice_currency doesn't match the payment's
+                # original_currency, we don't have a clean rate — fall
+                # back to today's rate (documented degradation).
+                if latest.original_currency.upper() == invoice_currency_str:
+                    total_inr = money(invoice.total) * money(latest.fx_rate)
+                else:
+                    # Mixed-original-currencies genuinely need today's
+                    # rate. Documented: this narrow case may show FX
+                    # drift; self-heals on next mutation. Kept as the
+                    # least-bad option — the alternative is refusing
+                    # to compute status at all.
+                    try:
+                        fx = self.currency_service.convert_to_inr_with_source(
+                            money(invoice.total), invoice_currency_str,
+                            allow_fallback=True,
+                        )
+                        total_inr = fx["inr_amount"]
+                    except Exception:
+                        self.logger.warning(
+                            f"ak-lvu v2 F-2: mixed-currency status recompute "
+                            f"for {invoice.invoice_number}: no consistent "
+                            f"vintage anchor + FX unavailable; leaving "
+                            f"status as {invoice.status}"
+                        )
+                        return
+            else:
+                # No fx_rate on any payment (pre-migration). Best-effort
+                # today's-rate compare, degraded semantics documented.
+                try:
+                    fx = self.currency_service.convert_to_inr_with_source(
+                        money(invoice.total), invoice_currency_str,
+                        allow_fallback=True,
+                    )
+                    total_inr = fx["inr_amount"]
+                except Exception as exc:
+                    self.logger.warning(
+                        f"ak-lvu A.4: status recompute for {invoice.invoice_number}: "
+                        f"total-in-INR conversion failed ({exc}); leaving status "
+                        f"as {invoice.status}"
+                    )
+                    return
 
         if paid_inr <= Decimal("0"):
-            # No payment: sent (or overdue if past due_date).
             if invoice.due_date and invoice.due_date < datetime.now().date():
                 invoice.status = InvoiceStatusEnum.overdue
             else:

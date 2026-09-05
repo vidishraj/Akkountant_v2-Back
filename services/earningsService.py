@@ -244,6 +244,10 @@ def get_earnings_by_client(
         paid_sum = _sum_inr_payments(inv.payments)
         per_client[client_name] = per_client.get(client_name, Decimal("0")) + paid_sum
 
+        # ak-lvu v2 F-7: parity with `get_earnings_in_inr(include_unpaid=True)`
+        # — that function includes partially_paid OUTSTANDING amounts;
+        # this one used to omit them, creating fresh internal divergence
+        # inside the canonical module. Align.
         if include_unpaid and inv.status in (
             InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue,
         ):
@@ -261,6 +265,27 @@ def get_earnings_by_client(
                     per_client[client_name] += fx["inr_amount"]
                 except Exception:
                     pass
+        elif include_unpaid and inv.status == InvoiceStatusEnum.partially_paid:
+            # Outstanding balance for partially-paid = total_inr - paid.
+            currency_str = (
+                inv.currency.value if hasattr(inv.currency, 'value')
+                else str(inv.currency)
+            )
+            if currency_str == 'INR':
+                total_inr = money(inv.total)
+            elif currency_service:
+                try:
+                    fx = currency_service.convert_to_inr_with_source(
+                        money(inv.total), currency_str, allow_fallback=True,
+                    )
+                    total_inr = fx["inr_amount"]
+                except Exception:
+                    continue
+            else:
+                continue
+            outstanding = total_inr - paid_sum
+            if outstanding > Decimal("0"):
+                per_client[client_name] += outstanding
 
     ranked = sorted(per_client.items(), key=lambda x: x[1], reverse=True)[:limit]
     return [
