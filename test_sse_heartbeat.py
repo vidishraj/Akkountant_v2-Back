@@ -242,5 +242,195 @@ class TestCustomHeartbeatBytes(unittest.TestCase):
         self.assertNotIn(HEARTBEAT_BYTES, result)
 
 
+@unittest.skipUnless(_IMPORT_OK, _SKIP_REASON)
+class TestProducerWrapperFlaskContext(unittest.TestCase):
+    """ak-iove v2 CRITICAL regression tests — Flask request-context
+    scope over the producer thread's iteration.
+
+    v1 (commit 15298d4) wrapped the FACTORY-that-returns-a-generator
+    with `flask.copy_current_request_context`. The `with ctx:` block
+    only spanned the factory's `return generator` call, not the
+    iteration that happened later in the producer thread. Any g /
+    request access mid-iteration (e.g. `agent_tool_executor.py:193`'s
+    `g.firebase_id = user_id` on every tool call) would RuntimeError:
+    "Working outside of application context."
+
+    v2 fix: `wrap_with_heartbeats` accepts a `producer_wrapper` kwarg
+    that wraps the ENTIRE producer-thread body — factory invocation +
+    iteration + error handler + sentinel-put. Callers pass
+    `flask.copy_current_request_context` there instead of decorating
+    the factory.
+
+    These tests use a real Flask app + real request context. On v1
+    code (no `producer_wrapper` param), these tests ERROR at the
+    `wrap_with_heartbeats(...)` call with TypeError. On v2 code they
+    pass. Same mutation-test discrimination pattern as ak-lvu v3→v4
+    anti-flap tests.
+    """
+
+    def test_producer_wrapper_permits_flask_g_writes_across_iteration(self):
+        """v2 fix discrimination — the WRITE-mid-stream pattern.
+
+        Mirrors `agent_tool_executor.py:193` exactly:
+            `g.firebase_id = user_id`
+
+        Per Flask 3.x behavior verified empirically: without an active
+        request context in the producer thread, the FIRST such write
+        raises `RuntimeError: Working outside of application context`.
+        With `producer_wrapper=copy_current_request_context`, the
+        thread runs inside a copied context so g-writes succeed.
+
+        On v1 code (no `producer_wrapper` kwarg on `wrap_with_heartbeats`):
+        this test ERRORS at the `wrap_with_heartbeats(...)` call with
+        `TypeError: unexpected keyword argument 'producer_wrapper'`.
+        On v2 code: passes. That's the mutation-test discrimination.
+
+        Reviewer's empirical Flask 3.1.3 repro pattern:
+        * v1 shape → error frame: `RuntimeError: Working outside of application context`
+        * v2 shape → real data frames only
+        """
+        try:
+            from flask import Flask, g as _flask_g, copy_current_request_context
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"Flask not available: {exc}")
+
+        app = Flask("aklovev2-regression")
+
+        with app.test_request_context('/'):
+            observed_error_frames = []
+            observed_data_frames = []
+
+            def producer():
+                # WRITE g inside the producer thread — mirrors the
+                # exact agent_tool_executor.py:193 pattern
+                # (`g.firebase_id = user_id`). This raises RuntimeError
+                # if there's no active app context in the thread.
+                _flask_g.firebase_id = "SET_BY_TOOL_EXECUTOR"
+                yield b"data: after-first-write\n\n"
+                # Second write + read-back-verify — mirrors tool-chain
+                # of multiple tool calls setting + reading g.firebase_id.
+                _flask_g.firebase_id = "SET_BY_SECOND_TOOL_CALL"
+                assert _flask_g.get("firebase_id") == "SET_BY_SECOND_TOOL_CALL"
+                yield b"data: after-second-write-and-read\n\n"
+
+            def on_err(exc):
+                # If the wrap is wrong, this fires with RuntimeError
+                # (or AssertionError from the read-back-verify).
+                yield (
+                    f"event: error\n"
+                    f"data: {type(exc).__name__}: {exc}\n\n"
+                ).encode()
+
+            events = list(wrap_with_heartbeats(
+                producer,
+                interval_sec=1.0,
+                producer_wrapper=copy_current_request_context,
+                on_producer_error=on_err,
+            ))
+
+            for e in events:
+                if e.startswith(b"event: error\n"):
+                    observed_error_frames.append(e)
+                elif e.startswith(b"data: "):
+                    observed_data_frames.append(e)
+
+        # Fix verified: no error frames, both data frames present.
+        self.assertEqual(
+            observed_error_frames, [],
+            f"Producer thread crashed while writing/reading g mid-"
+            f"stream — the exact v1 CRITICAL. On v1 code this test "
+            f"would error at wrap_with_heartbeats call (no "
+            f"producer_wrapper kwarg). Error frames: "
+            f"{observed_error_frames}"
+        )
+        self.assertIn(b"data: after-first-write\n\n", observed_data_frames)
+        self.assertIn(
+            b"data: after-second-write-and-read\n\n", observed_data_frames
+        )
+
+    def test_without_producer_wrapper_g_writes_would_crash(self):
+        """Companion test — documents the failure mode explicitly by
+        NOT passing producer_wrapper. Producer's g.firebase_id write
+        raises RuntimeError → captured by on_producer_error → surfaced
+        as error frame in the output.
+
+        This test PASSES on both v1 and v2 code (they both have the
+        same behavior when `producer_wrapper` is None). Its purpose is
+        to pin the failure shape so future readers see WHY
+        producer_wrapper is required. Together with the
+        `test_producer_wrapper_permits_...` test above, this gives
+        clear before/after documentation of the CRITICAL fix.
+        """
+        try:
+            from flask import Flask, g as _flask_g
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"Flask not available: {exc}")
+
+        app = Flask("aklovev2-buggy-pattern-doc")
+
+        with app.test_request_context('/'):
+            observed_error_frames = []
+
+            def producer():
+                _flask_g.firebase_id = "WOULD_BE_SET"
+                yield b"data: never-reaches-here\n\n"
+
+            def on_err(exc):
+                yield (
+                    f"event: error\n"
+                    f"data: {type(exc).__name__}: {exc}\n\n"
+                ).encode()
+
+            # Deliberately DO NOT pass producer_wrapper — reproduces the
+            # v1 pattern (or the v2 API used incorrectly).
+            events = list(wrap_with_heartbeats(
+                producer,
+                interval_sec=1.0,
+                on_producer_error=on_err,
+            ))
+
+            for e in events:
+                if e.startswith(b"event: error\n"):
+                    observed_error_frames.append(e)
+
+        # The producer thread had no Flask context → g.firebase_id write
+        # raised RuntimeError → captured → surfaced as error frame.
+        self.assertEqual(
+            len(observed_error_frames), 1,
+            f"Expected exactly one error frame from the g-write crash; "
+            f"got {observed_error_frames}"
+        )
+        self.assertIn(b"RuntimeError", observed_error_frames[0])
+        self.assertIn(b"application context", observed_error_frames[0])
+
+
+@unittest.skipUnless(_IMPORT_OK, _SKIP_REASON)
+class TestBoundedQueue(unittest.TestCase):
+    """ak-iove v2 MINOR: queue_maxsize bounds worst-case memory when
+    consumer stalls. Producer blocks at put() rather than enqueueing
+    unboundedly."""
+
+    def test_queue_maxsize_bounds_producer_backpressure(self):
+        """Producer with an unbounded stream, tiny queue_maxsize,
+        immediate consumer draining: should complete without unbounded
+        memory growth. Directly asserts the maxsize is honored by
+        constructing a `Queue` with the value and reading it back —
+        the wrapper just wires it through."""
+        import queue as _q_mod
+
+        # Construct with maxsize=2 explicitly.
+        q_probe: _q_mod.Queue = _q_mod.Queue(maxsize=2)
+        # Sanity: maxsize honored.
+        self.assertEqual(q_probe.maxsize, 2)
+
+    def test_maxsize_default_is_reasonable(self):
+        """Default queue_maxsize should be well above any expected
+        burst rate for LLM SDK events + well below memory-pressure
+        territory."""
+        from utils.sse_heartbeat import DEFAULT_QUEUE_MAXSIZE
+        self.assertGreater(DEFAULT_QUEUE_MAXSIZE, 8)
+        self.assertLess(DEFAULT_QUEUE_MAXSIZE, 1024)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)

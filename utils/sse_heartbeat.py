@@ -65,6 +65,14 @@ HEARTBEAT_BYTES: bytes = b": keep-alive\n\n"
 # (heartbeats every 5s × 15 bytes = 3 B/s).
 DEFAULT_HEARTBEAT_INTERVAL_SEC: float = 5.0
 
+# ak-iove v2 MINOR: bound the producer→consumer queue so a stalled
+# consumer (client disconnected but Flask hasn't torn down the
+# generator yet) applies natural backpressure to the producer thread
+# rather than letting it enqueue unboundedly. 64 events is plenty for
+# any realistic LLM stream — SDK events are milliseconds apart when
+# real ones fire.
+DEFAULT_QUEUE_MAXSIZE: int = 64
+
 
 class _StreamEnded:
     """Sentinel type for the producer→consumer channel. Signals that
@@ -82,13 +90,16 @@ def wrap_with_heartbeats(
     interval_sec: float = DEFAULT_HEARTBEAT_INTERVAL_SEC,
     heartbeat_bytes: bytes = HEARTBEAT_BYTES,
     on_producer_error: Callable[[BaseException], Iterator] | None = None,
+    producer_wrapper: Callable[[Callable], Callable] | None = None,
+    queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
 ) -> Iterator:
     """Wrap an inner SSE generator with keep-alive heartbeats.
 
     Args:
-        producer_factory: A callable returning the inner generator. In
-            production this is wrapped with `copy_current_request_context`
-            so the producer thread inherits Flask's request/g context.
+        producer_factory: A callable returning the inner generator. The
+            factory is invoked INSIDE the producer thread. If the inner
+            generator needs Flask (or any other) request/thread-local
+            context, use `producer_wrapper` — NOT the factory itself.
         interval_sec: Heartbeat interval. Defaults to 5 seconds.
         heartbeat_bytes: Bytes to emit on each heartbeat. Defaults to
             the standard `: keep-alive\\n\\n` comment frame.
@@ -96,8 +107,23 @@ def wrap_with_heartbeats(
             exception and returns an iterator of events to yield before
             the sentinel. Used to convert producer crashes into SSE
             error events the FE renders. If None, exceptions from the
-            producer are silently swallowed after the sentinel is sent
-            (caller should log via a wrapper).
+            producer are silently swallowed after the sentinel is sent.
+        producer_wrapper: Optional callable that wraps the ENTIRE
+            producer-thread body — factory invocation + iteration +
+            error-handler + sentinel-put. Typical use:
+            `flask.copy_current_request_context`. This is the ONLY
+            correct place to preserve Flask's request context into the
+            producer thread — wrapping the factory itself is a known
+            Flask 3.x anti-pattern that leaves the iteration outside
+            the context and crashes on the first `g` touch inside the
+            SDK's tool executor. Verified empirically on Flask 3.1.3
+            (ak-iove v2 reviewer finding). MUST be called from within
+            the active request context so it can capture correctly.
+        queue_maxsize: Bound on the producer→consumer channel. If the
+            consumer stalls (client disconnected but WSGI hasn't torn
+            down the generator yet), the producer thread blocks at
+            `put()` — natural backpressure. Daemon thread doesn't
+            block process exit. Default 64.
 
     Yields:
         Real events from the inner generator, interleaved with
@@ -109,17 +135,16 @@ def wrap_with_heartbeats(
         even if the inner generator hangs. Queue is thread-safe.
         Consumer runs in the caller's thread (usually WSGI worker).
     """
-    q: queue.Queue = queue.Queue()
+    q: queue.Queue = queue.Queue(maxsize=queue_maxsize)
 
-    def _producer_wrapper():
+    def _producer_body():
         try:
             for event in producer_factory():
                 q.put(event)
         except BaseException as exc:
             # Producer crashed. If caller supplied a converter, yield
             # its events through the queue before the sentinel. If not,
-            # sentinel-only (caller loses the exception — that's why
-            # `on_producer_error` exists).
+            # sentinel-only.
             if on_producer_error is not None:
                 try:
                     for event in on_producer_error(exc):
@@ -131,8 +156,24 @@ def wrap_with_heartbeats(
         finally:
             q.put(_STREAM_ENDED)
 
+    # ── ak-iove v2 CRITICAL fix ────────────────────────────────────────
+    # `producer_wrapper` (typically `flask.copy_current_request_context`)
+    # wraps the ENTIRE thread body so any context captured by the
+    # wrapper spans factory invocation + full iteration + error handler
+    # + sentinel-put. Wrapping the factory-that-returns-a-generator (v1
+    # shape) was insufficient — the `with ctx:` block exited when the
+    # factory returned, leaving iteration outside the context.
+    # Reviewer's empirical Flask 3.1.3 repro:
+    #   * v1: `[b"event1", b"CRASH: RuntimeError: Working outside of
+    #           application context."]`
+    #   * v2: `[b"event1", b"event2", ..., b"final"]`
+    if producer_wrapper is not None:
+        thread_target = producer_wrapper(_producer_body)
+    else:
+        thread_target = _producer_body
+
     thread = threading.Thread(
-        target=_producer_wrapper,
+        target=thread_target,
         name="sse-heartbeat-producer",
         daemon=True,
     )

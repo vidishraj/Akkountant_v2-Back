@@ -88,13 +88,7 @@ class AgentController:
         # comment — polyfill parser discards, browser ignores, TCP
         # flush keeps the connection alive from iOS's perspective.
         # See utils/sse_heartbeat.py + bead ak-iove for full rationale.
-        #
-        # The producer runs in a daemon thread — wrap the factory with
-        # copy_current_request_context so it inherits flask.g +
-        # request state (needed for the SDK's tool executor which
-        # reads g.firebase_id + conversation context).
 
-        @copy_current_request_context
         def _stream_chat_producer():
             return self.agent_service.stream_chat(
                 agent_type=agent_type,
@@ -126,10 +120,20 @@ class AgentController:
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
 
         def generate():
+            # ak-iove v2 CRITICAL fix: pass `copy_current_request_context`
+            # as `producer_wrapper` — it wraps the ENTIRE producer-thread
+            # body, so Flask's request/g context spans the whole
+            # iteration inside `stream_chat`. v1 wrapped the FACTORY
+            # only, which entered the `with ctx:` block just for the
+            # `return generator` call and exited before iteration — the
+            # first g.firebase_id write from agent_tool_executor would
+            # then crash with "Working outside of application context."
+            # Verified empirically on Flask 3.1.3 by reviewer.
             for event in wrap_with_heartbeats(
                 _stream_chat_producer,
                 interval_sec=DEFAULT_HEARTBEAT_INTERVAL_SEC,
                 on_producer_error=_producer_error_to_sse,
+                producer_wrapper=copy_current_request_context,
             ):
                 yield event
 
