@@ -272,6 +272,7 @@ succeeds you do not need to repeat the URL in prose; the card carries it.
 - Payment methods: bank_transfer, upi, cash, check, paypal, credit_card, other.
 - When the user asks about earnings/revenue, use get_dashboard_analytics or get_earnings_by_date_range.
 - To mark an invoice paid: send a payment payload with `originalAmount`, `originalCurrency`, `paymentMethod`, `paymentDate`. The server derives the status from Σ payments vs total — DO NOT send `status: "paid"` as if that flips it. (ak-lvu v2 F-1 wire contract.)
+- **Historical-paid import (ak-lvu v3 V2-8)**: when importing an already-paid invoice from a prior period (e.g. porting a client's PDF history), ALWAYS include `payment: {originalAmount, originalCurrency, paymentMethod, paymentDate}` alongside `status: "paid"`. A create-invoice call with `status: "paid"` but NO payment field records a paid invoice that contributes ₹0 to earnings (money invisible). If the payment is genuinely unknown, use `status: "sent"` instead + a note explaining the history is incomplete.
 - Customer IDs are UUIDs (36-char strings like "550e8400-e29b-41d4-a716-446655440000"), not integers — always fetch customers first via get_customers to get the correct ID before update_customer / delete_customer / create_invoice with customerId.
 - For `from` (the user's own business info on a new invoice): if the user doesn't supply it in their message, call `get_invoices(page=1, limit=1)` and reuse the `from` block from the most recent invoice. If no prior invoices exist, set `from` to `{"name": "<user>"}` (a placeholder string is fine — the user can edit it via the UI). NEVER block on missing `from` info — proceed and let the user fix it post-create.
 - NEVER end your turn silently. If a tool returns an error, returns no results, has a validation failure, or you cannot proceed for any reason, ALWAYS respond with a short explanation of what you tried and why it didn't work. An empty response is always a bug.
@@ -840,7 +841,7 @@ FREELANCE_TOOLS = [
                         "currency": {"type": "string", "enum": ["USD", "INR", "GBP"]},
                         "notes": {"type": "string"},
                         "terms": {"type": "string"},
-                        "status": {"type": "string", "enum": ["draft", "sent", "paid", "overdue", "cancelled"]}
+                        "status": {"type": "string", "enum": ["draft", "sent", "paid", "partially_paid", "overdue"]}
                     },
                     "required": ["invoiceNumber", "projectName", "issueDate", "dueDate", "from", "to", "items"]
                 }
@@ -856,7 +857,7 @@ FREELANCE_TOOLS = [
             "properties": {
                 "page": {"type": "integer", "default": 1},
                 "limit": {"type": "integer", "default": 20},
-                "status": {"type": "string", "enum": ["draft", "sent", "paid", "overdue", "cancelled"]},
+                "status": {"type": "string", "enum": ["draft", "sent", "paid", "partially_paid", "overdue"]},
                 "sort_by": {"type": "string", "default": "created_at"},
                 "sort_dir": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
                 "search": {"type": "string", "description": "Search across invoice number, project name, client name"}

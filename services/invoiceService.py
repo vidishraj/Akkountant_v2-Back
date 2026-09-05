@@ -318,14 +318,12 @@ class InvoiceService(BaseService):
                 invoice.notes = invoice_data['notes']
             if 'terms' in invoice_data:
                 invoice.terms = invoice_data['terms']
-            # ak-lvu A.4 + v2 F-3: client-supplied status on PUT.
-            # v1 ignored every status client-side (draft-lock regression:
-            # no draft→sent path). v2 accepts the SPECIFIC forward
-            # transition draft→sent (a declaration server can't derive)
-            # + reveals-only-then draft→partially_paid or draft→paid if
-            # the same PUT supplies a payment. All other client-supplied
-            # statuses are still IGNORED — `_recompute_invoice_status`
-            # owns everything from sent onward.
+            # ak-lvu A.4 + v2 F-3 + v3 V2-1: client-supplied status on PUT.
+            # v2 accepts the draft→sent forward transition; v3 tracks
+            # whether that transition fired so the recompute-gate below
+            # knows to run recompute (a status change IS a
+            # recompute-relevant event).
+            draft_to_sent_transitioned = False
             if 'status' in invoice_data:
                 client_status = str(invoice_data['status'])
                 current_status = (
@@ -333,16 +331,13 @@ class InvoiceService(BaseService):
                     else str(invoice.status)
                 )
                 if current_status == 'draft' and client_status == 'sent':
-                    # F-3: allow explicit draft→sent transition. Recompute
-                    # will still run at end and can override to
-                    # partially_paid / paid if payment was also supplied.
                     invoice.status = InvoiceStatusEnum.sent
+                    draft_to_sent_transitioned = True
                     self.logger.info(
                         f"ak-lvu v2 F-3: draft→sent transition accepted "
                         f"for {invoice_number}"
                     )
                 elif current_status == 'draft' and client_status == 'draft':
-                    # No-op stay-as-draft.
                     pass
                 else:
                     self.logger.info(
@@ -474,11 +469,68 @@ class InvoiceService(BaseService):
                 if invoice_data['customFields']:
                     self._create_custom_fields(invoice.id, invoice_data['customFields'])
 
-            # ak-lvu A.4: recompute status from Σ(inr_amount) vs total.
-            # This runs after all mutations so partially_paid / paid /
-            # sent transitions reflect the final state, never a
-            # mid-update snapshot.
-            self._recompute_invoice_status(invoice)
+            # ── ak-lvu v3 V2-1(a) — recompute gate ─────────────────
+            # v2 flap: legacy paid non-INR invoices (payment.original_amount
+            # NULL, payment.fx_rate NULL) fall into the cross-currency
+            # fallback path and get today's-rate compared → any FX drift
+            # on an unrelated field edit (notes-only, from/to metadata)
+            # would spuriously flip paid → partially_paid on legacy stock.
+            #
+            # Fix: gate recompute on whether the PUT actually touched
+            # anything status-relevant. Notes-only / from-to / description
+            # edits skip recompute → the legacy-paid row stays paid until
+            # something REAL changes.
+            #
+            # Recompute-relevant events:
+            #   * payment supplied (any change to the payment shape)
+            #   * items replaced (change to Σ line amounts)
+            #   * tax rate changed (change to total)
+            #   * currency changed (changes comparison semantics)
+            #   * draft→sent transition (F-3 explicit status change)
+            #   * V2-2 auto-transition (draft with payment → sent)
+            #
+            # Recompute is idempotent + safe when the same-currency
+            # vintage-free path applies; the flap comes solely from the
+            # cross-currency fallback on legacy rows. Gate protects
+            # against that narrow case.
+            payment_supplied = (
+                'payment' in invoice_data and invoice_data['payment']
+            )
+            currency_changed = 'currency' in invoice_data
+
+            # ── ak-lvu v3 V2-2 — mirror F-12 on update ─────────────
+            # v2 F-12 fixed draft-with-payment on CREATE. Same shape on
+            # UPDATE was missed: user creates draft, later opens edit
+            # form and adds a payment while status still 'draft' — money
+            # stored, status stays draft, invisible to earnings.
+            # Auto-transition here too so recompute owns final state.
+            auto_transitioned_from_draft = False
+            if payment_supplied and invoice.status == InvoiceStatusEnum.draft:
+                self.logger.info(
+                    f"ak-lvu v3 V2-2: update-with-payment on draft "
+                    f"{invoice_number} — auto-transitioning to sent so "
+                    f"recompute derives final status from payment"
+                )
+                invoice.status = InvoiceStatusEnum.sent
+                auto_transitioned_from_draft = True
+
+            recompute_relevant = (
+                payment_supplied
+                or items_changed
+                or tax_changed
+                or currency_changed
+                or draft_to_sent_transitioned
+                or auto_transitioned_from_draft
+            )
+            if recompute_relevant:
+                self._recompute_invoice_status(invoice)
+            else:
+                self.logger.debug(
+                    f"ak-lvu v3 V2-1(a): skipping status recompute for "
+                    f"{invoice_number}: no recompute-relevant fields "
+                    f"in PUT (notes/from/to/description-only edit); "
+                    f"status stays {invoice.status}"
+                )
 
             self.db.session.commit()
             self.logger.info(f"Invoice updated successfully: {invoice_number}")
@@ -797,10 +849,14 @@ class InvoiceService(BaseService):
                 )
 
         # Fresh write / explicit new payment: originalAmount is the
-        # authoritative field. Fall back to amountReceived ONLY when no
-        # existing payment exists AND the invoice currency is INR (in
-        # that case there's no double-convert risk because INR→INR is
-        # identity). All other legacy-shape cases handled above.
+        # authoritative field. If absent, fall back to amountReceived +
+        # invoice.currency — safe on fresh writes because there's no
+        # existing INR value to double-convert against. The dangerous
+        # case (legacy amountReceived-only PUT that echoes a stored INR
+        # value as though it were invoice-currency) is handled by the
+        # F-1 guard above, which never reaches this branch. Compounding
+        # on template-replay closed by the v3 V2-5 (amount, currency)
+        # idempotency match above.
         original_amount_raw = (
             payload_original_amount
             if payload_original_amount is not None
@@ -814,13 +870,16 @@ class InvoiceService(BaseService):
             or (invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency))
         ).upper()
 
-        # ── ak-lvu A.1 idempotency check ─────────────────────────────
-        # If the payload matches the existing row (same id + same
-        # original_amount + same original_currency), this is a no-op PUT
-        # (e.g. status-change or notes-edit round-trip). Preserve the
-        # row + FX metadata, only refresh mutable fields (payment_method,
-        # payment_date, notes, breakdown).
-        if existing_payment and payload_id and payload_id == existing_payment.id:
+        # ── ak-lvu A.1 idempotency check + v3 V2-5 ───────────────────
+        # v2 required payload.id to match existing_payment.id for the
+        # no-op path. V2-5: also match on (original_amount, original_currency)
+        # even when id is absent — prevents delete+recreate re-price
+        # + loss of fx_rate/converted_at audit when FE / LLM sends a
+        # payment payload without echoing the id back.
+        if existing_payment and (
+            (payload_id and payload_id == existing_payment.id)
+            or (payload_id is None)  # V2-5: fall back to amount+currency
+        ):
             same_amount = False
             try:
                 same_amount = (

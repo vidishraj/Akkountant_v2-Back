@@ -467,6 +467,196 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
             f"{result['status']}"
         )
 
+    # ── v3 V2-7: broader coverage ─────────────────────────────────────
+
+    def test_paymentservice_add_payment_delegates_to_replace_payment(self):
+        """v3 V2-7: paymentService.add_payment delegates to
+        invoiceService._replace_payment (per ak-lvu A.1). This test
+        exercises that path so the F-1 guard also protects direct
+        paymentService callers, not just update_invoice.
+
+        We drive the delegation manually here since paymentService's
+        own singleton wiring would need parallel injection — the key
+        assertion is: a payment written via _replace_payment ends up
+        with full FX metadata populated.
+        """
+        # Fresh invoice, sent status, no payment.
+        inv = self.svc.create_invoice({
+            "invoiceNumber": "INV-DELEG",
+            "projectName": "delegation",
+            "issueDate": "2026-09-01",
+            "dueDate": "2026-09-30",
+            "from": {"name": "V", "email": "v@example.com", "address": "..."},
+            "to": {"name": "C", "email": "c@example.com", "address": "..."},
+            "currency": "USD",
+            "items": [{"description": "x", "quantity": 1, "rate": 200}],
+            "tax": {"rate": 0, "amount": 0},
+            "subtotal": 200,
+            "total": 200,
+            "status": "sent",
+        })
+
+        # Simulate paymentService.add_payment → _replace_payment.
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number="INV-DELEG",
+        ).first()
+        self.svc._replace_payment(invoice_row.id, {
+            "originalAmount": 200,
+            "originalCurrency": "USD",
+            "paymentMethod": "wise",
+        })
+        self.svc._recompute_invoice_status(invoice_row)
+        self.db.session.commit()
+
+        # Fetch back and assert full FX metadata populated.
+        result = self.svc.get_invoice_by_number("INV-DELEG")
+        self.assertEqual(result['status'], 'paid')
+        self.assertEqual(result['payment']['inrAmount'], 16650.00)
+        self.assertEqual(result['payment']['fxRate'], 83.25)
+        self.assertEqual(result['payment']['originalAmount'], 200.00)
+        self.assertEqual(result['payment']['originalCurrency'], 'USD')
+        self.assertIsNotNone(result['payment']['fxRateSource'])
+
+    def test_changed_amount_without_original_rejected(self):
+        """v3 V2-7: F-1 guard's REJECT path. A payload that sends
+        `amountReceived` differing from the stored inr_amount, without
+        `originalAmount`, must be REJECTED with a clear error rather
+        than silently reconverting.
+
+        Distinguishes v2 (which correctly rejects) from a hypothetical
+        regression that treats the mismatched amount as invoice-currency.
+        """
+        initial = self._create_usd_invoice_with_payment()
+        # Send back a payload with amountReceived changed but no
+        # originalAmount — this is the "user actually changed the
+        # amount but forgot the new contract" case.
+        payload = dict(initial)
+        payload['payment'] = {
+            "amountReceived": 9999.00,  # differs from stored 8325
+            "paymentMethod": "bank_transfer",
+        }
+        with self.assertRaises(Exception) as ctx:
+            self.svc.update_invoice(initial['invoiceNumber'], payload)
+        # Confirm the error surfaces the guard's diagnostic language.
+        err = str(ctx.exception).lower()
+        self.assertTrue(
+            "originalamount" in err or "no originalamount" in err or
+            "provide explicit" in err,
+            f"Expected F-1 guard reject error, got: {ctx.exception}"
+        )
+
+    def test_create_with_payment_stale_replay_no_double_convert(self):
+        """v3 V2-7: `create_invoice` called twice with the SAME
+        payload (e.g. LLM retry after a network error, or a stale
+        request replay) — second call should reject on the unique
+        invoice_number OR produce a fresh row with correct FX
+        metadata. Either way it must NOT double-convert.
+
+        Concrete failure this guards against: a template-replay where
+        the LLM re-sends a create payload that includes a payment with
+        an INR value in `amountReceived`. That path shouldn't exist
+        (create_invoice's `_replace_payment` sees no existing_payment
+        and takes the fresh-write branch) — but if the invoice was
+        already created and this is a stale retry, the fresh-write
+        branch would re-convert the LLM's payload value.
+
+        Test asserts: fresh-write with `originalAmount` + `originalCurrency`
+        works correctly; there's no path where the same amount gets
+        multiplied by fx_rate twice.
+        """
+        # First create — succeeds.
+        payload = {
+            "invoiceNumber": "INV-STALE-REPLAY",
+            "projectName": "stale replay",
+            "issueDate": "2026-09-01",
+            "dueDate": "2026-09-30",
+            "from": {"name": "V", "email": "v@example.com", "address": "..."},
+            "to": {"name": "C", "email": "c@example.com", "address": "..."},
+            "currency": "USD",
+            "items": [{"description": "x", "quantity": 1, "rate": 150}],
+            "tax": {"rate": 0, "amount": 0},
+            "subtotal": 150,
+            "total": 150,
+            "status": "sent",
+            "payment": {
+                "originalAmount": 150,
+                "originalCurrency": "USD",
+                "paymentMethod": "wise",
+                "paymentDate": "2026-09-15",
+            },
+        }
+        result = self.svc.create_invoice(payload)
+        self.assertEqual(result['payment']['inrAmount'], 12487.50)
+        self.assertEqual(result['payment']['fxRate'], 83.25)
+
+        # Stale replay attempt — same payload. In production MySQL a
+        # unique index on invoice_number rejects the duplicate; in this
+        # sqlite harness the constraint isn't enforced so we allow the
+        # duplicate but verify the KEY invariant: no double-conversion.
+        # A stale-replay payload's `originalAmount` field carries the
+        # ORIGINAL currency value (150 USD), NOT the stored INR value
+        # (12487.50) — so the fresh row must convert 150 × 83.25 =
+        # 12487.50, NOT 12487.50 × 83.25 = 1,039,584.
+        try:
+            second = self.svc.create_invoice(payload)
+            # Duplicate accepted (sqlite harness) — verify no double-convert.
+            self.assertEqual(
+                second['payment']['inrAmount'], 12487.50,
+                f"V2-7 stale-replay: second create's inrAmount drifted "
+                f"— possible double-conversion. Got: {second['payment']['inrAmount']}"
+            )
+        except Exception:
+            # Duplicate rejected (prod MySQL shape) — original still intact.
+            pass
+
+        # Confirm the ORIGINAL row's FX metadata is unchanged.
+        again = self.svc.get_invoice_by_number("INV-STALE-REPLAY")
+        self.assertEqual(again['payment']['inrAmount'], 12487.50)
+        self.assertEqual(again['payment']['fxRate'], 83.25)
+
+    def test_notes_only_edit_does_not_flap_status_on_legacy_row(self):
+        """v3 V2-1(a): recompute-gate. A legacy paid non-INR invoice
+        (payment.original_amount NULL, no fx_rate stored) should NOT
+        flap paid→partially_paid when the user edits notes only.
+
+        Simulate legacy state: create a normal invoice with payment,
+        then manually NULL out the FX metadata columns on the payment
+        row (mimics a pre-migration row that got populated by the ALTER
+        but never re-written with FX metadata). Then simulate an FX
+        drift by mutating the stub currency rate. Notes-only edit
+        should preserve `paid` status.
+        """
+        initial = self._create_usd_invoice_with_payment()
+        self.assertEqual(initial['status'], 'paid')
+
+        # Mimic legacy row: NULL out FX metadata on the stored payment.
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number=initial['invoiceNumber'],
+        ).first()
+        payment_row = invoice_row.payments[0]
+        payment_row.original_amount = None
+        payment_row.original_currency = None
+        payment_row.fx_rate = None
+        payment_row.fx_rate_source = None
+        payment_row.converted_at = None
+        # amount_received + inr_amount stay populated (legacy shape).
+        self.db.session.commit()
+
+        # Simulate FX drift.
+        self.svc.currency_service.rates['USD'] = Decimal("95.00")
+
+        # Notes-only edit — should NOT trigger recompute.
+        payload = dict(initial)
+        payload['notes'] = "just editing notes on a legacy paid invoice"
+
+        result = self.svc.update_invoice(initial['invoiceNumber'], payload)
+        self.assertEqual(
+            result['status'], 'paid',
+            f"v3 V2-1(a): notes-only edit on legacy paid non-INR invoice "
+            f"triggered recompute + FX-vintage flap. Expected 'paid', "
+            f"got {result['status']}."
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)
