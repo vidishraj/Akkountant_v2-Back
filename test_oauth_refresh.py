@@ -561,6 +561,80 @@ class TestEnvOverrides(unittest.TestCase):
             self.assertEqual(result["status"], "refreshed")
             self.assertEqual(result["path"], path)
 
+    def test_claude_config_dir_env_var_resolves_credentials_json_inside(self):
+        """ak-l3ss Fix (b): CLAUDE_CONFIG_DIR fallback layer.
+
+        When the wrapper is invoked WITHOUT explicit path AND WITHOUT
+        AK_CLAUDE_CREDENTIALS_PATH but WITH CLAUDE_CONFIG_DIR (the env
+        var Anthropic's bundled CLI honours), the wrapper must resolve
+        to `${CLAUDE_CONFIG_DIR}/.credentials.json`. Single env var,
+        both sides agree, no drift risk between the CLI's credentials
+        read and the wrapper's.
+
+        Precedence contract: this test also pins that
+        AK_CLAUDE_CREDENTIALS_PATH wins over CLAUDE_CONFIG_DIR — the
+        wrapper-specific full-path override takes priority when both
+        are set (existing behaviour preserved).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            # Write credentials.json inside the config dir at the
+            # standard CLI-convention filename.
+            path = _write_creds(d, _make_creds())
+            # Confirm the file the fixture wrote is named .credentials.json
+            # (matches CLI convention this test relies on).
+            self.assertTrue(path.endswith(".credentials.json"),
+                            f"fixture wrote unexpected filename: {path}")
+
+            def http_post(url, body):
+                return {"access_token": "x", "expires_in": 3600}
+
+            # Make sure the wrapper env var is NOT set — we're testing
+            # the CLAUDE_CONFIG_DIR fallback specifically.
+            prior_ak = os.environ.pop("AK_CLAUDE_CREDENTIALS_PATH", None)
+            os.environ["CLAUDE_CONFIG_DIR"] = d
+            try:
+                result = refresh_if_expiring(
+                    now=_NOW, window_seconds=3 * 3600,
+                    http_post=http_post,
+                )
+            finally:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+                if prior_ak is not None:
+                    os.environ["AK_CLAUDE_CREDENTIALS_PATH"] = prior_ak
+
+            self.assertEqual(result["status"], "refreshed")
+            # The resolved path is `${CLAUDE_CONFIG_DIR}/.credentials.json`.
+            self.assertEqual(result["path"], path)
+
+    def test_ak_credentials_path_wins_over_claude_config_dir(self):
+        """Precedence: AK_CLAUDE_CREDENTIALS_PATH wins over
+        CLAUDE_CONFIG_DIR when both are set. Preserves existing
+        behaviour — the wrapper-specific full-path override is
+        higher-priority than the Anthropic-CLI dir env var."""
+        with tempfile.TemporaryDirectory() as ak_dir, \
+                tempfile.TemporaryDirectory() as cli_dir:
+            ak_path = _write_creds(ak_dir, _make_creds())
+            # A different credentials file exists under CLAUDE_CONFIG_DIR;
+            # the wrapper must NOT pick this one.
+            _write_creds(cli_dir, _make_creds())
+
+            def http_post(url, body):
+                return {"access_token": "x", "expires_in": 3600}
+
+            os.environ["AK_CLAUDE_CREDENTIALS_PATH"] = ak_path
+            os.environ["CLAUDE_CONFIG_DIR"] = cli_dir
+            try:
+                result = refresh_if_expiring(
+                    now=_NOW, window_seconds=3 * 3600,
+                    http_post=http_post,
+                )
+            finally:
+                del os.environ["AK_CLAUDE_CREDENTIALS_PATH"]
+                del os.environ["CLAUDE_CONFIG_DIR"]
+
+            self.assertEqual(result["status"], "refreshed")
+            self.assertEqual(result["path"], ak_path)
+
 
 # ── Pure-helper unit tests ──────────────────────────────────────────
 

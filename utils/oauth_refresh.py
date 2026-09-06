@@ -111,8 +111,17 @@ from typing import Any, Callable, Optional
 _ENV_CREDENTIALS_PATH = "AK_CLAUDE_CREDENTIALS_PATH"
 _ENV_TOKEN_URL = "CLAUDE_CODE_CUSTOM_OAUTH_URL"
 _ENV_CLIENT_ID = "CLAUDE_CODE_OAUTH_CLIENT_ID"
+# ak-l3ss Fix (b): CLAUDE_CONFIG_DIR is Anthropic's documented env var
+# for the CLI's config location (per Claude Code public docs). Honouring
+# it here means an operator setting a single env var isolates BOTH the
+# bundled CLI's credentials read AND this wrapper's — no drift risk
+# between the two paths, which is the whole point of Fix (b) config
+# isolation. When set, credentials.json is resolved as
+# `${CLAUDE_CONFIG_DIR}/.credentials.json`.
+_ENV_CLAUDE_CONFIG_DIR = "CLAUDE_CONFIG_DIR"
+_CREDENTIALS_FILENAME = ".credentials.json"
 
-_DEFAULT_CREDENTIALS_REL = os.path.join(".claude", ".credentials.json")
+_DEFAULT_CREDENTIALS_REL = os.path.join(".claude", _CREDENTIALS_FILENAME)
 
 # v3 (per Lead's dispatch): infra found version drift between prod
 # and Desktop CLIs. Anthropic renamed console.anthropic.com →
@@ -193,11 +202,26 @@ def _default_credentials_path() -> str:
 
 
 def _resolve_credentials_path(path: Optional[str] = None) -> str:
+    """Precedence (ak-l3ss Fix (b) preserves existing behaviour + adds
+    CLAUDE_CONFIG_DIR as a new fallback layer between the wrapper's
+    own env var and the hardcoded default):
+
+      1. Explicit `path` arg (caller override — highest)
+      2. AK_CLAUDE_CREDENTIALS_PATH — wrapper-specific full-path override
+      3. CLAUDE_CONFIG_DIR — Anthropic's documented dir env var; append
+         `.credentials.json` to match the CLI's layout convention. Same
+         var the bundled CLI honours, so a single env var isolates both.
+      4. Default: `~/.claude/.credentials.json`
+    """
     if path:
         return path
     env_path = os.environ.get(_ENV_CREDENTIALS_PATH, "").strip()
     if env_path:
         return env_path
+    # ak-l3ss Fix (b): CLAUDE_CONFIG_DIR fallback layer.
+    config_dir = os.environ.get(_ENV_CLAUDE_CONFIG_DIR, "").strip()
+    if config_dir:
+        return os.path.join(config_dir, _CREDENTIALS_FILENAME)
     return _default_credentials_path()
 
 
