@@ -437,55 +437,147 @@ class StocksService(Base_MSN, ABC):
         return False
 
     def fetch_kite_holdings(self, userId):
-        """Fetch holdings from Kite and sync with local database.
+        """Fetch holdings from Kite and format for the Kite-view display.
 
         Kite's holdings payload already carries settlement, day-change and
         collateral detail; we used to drop all of it on the floor here. Keeping
         it costs no extra API call and no extra auth surface.
 
-        Quantity semantics follow Kite's own (see ak-w4p contract with FE):
-          * ``quantity``      -- SETTLED shares only, never includes T+1
-          * ``t1_quantity``   -- bought but not yet in demat (the "why isn't my
-                                 Friday buy showing up until Monday" case)
-        Consumers that want the committed position display ``quantity +
-        t1_quantity`` with the split disclosed. They are deliberately NOT
-        summed here, and T+1 never enters profit/loss maths -- our cost basis
-        is statement-derived and only covers settled shares, so valuing T+1 at
-        market inside P&L would book its entire market value as profit.
+        ## Quantity semantics (ak-yz9c fold-in, 2026-09-11)
+
+        Under Overseer's 2026-09-11 directive T+1 shares are treated as
+        **owned** for accounting: Invested / TotalAssetValue / Change /
+        %Change / day P&L all fold T+1 into the totals. The chip stays as a
+        visual "not yet in demat" indicator; the summary "Pending (T+1)"
+        column is REMOVED.
+
+        Wire naming (Option (i), agreed with akkountant_frontend
+        2026-09-11 -- see contract discussion on the ak-yz9c bead):
+          * ``quantity``      -- KITE raw settled qty. Semantic UNCHANGED from
+                                 pre-fold to avoid a silent double-count on
+                                 any FE consumer that still does
+                                 ``quantity + t1_quantity``. Kept for
+                                 backwards compat.
+          * ``t1_quantity``   -- KITE raw T+1 qty. Semantic UNCHANGED for the
+                                 same backwards-compat reason. Present
+                                 alongside the new ``t1_qty`` alias.
+          * ``settled_qty``   -- NEW. Kite's settled qty view, coerced to a
+                                 non-None int/float. Explicit fold-in field.
+          * ``t1_qty``        -- NEW. Renamed alias of ``t1_quantity`` for
+                                 symmetry with ``settled_qty``. FE cuts over
+                                 to the new name in its ak-yz9c commit.
+          * ``total_qty``     -- NEW. ``settled_qty + t1_qty`` (BLENDED total).
+                                 The fold discriminator field.
+
+        Money-math fields (ak-yz9c fold, Path A -- awaiting Overseer stamp):
+          * ``invested``            = total_qty × average_price
+          * ``current_value``       = total_qty × last_price
+          * ``unrealized_pnl``      = current_value - invested
+          * ``day_change_amount``   = total_qty × (last_price - close_price)
+                                      (folds T+1 per Overseer Q2 answer)
+
+        Kite's ``average_price`` is the broker-canonical weighted avg for
+        the NET position (settled + T+1 combined). Verified via Kite Connect
+        docs + real T+2 settlement behavior (avg unchanged, just reclassifies
+        buckets). No separate ``t1_average_price`` field is exposed by Kite;
+        no re-derivation is needed under Path A -- we use ``average_price``
+        directly as the blended broker-canonical avg.
+
+        ## Removed field
+
+        ``pending_t1_value`` -- REMOVED per Overseer Q1 answer: redundant
+        once T+1 folds into Invested / TotalAssetValue / per-holding cost.
+        FE-side removes the render at MSNSummary.tsx L198-208. Leaving it
+        emitted would tempt a future FE consumer to re-introduce the
+        double-count path.
+
+        ## Prior-policy history (why the pre-fold contract was inverted)
+
+        The ak-w4p contract (Aug 2026) treated Kite's ``average_price`` as a
+        cross-check hint only, kept ``quantity`` settled-only, and surfaced
+        ``pending_t1_value`` as a separate rupee amount excluded from P&L.
+        Rationale at the time: "valuing pending shares at market inside P&L
+        would book their entire market value as phantom profit." That was
+        correct under a statement-authoritative cost basis with no T+1 cost.
+
+        Superseded by:
+          * 2026-09-04 flatten-on-sync policy -- Kite ``average_price`` is
+            broker-canonical for the Kite-enriched display path
+          * 2026-09-11 Overseer directive (ak-yz9c) -- fold T+1 fully
+          * Overseer Q1 confirm (remove Pending T+1 col) / Q2 confirm
+            (T+1 in day P&L)
+
+        Statement-DB write path (``sync_kite_holdings_to_db``) is unchanged
+        -- statement ledger remains statement-authoritative, distinct from
+        the Kite display path. See guarding tests in
+        test_kite_holdings_fields.py section 6.
         """
         try:
             holdings = self.kite_service.get_holdings(userId)
             formatted_holdings = []
 
             for holding in holdings:
-                t1_quantity = holding.get('t1_quantity', 0) or 0
+                # Coerce every numeric to a defined non-None value first --
+                # Kite is known to emit `null` for optional fields on
+                # stripped-down responses, and downstream arithmetic must
+                # never see None.
+                settled_qty = holding.get('quantity', 0) or 0
+                t1_qty = holding.get('t1_quantity', 0) or 0
+                total_qty = settled_qty + t1_qty
+
+                average_price = holding.get('average_price', 0) or 0
                 last_price = holding.get('last_price', 0) or 0
+                close_price = holding.get('close_price', 0) or 0
+
+                # Folded money math (Path A: Kite average_price as
+                # broker-canonical blended avg). If Overseer stamps Path B or
+                # C, `invested` and `unrealized_pnl` shift to
+                # `InvestmentService.fetchUserSecurities` where DB `buyPrice`
+                # is visible; `current_value` and `day_change_amount` stay
+                # here (they don't touch DB `buyPrice`).
+                invested = float(total_qty) * float(average_price)
+                current_value = float(total_qty) * float(last_price)
+                unrealized_pnl = current_value - invested
+                day_change_amount = float(total_qty) * (float(last_price) - float(close_price))
+
                 formatted_holding = {
                     'symbol': holding.get('tradingsymbol'),
-                    # Settled-only. Do not fold t1_quantity in here.
-                    'quantity': holding.get('quantity', 0),
-                    'average_price': holding.get('average_price', 0),
+                    # --- raw Kite fields (semantic preserved, see docstring) ---
+                    'quantity': settled_qty,
+                    't1_quantity': t1_qty,
+
+                    # --- ak-yz9c fold-in additive fields ---
+                    'settled_qty': settled_qty,
+                    't1_qty': t1_qty,
+                    'total_qty': total_qty,
+
+                    # --- prices (Kite broker-canonical) ---
+                    'average_price': average_price,
                     'last_price': last_price,
+                    'close_price': close_price,
+
+                    # --- ak-yz9c folded money math ---
+                    'invested': invested,
+                    'current_value': current_value,
+                    'unrealized_pnl': unrealized_pnl,
+                    'day_change_amount': day_change_amount,
+
+                    # --- Kite's own settled-only P&L / day change (preserved
+                    #     for observability; NOT the folded values) ---
                     'pnl': holding.get('pnl', 0),
+                    'day_change': holding.get('day_change', 0) or 0,
+                    'day_change_percentage': holding.get('day_change_percentage', 0) or 0,
+
+                    # --- identifiers ---
                     'product': holding.get('product'),
                     'exchange': holding.get('exchange'),
                     'isin': holding.get('isin'),
 
-                    # --- settlement / quantity breakdown ---
-                    't1_quantity': t1_quantity,
+                    # --- settlement / quantity breakdown (unchanged pre-fold) ---
                     'realised_quantity': holding.get('realised_quantity', 0) or 0,
                     'authorised_quantity': holding.get('authorised_quantity', 0) or 0,
                     'collateral_quantity': holding.get('collateral_quantity', 0) or 0,
                     'collateral_type': holding.get('collateral_type'),
-                    # Market value of shares still pending settlement. Surfaced
-                    # as its own figure so the UI can show a "Pending (T+1)"
-                    # stat; excluded from currentValue/profit by design.
-                    'pending_t1_value': float(t1_quantity) * float(last_price),
-
-                    # --- day change (previously recomputed against a stale close) ---
-                    'close_price': holding.get('close_price', 0) or 0,
-                    'day_change': holding.get('day_change', 0) or 0,
-                    'day_change_percentage': holding.get('day_change_percentage', 0) or 0,
 
                     # --- margin trading facility (zeros when MTF is unused) ---
                     'mtf_quantity': (holding.get('mtf') or {}).get('quantity', 0) or 0,
@@ -501,18 +593,36 @@ class StocksService(Base_MSN, ABC):
             raise
 
     #: Fields copied from a Kite holding onto a securities-list row. Kept
-    #: snake_case and at the row's top level per the ak-w4p wire contract.
+    #: snake_case and at the row's top level.
+    #:
+    #: ak-yz9c (2026-09-11): added `settled_qty`, `t1_qty`, `total_qty`, and
+    #: the folded money-math fields (`invested`, `current_value`,
+    #: `unrealized_pnl`, `day_change_amount`). Removed `pending_t1_value`
+    #: (Overseer Q1 answer; redundant once T+1 folds in). Kept `t1_quantity`
+    #: for one-cycle backwards compat while FE renames to `t1_qty`.
     KITE_ROW_FIELDS = (
+        # Fold-in additive quantities (ak-yz9c)
+        'settled_qty',
+        't1_qty',
+        'total_qty',
+        # Legacy raw Kite quantities (kept for FE-side transition window)
         't1_quantity',
+        # Preserved from pre-fold
         'realised_quantity',
         'authorised_quantity',
         'collateral_quantity',
+        # Prices (Kite broker-canonical)
         'close_price',
         'day_change',
         'day_change_percentage',
         'average_price',
         'last_price',
-        'pending_t1_value',
+        # Folded money math (ak-yz9c)
+        'invested',
+        'current_value',
+        'unrealized_pnl',
+        'day_change_amount',
+        # MTF fields
         'mtf_quantity',
     )
 

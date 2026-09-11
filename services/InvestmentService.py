@@ -244,9 +244,21 @@ class InvestmentService(BaseService):
                     'pChange': 0, 'previousClose': 0, 'error': 'NOT_FOUND'
                 })
                 # Kite settlement/day-change fields, snake_case at row top
-                # level. `buyQuant` deliberately stays settled-only and is not
-                # adjusted by t1_quantity -- consumers combine the two for
-                # display and disclose the split.
+                # level.
+                #
+                # `buyQuant` (statement-DB settled qty) and `buyPrice`
+                # (statement-derived cost) stay unchanged on the enriched
+                # row -- the ak-yz9c fold-in adds `settled_qty` / `t1_qty` /
+                # `total_qty` / `invested` / `current_value` /
+                # `unrealized_pnl` / `day_change_amount` alongside, via
+                # KITE_ROW_FIELDS overlay (Option (i) wire naming agreed
+                # with akkountant_frontend 2026-09-11). FE reads the new
+                # fields for the fold display; `buyQuant` / `buyPrice`
+                # remain accessible for statement-authoritative views.
+                #
+                # The statement-DB write path (`sync_kite_holdings_to_db`)
+                # remains statement-authoritative and unchanged — the fold
+                # operates on the DISPLAY path only.
                 kiteHolding = kiteHoldings.get(symbol)
                 if kiteHolding:
                     for field in self.StockService.KITE_ROW_FIELDS:
