@@ -1,11 +1,39 @@
+import os
+from datetime import datetime
+
+import requests
+from bs4 import BeautifulSoup
+
 from services.tasks.AIRateTask import AIRateTask
 from utils.logger import Logger
 
 
 # Upstream URL for IBJA daily gold/silver rates.
-# IBJA publishes the rate table at this page; sonnet extracts the AM/PM
-# prices per purity from the HTML.
+# Pre-ak-ad1: LLM-extracted (sonnet reads the HTML and returns structured
+# output). Post-ak-ad1 Phase 2 (2026-11-11): optional direct-scrape path
+# via env var GOLD_SOURCE=scrape; see _fetch_rates_via_scrape below.
 GOLD_URL = "https://ibjarates.com/"
+
+# ak-ad1 Phase 2 (2026-11-11): env-var dispatch between AI and direct-
+# scrape paths.
+#   * GOLD_SOURCE unset / `ai`  — LLM extraction (pre-ak-ad1 behavior)
+#   * GOLD_SOURCE=scrape        — direct BeautifulSoup scrape (ak-ad1 Phase 2 primary)
+#
+# Default stays `ai` so Phase 2 rollout is opt-in. Phase 3 cutover flips
+# default to `scrape`. Phase 4 removes the AI path entirely per
+# Overseer Q4 answer (2026-11-11): "drop LLM ENTIRELY from gold path
+# post-cutover, NOT keep-as-fallback".
+_GOLD_SOURCE_ENV = "GOLD_SOURCE"
+
+# Scrape-path HTTP settings.
+_SCRAPE_TIMEOUT_SECONDS = 30
+
+# ak-ad1 Phase 2: GST multiplier applied post-extract. Identical to the
+# LLM prompt's inline formula (`avg_with_gst = int(avg_price * 1.03)`);
+# hoisted here so BOTH paths use the same constant. Phase 3 cleanup
+# removes the duplicate inline value from GOLD_SYSTEM_PROMPT once the
+# AI path is dropped.
+_GST_MULTIPLIER = 1.03
 
 GOLD_SYSTEM_PROMPT = """You are a data extraction assistant. You will receive
 the HTML of the IBJA (India Bullion and Jewellers Association) daily rate page.
@@ -218,25 +246,42 @@ class SetIBJAGoldRate(AIRateTask):
 
     def _fetch_all(self):
         """ak-2r8: BaseRateTask contract. Universe-of-1 semantics
-        (LLM extract either succeeds or fails). Failure paths preserve
-        the pre-refactor error messages via extras['error'].
+        (either the whole extract succeeds or the whole thing fails).
+        Failure paths preserve pre-refactor error-message shape via
+        ``extras['error']``.
 
-        v4 (hq-wisp-il849): reverted from the pinned-sonnet diag probe
-        back to the default bare "sonnet" alias. The pinned probe was a
-        diagnostic to isolate alias-flip from a deeper sonnet issue;
-        actual root cause turned out to be the invalid property keys
-        in GOLD_SCHEMA (see schema comment above), not the model
-        string. Bare alias = no per-call override = `fetch_and_extract`
-        default ("sonnet").
+        ak-ad1 Phase 2 (2026-11-11): dispatches between AI and direct-
+        scrape paths on env var ``GOLD_SOURCE``. Both paths produce the
+        SAME jsonData shape (``carat_24``/``22``/``18`` + ``ibja_data``)
+        so the downstream Fix-B3 band check + ``_GOLD_DISPLAY_KEYS``
+        remap apply identically regardless of source.
+
+        v4 (hq-wisp-il849, pre-ak-ad1): reverted from the pinned-sonnet
+        diag probe back to the default bare "sonnet" alias for the AI
+        path. Pre-ak-ad1 default = AI; Phase 3 cutover flips default
+        to scrape; Phase 4 removes AI path entirely.
         """
-        jsonData, ai_err = self.fetch_rates_via_ai(
-            url=GOLD_URL,
-            system_prompt=GOLD_SYSTEM_PROMPT,
-            schema=GOLD_SCHEMA,
-            agent="rate.gold",
-        )
+        source = os.getenv(_GOLD_SOURCE_ENV, "ai").lower()
+
+        if source == "scrape":
+            # ak-ad1 Phase 2 primary. Deterministic BeautifulSoup
+            # extraction against stable `span#lblGold<Purity>_<AM|PM>`
+            # selectors. No per-cycle LLM turn cost; no schema-valid-
+            # but-implausible failure class (ak-znk root cause).
+            jsonData, fetch_err = self._fetch_rates_via_scrape()
+            source_label = "scrape"
+        else:
+            # Pre-ak-ad1 default. Phase 4 will remove this branch.
+            jsonData, fetch_err = self.fetch_rates_via_ai(
+                url=GOLD_URL,
+                system_prompt=GOLD_SYSTEM_PROMPT,
+                schema=GOLD_SCHEMA,
+                agent="rate.gold",
+            )
+            source_label = "ai"
+
         if jsonData is None:
-            msg = f"Failed to get Gold Rates: {ai_err}"[:800]
+            msg = f"Failed to get Gold Rates ({source_label}): {fetch_err}"[:800]
             return None, 1, 0, {}, {'error': msg}
         if 'carat_24' not in jsonData:
             got_keys = list(jsonData.keys())[:10]
@@ -299,8 +344,159 @@ class SetIBJAGoldRate(AIRateTask):
         # "22 Carat" / "18 Carat" top-level keys (see
         # JsonDownloadService.getGoldRate, GoldService consumers); that
         # on-disk contract is unchanged by v4.
+        #
+        # ak-ad1 Phase 2 (2026-11-11): the scrape path emits the same
+        # carat_24/22/18 key shape as the AI path, so this remap
+        # applies identically regardless of source.
         for k_schema, k_display in _GOLD_DISPLAY_KEYS:
             if k_schema in jsonData:
                 jsonData[k_display] = jsonData.pop(k_schema)
 
+        # ak-ad1 Phase 2 (2026-11-11): structured observability log for
+        # dual-run divergence detection. Lead flag for the 1-week /
+        # 14-consecutive-cycle observation window: operator / cron
+        # tooling greps `gold_rate_cycle ` to chart per-cycle values
+        # per source. Enables early-warning "no streak forming by
+        # cycle 10" detection.
+        display_24 = jsonData.get("24 Carat")
+        display_22 = jsonData.get("22 Carat")
+        display_18 = jsonData.get("18 Carat")
+        self.logger.info(
+            f"gold_rate_cycle source={source_label} "
+            f"carat_24={display_24} carat_22={display_22} "
+            f"carat_18={display_18}"
+        )
+
         return jsonData, 1, 1, {}, {}
+
+    # ────────────── ak-ad1 Phase 2 scrape path ──────────────────────
+
+    def _fetch_rates_via_scrape(self):
+        """Direct BeautifulSoup extraction of IBJA today-rates table.
+
+        Returns ``(jsonData, err)`` matching ``fetch_rates_via_ai``'s
+        shape:
+          * ``jsonData``: dict with ``carat_24``/``22``/``18`` (ints,
+            GST-included) + ``ibja_data`` (AM/PM per-purity + date +
+            currency + source).
+          * ``err``: None on success; string on failure (returned
+            jsonData=None).
+
+        Selectors (locked against 2026-11-11 IBJA HTML, test fixture at
+        ``test_fixtures/ibja_today_rates_2026_11_11.html``):
+          * ``span#lblGold<Purity>_AM``   → AM price (int, INR per 10g)
+          * ``span#lblGold<Purity>_PM``   → PM price
+          * ``span#lblSilver999_<AM|PM>`` → silver per kg
+
+        Same math as ``GOLD_SYSTEM_PROMPT``:
+          * avg_price = round((am + pm) / 2)
+          * carat_N  = int(avg_price * _GST_MULTIPLIER)  # truncate
+
+        Failure classes:
+          * Network / HTTP error → returns (None, err_str)
+          * Required selector absent → returns (None, "selector miss: ...")
+          * Selector value not int → returns (None, "value not int: ...")
+
+        All failures fall through to the None-tuple from
+        ``_fetch_all``; BaseRateTask.run() preserves last-good on disk.
+        """
+        try:
+            resp = requests.get(
+                GOLD_URL,
+                timeout=_SCRAPE_TIMEOUT_SECONDS,
+                headers={"User-Agent": "Mozilla/5.0 akkountant/ak-ad1"},
+            )
+            resp.raise_for_status()
+            html = resp.text
+        except Exception as exc:
+            return None, f"IBJA scrape fetch failed: {exc}"
+
+        try:
+            return self._parse_ibja_html(html), None
+        except ValueError as exc:
+            # Parser-detected selector miss / value coerce failure.
+            # Preserve the specific message so operators see WHICH
+            # selector drifted (not just "IBJA scrape failed").
+            return None, f"IBJA scrape parse failed: {exc}"
+
+    def _parse_ibja_html(self, html):
+        """Pure-function parser — takes HTML string, returns jsonData
+        dict shaped exactly like the AI path output.
+
+        Extracted as a separate method so the golden-fixture regression
+        test can drive the parser without touching ``requests.get``.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Extract all 12 price spans. Missing span or non-integer value
+        # raises ValueError (caught by caller + surfaced as scrape
+        # parse-failure for operator triage).
+        g_999_am = self._extract_span_int(soup, "lblGold999_AM")
+        g_999_pm = self._extract_span_int(soup, "lblGold999_PM")
+        g_995_am = self._extract_span_int(soup, "lblGold995_AM")
+        g_995_pm = self._extract_span_int(soup, "lblGold995_PM")
+        g_916_am = self._extract_span_int(soup, "lblGold916_AM")
+        g_916_pm = self._extract_span_int(soup, "lblGold916_PM")
+        g_750_am = self._extract_span_int(soup, "lblGold750_AM")
+        g_750_pm = self._extract_span_int(soup, "lblGold750_PM")
+        g_585_am = self._extract_span_int(soup, "lblGold585_AM")
+        g_585_pm = self._extract_span_int(soup, "lblGold585_PM")
+        s_999_am = self._extract_span_int(soup, "lblSilver999_AM")
+        s_999_pm = self._extract_span_int(soup, "lblSilver999_PM")
+
+        # Average + 3% GST — matches GOLD_SYSTEM_PROMPT formula
+        # exactly (avg_price = round((am + pm) / 2); carat_N =
+        # int(avg_price * 1.03)). Phase 3 cleanup hoists this to a
+        # shared helper once the AI path is removed.
+        carat_24 = int(round((g_999_am + g_999_pm) / 2) * _GST_MULTIPLIER)
+        carat_22 = int(round((g_916_am + g_916_pm) / 2) * _GST_MULTIPLIER)
+        carat_18 = int(round((g_750_am + g_750_pm) / 2) * _GST_MULTIPLIER)
+
+        # Date format matches the AI path's GOLD_SYSTEM_PROMPT
+        # directive ("Date format: DD-Mon-YY"). IBJA's HTML doesn't
+        # expose an explicit date for today's rates; use today's date
+        # per the "If today's rates are not available yet, use the
+        # most recent available day" fallback — scrape always sees
+        # the most recent, so today's calendar date is correct.
+        today = datetime.now().strftime("%d-%b-%y")
+
+        return {
+            "carat_24": carat_24,
+            "carat_22": carat_22,
+            "carat_18": carat_18,
+            "ibja_data": {
+                "date": today,
+                "gold": {
+                    "999": {"am": g_999_am, "pm": g_999_pm},
+                    "995": {"am": g_995_am, "pm": g_995_pm},
+                    "916": {"am": g_916_am, "pm": g_916_pm},
+                    "750": {"am": g_750_am, "pm": g_750_pm},
+                    "585": {"am": g_585_am, "pm": g_585_pm},
+                },
+                "silver": {"999": {"am": s_999_am, "pm": s_999_pm}},
+                "currency": "INR",
+                "source": "ibjarates.com (direct scrape, ak-ad1)",
+            },
+        }
+
+    @staticmethod
+    def _extract_span_int(soup, span_id):
+        """Extract an integer price from a ``<span id="...">N</span>``.
+
+        Raises ValueError with a specific message identifying which
+        selector failed, so operators triaging a PARSE-FAILED cycle see
+        WHICH span drifted (not just "parse failed"). Empty text /
+        non-integer text both raise.
+        """
+        span = soup.find("span", id=span_id)
+        if span is None:
+            raise ValueError(f"selector miss: span#{span_id} not in HTML")
+        text = span.get_text(strip=True)
+        if not text:
+            raise ValueError(f"selector empty: span#{span_id}")
+        try:
+            return int(text)
+        except ValueError:
+            raise ValueError(
+                f"selector non-int: span#{span_id} = {text!r}"
+            )

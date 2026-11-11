@@ -1,0 +1,95 @@
+<!--
+Golden-fixture snapshot of the critical region of ibjarates.com (today's
+rates table), captured 2026-11-11 for ak-ad1 Phase 2 scrape path.
+
+PURPOSE
+This fixture is the regression guard for IBJA's HTML selector stability.
+Keeping a saved snapshot lets the parser test run deterministically and
+catches:
+
+  (a) Parser bugs — the test fails if `_fetch_rates_via_scrape` returns
+      wrong values for the fixed, known input.
+  (b) Selector drift — if IBJA changes the HTML (e.g. renames
+      `lblGold999_AM` to `lblGold999AM`), this fixture CONTINUES to
+      represent the old shape and the test still passes AGAINST THE
+      FIXTURE, but a post-deploy smoke run against live IBJA fails.
+      Signal to update the fixture + the selector in the same commit.
+
+The fixture captures just the `TodayRatesTableDataYes` table — the full
+page is 159 KB and contains cookies / VIEWSTATE / analytics that would
+drift unnecessarily between captures. The 12 price spans here are the
+entire scraping surface.
+
+REFRESH PROCEDURE
+  curl -A "Mozilla/5.0 akkountant/ak-ad1" https://ibjarates.com/ \
+    | python -c 'import re, sys; html = sys.stdin.read(); print(re.search(r"<table id=\"TodayRatesTableDataYes\"[^>]*>.*?</table>", html, re.DOTALL).group(0))' \
+    > test_fixtures/ibja_today_rates_<yyyy_mm_dd>.html
+  # Then update the test's reference date + expected values.
+
+EXPECTED EXTRACTED VALUES (2026-11-11 capture)
+  Gold 999 AM/PM     : 140805 / 140603 → avg 140704   → carat_24 = 144925
+  Gold 995 AM/PM     : 140241 / 140040
+  Gold 916 AM/PM     : 128977 / 128792 → avg 128884 ⓑ → carat_22 = 132750
+  Gold 750 AM/PM     : 105604 / 105452 → avg 105528   → carat_18 = 108693
+  Gold 585 AM/PM     :  82371 /  82253
+  Silver 999 AM/PM   : 186495 / 185900
+
+ⓑ Python's `round()` uses banker's rounding — `round(128884.5)` resolves
+  to the nearest EVEN integer, giving 128884 (not 128885). 128884 * 1.03
+  = 132750.52 → int() truncates to 132750. Scrape path matches this
+  exactly; LLM path may or may not (model-dependent rounding mode), which
+  is within the 0.5% dual-run divergence tolerance for Phase 2.
+
+All INR per 10g (gold) / per kg (silver). GST-exclusive. IBJA explicit
+footnote: "The above rates are without 3% GST and Making Charges."
+Current path applies +3% GST post-extract — preserved in scrape path.
+-->
+<table id="TodayRatesTableDataYes" class="tableContainer ctrate">
+	<tr>
+		<th>Purity</th>
+		<th>AM</th>
+		<th>PM </th>
+	</tr>
+	<tr>
+		<td class="txt-green ft ht-30" style="font-weight: 900;">Gold 999</td>
+		<td class="txt-green ft ht-30" style="font-weight: 600;">
+                                        <span id="lblGold999_AM">140805</span></td>
+		<td class="txt-green ft ht-30" style="font-weight: 600;">
+                                        <span id="lblGold999_PM">140603</span></td>
+	</tr>
+	<tr>
+		<td class="txt-green ft padd20" style="font-weight: 900;">Gold 995</td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold995_AM">140241</span></td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold995_PM">140040</span></td>
+	</tr>
+	<tr>
+		<td class="txt-green ft padd20" style="font-weight: 900;">Gold 916</td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold916_AM">128977</span></td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold916_PM">128792</span></td>
+	</tr>
+	<tr>
+		<td class="txt-green ft padd20" style="font-weight: 900;">Gold 750</td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold750_AM">105604</span></td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold750_PM">105452</span></td>
+	</tr>
+	<tr>
+		<td class="txt-green ft padd20" style="font-weight: 900;">Gold 585</td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold585_AM">82371</span></td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblGold585_PM">82253</span></td>
+	</tr>
+	<tr>
+		<td class="txt-green ft padd20" style="font-weight: 900;">Silver 999</td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblSilver999_AM">186495</span></td>
+		<td class="txt-green ft padd20" style="font-weight: 600;">
+                                        <span id="lblSilver999_PM">185900</span></td>
+	</tr>
+</table>
