@@ -12,6 +12,7 @@ from services.tasks.SetNPSRate import SetNPSRate
 from services.tasks.SetNPSDetails import SetNPSDetails
 from services.tasks.SetKiteStockDetails import SetKiteStockDetails
 from services.tasks.SetMfRate import SetMFRate
+from services.tasks.SetAMFIMFRate import SetAMFIMFRate
 from services.tasks.SetMfDetails import SetMFDetails
 from services.tasks.SetIBJAGoldRate import SetIBJAGoldRate
 from services.tasks.SetPpfRate import SetPPFRate
@@ -24,12 +25,31 @@ from services.tasks.wealth_digest_constants import WEALTH_DIGEST_JOB_TITLE
 from utils.logger import Logger
 
 
+# ak-nutd Phase 2 (2026-11-11): env-var-gated MF rate source dispatch.
+#
+# Default `mfapi` preserves current behavior (SetMFRate hitting
+# api.mfapi.in's 38K-URL batch). Set `MF_RATE_SOURCE=amfi` to route
+# the "SetMFRate" job title through the AMFI NAVAll.txt path
+# (SetAMFIMFRate).
+#
+# Job title stays `SetMFRate` so cronAgent, bead references, UI, and
+# jobsObject labels remain stable — only the IMPLEMENTATION class
+# behind the title shifts.
+#
+# Phase 3 (post-observation): flip default to `amfi`. Phase 4 removes
+# SetMFRate entirely. See services/tasks/SetAMFIMFRate.py docstring +
+# bead ak-nutd for the policy chain.
+_MF_RATE_IMPL = (
+    SetAMFIMFRate if os.getenv("MF_RATE_SOURCE", "mfapi").lower() == "amfi"
+    else SetMFRate
+)
+
 TASK_MAPPING = {
     "SetNPSRate": SetNPSRate,
     "SetNPSDetails": SetNPSDetails,
     "SetStocksDetails": SetKiteStockDetails,
     "SetStocksOldDetails": SetStockOldCodes,
-    "SetMFRate": SetMFRate,
+    "SetMFRate": _MF_RATE_IMPL,
     "SetMFDetails": SetMFDetails,
     "SetGoldRate": SetIBJAGoldRate,
     "SetPPFRate": SetPPFRate,
