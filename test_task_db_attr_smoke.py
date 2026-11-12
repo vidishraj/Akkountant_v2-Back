@@ -69,8 +69,14 @@ def test_BaseTask_db_prefers_g_db_then_current_app_then_legacy():
     """Resolver must walk the same preference order as
     services.Base_Service.db (incident-class parity with ak-6si /
     ak-m6k). Pin on the exact Python expressions so a refactor
-    that drops a branch or flips precedence reds."""
-    src = _read_source("services/tasks/baseTask.py")
+    that drops a branch or flips precedence reds.
+
+    ak-rsuc: the pre-rsuc shape of this test only asserted token
+    PRESENCE — a precedence flip (``current_app.db`` checked before
+    ``g.db``) would stay green even though the docstring claims to
+    guard against it. Now also asserts the SOURCE INDEX order so a
+    branch swap in baseTask.py reds this test immediately.
+    """
     # Scope grep to inside the db property body — avoid matching
     # the module-level docstring / comments.
     m = _extract_method_source("services/tasks/baseTask.py", "BaseTask", "db")
@@ -81,6 +87,36 @@ def test_BaseTask_db_prefers_g_db_then_current_app_then_legacy():
     assert "current_app.db" in m
     # 3. Legacy branch WARNs.
     assert "no g.db AND no Flask app" in m or "legacy" in m.lower()
+
+    # ak-rsuc: order the drift guard was MISSING — the docstring's
+    # "incident-class parity" promise is only real if branches
+    # appear in source in the g.db → current_app.db → legacy order.
+    # Normalize quote style so the g.db match works whether source
+    # uses single- or double-quoted "db".
+    g_pos = (
+        m.find("g.get('db')") if "g.get('db')" in m
+        else m.find('g.get("db")')
+    )
+    current_app_pos = m.find("current_app.db")
+    # Legacy branch anchor — prefer the specific "no g.db AND no
+    # Flask app" sentinel from the current source; fall back to
+    # case-insensitive "legacy" for forward-compat.
+    legacy_pos = m.find("no g.db AND no Flask app")
+    if legacy_pos == -1:
+        legacy_pos = m.lower().find("legacy")
+    assert g_pos != -1, "g.db check not found in resolver body"
+    assert current_app_pos != -1, "current_app.db check not found in resolver body"
+    assert legacy_pos != -1, "legacy-fallback branch not found in resolver body"
+    assert g_pos < current_app_pos, (
+        "BaseTask.db precedence drift: g.db check must appear BEFORE "
+        "current_app.db in resolver source (incident-class parity "
+        "with Base_Service.db)"
+    )
+    assert current_app_pos < legacy_pos, (
+        "BaseTask.db precedence drift: current_app.db check must "
+        "appear BEFORE the legacy-fallback branch (legacy-WARN is "
+        "last-resort, not a short-circuit)"
+    )
 
 
 def _extract_method_source(rel_path, class_name, method_name):
