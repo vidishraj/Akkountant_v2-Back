@@ -674,9 +674,23 @@ INVESTMENT_TOOLS = [
                     "type": "string",
                     "description": "End date in YYYY-MM-DD format (optional)."
                 },
+                # ak-h36s (2026-11-12): investment_type values must
+                # match what investmentSnapshotTask actually writes —
+                # per `TYPE_LABELS` (L19) + explicit writes (L134/152/
+                # 170): Stocks, MF, NPS, PPF, EPF, Gold. Previously
+                # documented `Mutual_Funds` + `PF` — neither matched
+                # stored values → agent silently got empty results
+                # on those filters.
                 "investment_type": {
                     "type": "string",
-                    "description": "Optional filter: Stocks, Mutual_Funds, NPS, EPF, PF, Gold."
+                    "enum": ["Stocks", "MF", "NPS", "PPF", "EPF", "Gold"],
+                    "description": (
+                        "Optional filter. Must be one of the six "
+                        "values the snapshot task actually writes: "
+                        "Stocks, MF, NPS, PPF, EPF, Gold. "
+                        "Note: use 'MF' NOT 'Mutual_Funds'; use "
+                        "'PPF' OR 'EPF' (two distinct types, not 'PF')."
+                    )
                 }
             },
             "required": []
@@ -692,13 +706,35 @@ INVESTMENT_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                # ak-h36s: enum-constrain the four categories that
+                # fetchInvestmentEmails defaults to. Categories
+                # outside this set return no rows (no matching
+                # ProcessedEmails.category); constraining shuts the
+                # agent off that silent-empty class.
                 "category": {
                     "type": "string",
-                    "description": "Optional filter: 'investment_confirmation', 'epf_passbook', 'gold_receipt', 'nps_statement'."
+                    "enum": [
+                        "investment_confirmation",
+                        "epf_passbook",
+                        "gold_receipt",
+                        "nps_statement",
+                    ],
+                    "description": "Optional filter: one of the four investment category labels used by the mail processor."
                 },
+                # ak-h36s: service_type values come from mailProcessor
+                # extraction (services/mailProcessorToolExecutor.py +
+                # mailProcessorTools.py). Those paths emit the four
+                # labels enumerated here. An enum-free string (prior
+                # schema) let the agent pass values like `MF` that
+                # never appeared in extraction_summary → silent-empty
+                # results. Note vocabulary differs from
+                # investment_type (snapshot) because the two
+                # subsystems have separate writer histories; this
+                # bead doesn't unify them, just documents accurately.
                 "service_type": {
                     "type": "string",
-                    "description": "Optional service-type tag from extraction summary."
+                    "enum": ["Mutual_Funds", "Gold", "EPF", "PPF"],
+                    "description": "Optional service-type tag from the mail extraction_summary. One of: Mutual_Funds, Gold, EPF, PPF."
                 },
                 "page": {
                     "type": "integer",

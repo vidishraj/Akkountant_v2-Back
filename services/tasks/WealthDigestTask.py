@@ -90,11 +90,11 @@ _HEADER = "[Personal use — not investment advice]"
 # Lead's Q1 GO — reuses the existing whitelist without needing to
 # extend VALID_AGENT_TYPES / agentEP / FE.
 #
-# ak-rde9 Bead A (2026-11-12): pinned model ID shared with
-# agentService.AGENT_MODEL_ID + cronAgent._AGENT_MODEL_ID. Prevents
-# alias-drift (ak-znk class incident guard). Bump in all three
-# together.
-_MODEL = "claude-sonnet-4-7"
+# ak-h36s MINOR (2026-11-12): model ID consolidated to
+# utils.agent_constants.AGENT_MODEL_ID (single source of truth).
+# Local _MODEL alias kept so existing call sites + tests grepping
+# for the symbol are stable.
+from utils.agent_constants import AGENT_MODEL_ID as _MODEL
 _AGENT_TYPE = "investment"
 
 # Notable-movers threshold: MF holdings whose day-over-day NAV moved

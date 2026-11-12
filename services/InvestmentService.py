@@ -825,9 +825,63 @@ class InvestmentService(BaseService):
         from services.portfolio_history_aggregator import aggregate_portfolio_history
         return aggregate_portfolio_history(token_qty, candles)
 
+    #: ak-h36s (2026-11-12): belt-and-braces normalization for the
+    #: investment_type query param. Primary guard is the JSON-schema
+    #: enum on the ``fetch_investment_snapshots`` tool (agent_tools.py),
+    #: but a non-agent caller (future endpoint, direct service call,
+    #: migration script) that passes a legacy value should still get
+    #: the right rows rather than silent-empty.
+    #:
+    #: Keys: values historically documented or commonly guessed.
+    #: Values: the stored InvestmentSnapshot.investment_type string
+    #: the snapshot task actually writes (see
+    #: services/tasks/investmentSnapshotTask.py TYPE_LABELS + explicit
+    #: PPF/EPF/Gold writes). ``None`` as value means "ambiguous —
+    #: reject with ValueError". 'PF' is ambiguous because the table
+    #: has both PPF AND EPF; forcing the caller to disambiguate
+    #: beats silently picking one.
+    _INVESTMENT_TYPE_ALIASES = {
+        "Stocks": "Stocks",
+        "MF": "MF",
+        "Mutual_Funds": "MF",  # legacy spelling in the pre-ak-h36s tool schema
+        "NPS": "NPS",
+        "PPF": "PPF",
+        "EPF": "EPF",
+        "Gold": "Gold",
+        "PF": None,  # ambiguous — PPF and EPF are distinct types
+    }
+
     def getInvestmentSnapshots(self, user_id, date_from=None, date_to=None, investment_type=None):
-        """Query investment snapshots for growth charts."""
+        """Query investment snapshots for growth charts.
+
+        ak-h36s (2026-11-12): investment_type normalized via the
+        _INVESTMENT_TYPE_ALIASES map before query. Legacy / looser
+        callers that pass 'Mutual_Funds' (pre-ak-h36s tool schema
+        value) get silently remapped to 'MF'. 'PF' is rejected as
+        ambiguous — PPF and EPF are two distinct types.
+        """
         from models.investmentSnapshot import InvestmentSnapshot
+
+        if investment_type is not None:
+            if investment_type in self._INVESTMENT_TYPE_ALIASES:
+                canonical = self._INVESTMENT_TYPE_ALIASES[investment_type]
+                if canonical is None:
+                    # Ambiguous input — raise so the caller sees the
+                    # problem instead of a silent-empty / silent-wrong.
+                    raise ValueError(
+                        f"investment_type={investment_type!r} is ambiguous — "
+                        "use 'PPF' or 'EPF' (two distinct types)"
+                    )
+                if canonical != investment_type:
+                    self.logger.info(
+                        f"getInvestmentSnapshots: remapped "
+                        f"investment_type={investment_type!r} → "
+                        f"{canonical!r} (ak-h36s alias)"
+                    )
+                investment_type = canonical
+            # else: unknown value — let it pass through to the filter.
+            # Query returns empty rows; caller sees the real stored
+            # universe for diagnosis (vs an alias-map hiding the bug).
 
         query = self.db.session.query(InvestmentSnapshot).filter(
             InvestmentSnapshot.user == user_id

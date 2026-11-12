@@ -35,18 +35,12 @@ from claude_agent_sdk import (
 
 MCP_SERVER_NAME = "agent_tools"
 
-# ak-rde9 Bead A (2026-11-12): pin the model ID across ALL agent
-# dispatchers (interactive chat here + cron rate agents in
-# cronAgent.py + wealth-digest in WealthDigestTask.py) to prevent
-# alias-drift class incidents. Overseer decision 2026-11-12 06:15Z
-# via /AskUserQuestion: use claude-sonnet-4-7 (latest pin).
-#
-# Same incident class guarded against as Aug-20 gold unit-drift
-# (ak-znk) — behaviour that depends on an alias resolving to a
-# specific model can change silently when the alias is rotated.
-# A pinned model ID is reproducible across deploys. Shared as a
-# module-level constant so a future bump touches one file.
-AGENT_MODEL_ID = "claude-sonnet-4-7"
+# ak-rde9 Bead A (2026-11-12) / ak-h36s MINOR (2026-11-12):
+# consolidated model ID across all 3 agent dispatchers lives in
+# utils/agent_constants.py. Re-exported here for the existing
+# `from services.agentService import AGENT_MODEL_ID` consumers
+# (test suite, future callers) without duplicating the literal.
+from utils.agent_constants import AGENT_MODEL_ID  # noqa: F401
 
 
 # Tools that require user confirmation before execution

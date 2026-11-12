@@ -24,11 +24,12 @@ from utils.sdk_runner import run_query_collect
 MCP_SERVER_NAME = "cron-agent-tools"
 MAX_HISTORY = 5  # Keep last 5 cycle summaries for context
 
-# ak-rde9 Bead A (2026-11-12): pinned model ID shared with
-# agentService + WealthDigestTask. Prevents alias-drift (ak-znk class
-# incident). Bump in agentService.AGENT_MODEL_ID + here + in
-# WealthDigestTask._MODEL together.
-_AGENT_MODEL_ID = "claude-sonnet-4-7"
+# ak-h36s MINOR (2026-11-12): model ID consolidated to
+# utils.agent_constants.AGENT_MODEL_ID. Local alias kept so the
+# existing ``model=_AGENT_MODEL_ID`` call site doesn't change and
+# tests that grep for `_AGENT_MODEL_ID = "..."` still land on a
+# reference. Bumps happen in utils/agent_constants.py (one file).
+from utils.agent_constants import AGENT_MODEL_ID as _AGENT_MODEL_ID
 
 SYSTEM_PROMPT = """\
 You are an autonomous cron scheduler for a personal finance app. Your job is to check
