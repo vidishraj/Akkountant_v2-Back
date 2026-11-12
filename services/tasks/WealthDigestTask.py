@@ -8,7 +8,8 @@ agent-chat inbox.
 Phase 1 scope (Overseer-approved):
   - Movements-only using data already on disk (rate files + snapshots).
   - Single user (env var WEALTH_DIGEST_USER_ID).
-  - Sonnet model, essay-shaped output, no tool loop.
+  - Pinned agent model (see utils.agent_constants), essay-shaped
+    output, no tool loop.
   - Personal-use framing with a [Personal use — not investment advice]
     header on every digest.
 
@@ -59,10 +60,10 @@ from utils.sdk_retry import (
 from utils.sdk_runner import run_query_collect
 
 
-# ak-3eo H1: bounded per-attempt timeout on the Sonnet call. A daily
+# ak-3eo H1: bounded per-attempt timeout on the LLM call. A daily
 # digest LLM call should never legitimately hang past this — if it
 # does, kill it and let the next day's tick recover. 300s = 5 minutes,
-# well above sonnet's typical <30s response time even for a longer
+# well above the model's typical <30s response time even for a longer
 # essay + JSON payload.
 _SDK_TIMEOUT_SECONDS = 300
 
@@ -118,16 +119,17 @@ _EPG_TYPES = ("EPF", "PF", "Gold")
 # Every user-attackable string (scheme names, descriptions, custom
 # fields) flows into the LLM inside the <user_data></user_data> block;
 # the system prompt below explicitly names these tags and instructs
-# sonnet to treat their contents as DATA to summarize, not as
+# the model to treat their contents as DATA to summarize, not as
 # INSTRUCTIONS to execute. Prompt-injection defense-in-depth on top
-# of the belt-and-braces header-prepend in _invoke_sonnet.
+# of the belt-and-braces header-prepend in _invoke_agent.
 _USER_DATA_OPEN = "<user_data>"
 _USER_DATA_CLOSE = "</user_data>"
 
 
-# ak-6p4 Wave 3: structured output schema. Sonnet emits a JSON object
-# matching this shape via `output_format` mode; the SDK validates before
-# returning, and retries within max_turns on schema-invalid output.
+# ak-6p4 Wave 3: structured output schema. The agent emits a JSON
+# object matching this shape via `output_format` mode; the SDK
+# validates before returning, and retries within max_turns on
+# schema-invalid output.
 #
 # Field breakdown:
 #   * text — narrative markdown (opening pulse, cross-holding patterns,
@@ -138,16 +140,16 @@ _USER_DATA_CLOSE = "</user_data>"
 #     One per concrete recommendation.
 #   * watch_items — concentration risks / unusual moves / anomalies
 #     lifted from the historically-narrative "Watch items" section.
-#   * news — market-context references sonnet would naturally have cited
+#   * news — market-context references the model would naturally have cited
 #     inside the narrative (company earnings, sector movements, macro
 #     events). related_holdings scopes each to the user's actual
 #     positions. Empty array if no news naturally came up — don't
 #     invent news to fill the field.
 #
 # additionalProperties=False on each item type so schema-invalid extras
-# fail validation (retry inside max_turns until sonnet emits the exact
-# shape, else return with structured_output=None → task Failed →
-# endpoint's backwards-compat wrap serves the fallback shape).
+# fail validation (retry inside max_turns until the model emits the
+# exact shape, else return with structured_output=None → task Failed
+# → endpoint's backwards-compat wrap serves the fallback shape).
 _DIGEST_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -325,7 +327,7 @@ class WealthDigestTask(BaseTask):
                 return msg, "Completed", self.interval
 
             # ak-ran v2 #6: fail-FAST on a typo'd or non-existent user
-            # BEFORE we spend Sonnet API $ assembling + generating a
+            # BEFORE we spend agent API $ assembling + generating a
             # digest that would then fail at append_message ownership
             # anyway. A missing env var is a config gap (fail-soft
             # above); a MALFORMED user id is a bad config that should
@@ -346,11 +348,11 @@ class WealthDigestTask(BaseTask):
             # the whole run doesn't abort on one flaky service.
             input_data = self._assemble_input(user_id)
 
-            # 2. Invoke sonnet — batch, single turn, no tools.
+            # 2. Invoke the pinned agent — batch, single turn, no tools.
             #    ak-rde9 Bead A (2026-11-12): user_id threaded through
             #    for per-turn observability (agent_run log carries
             #    user= tag).
-            digest_text = self._invoke_sonnet(input_data, user_id=user_id)
+            digest_text = self._invoke_agent(input_data, user_id=user_id)
 
             # 3. Persist to the user's Wealth Digest conversation.
             # find_or_create_by_title guarantees convergence on a
@@ -398,8 +400,8 @@ class WealthDigestTask(BaseTask):
 
     def _user_exists(self, user_id):
         """ak-ran v2 #6: pre-flight check that the WEALTH_DIGEST_USER_ID
-        env var actually resolves to a User row. Prevents wasting a
-        Sonnet call on a typo'd id (which would then fail at
+        env var actually resolves to a User row. Prevents wasting an
+        agent call on a typo'd id (which would then fail at
         append_message ownership).
 
         Returns True iff a User with `userID == user_id` exists.
@@ -615,7 +617,7 @@ class WealthDigestTask(BaseTask):
 
     # ── LLM invocation ─────────────────────────────────────────────────
 
-    def _invoke_sonnet(self, input_data, user_id=None):
+    def _invoke_agent(self, input_data, user_id=None):
         """Batch SDK call with retry + timeout: single user message,
         no tool loop, collect text and return.
 
@@ -646,12 +648,12 @@ class WealthDigestTask(BaseTask):
         options = ClaudeAgentOptions(
             model=_MODEL,
             system_prompt=_SYSTEM_PROMPT,
-            # ak-6p4 Wave 3: `output_format` JSON schema mode. Sonnet
-            # emits a JSON object matching `_DIGEST_OUTPUT_SCHEMA`; SDK
-            # validates before returning and retries within max_turns
-            # on schema-invalid output. max_turns bumped to 3 to give
-            # the model room to correct schema errors on the retry
-            # cycle (Phase 1 essay-output ran fine on 1 turn; the
+            # ak-6p4 Wave 3: `output_format` JSON schema mode. The
+            # agent emits a JSON object matching `_DIGEST_OUTPUT_SCHEMA`;
+            # SDK validates before returning and retries within
+            # max_turns on schema-invalid output. max_turns bumped to 3
+            # to give the model room to correct schema errors on the
+            # retry cycle (Phase 1 essay-output ran fine on 1 turn; the
             # structured shape has more surface area to get right).
             output_format={"type": "json_schema", "schema": _DIGEST_OUTPUT_SCHEMA},
             max_turns=3,
@@ -668,7 +670,7 @@ class WealthDigestTask(BaseTask):
         )
         # ak-3eo H2: wrap the entire user-controlled payload in the
         # named delimiter tags. System prompt names these tags and
-        # instructs sonnet to treat their contents as DATA, not
+        # instructs the model to treat their contents as DATA, not
         # instructions. Belt-and-braces on top of the header-prepend
         # below.
         payload_json = json.dumps(input_data, default=_json_default, indent=2)
@@ -733,9 +735,9 @@ class WealthDigestTask(BaseTask):
                     # exhausted retries below).
                 elif result.structured_output is None:
                     # ak-6p4 Wave 3: structured_output is what we consume
-                    # now (was `result.text`). None means either sonnet
-                    # emitted schema-invalid JSON that survived the
-                    # SDK's in-flight retries within max_turns=3, or
+                    # now (was `result.text`). None means either the
+                    # model emitted schema-invalid JSON that survived
+                    # the SDK's in-flight retries within max_turns=3, or
                     # the model wandered into tools despite
                     # allowed_tools=[]. Both classes are retriable at
                     # the outer level — a fresh turn often converges.

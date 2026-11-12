@@ -568,12 +568,25 @@ def test_getInvestmentSnapshots_raises_on_PF():
 #
 # This test fires ONE real SDK query with the pinned ID. Gated behind
 # ``SMOKE_SDK=1`` so local pytest runs don't incur SDK cost or require
-# credentials. CI sets ``SMOKE_SDK=1`` on the branch-protection run so
-# every pin change is live-verified before merge.
+# credentials.
+#
+# ak-e9pc MAJOR: this test is NOT yet wired into CI (``deploy.yml``
+# only pulls + restarts; no branch-protection pytest exists). The
+# guard is dormant / skipped-by-default. Follow-up ak-eo4s tracks
+# the CI automation — until it lands, lead and mayor MUST manually
+# run ``SMOKE_SDK=1 pytest ... -k smoke`` on every ``AGENT_MODEL_ID``
+# change before merge.
 
 
+# ak-e9pc MINOR-2: unify SMOKE_SDK predicate with the stub-install
+# at L57 (``_WANT_LIVE_SMOKE = bool(os.environ.get("SMOKE_SDK"))``).
+# Previous ``"SMOKE_SDK" not in _os.environ`` treated the
+# declared-but-empty form (``SMOKE_SDK=``) as present → test ran
+# against stubs → spurious red. Both predicates now agree:
+# truthy value → stubs skipped + test runs; absent-OR-empty →
+# stubs installed + test skipped.
 @pytest.mark.skipif(
-    "SMOKE_SDK" not in _os.environ,
+    not bool(_os.environ.get("SMOKE_SDK")),
     reason=(
         "Live-SDK smoke is opt-in. Run with SMOKE_SDK=1 to verify the "
         "pinned model ID resolves against the real Anthropic SDK; "

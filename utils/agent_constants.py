@@ -48,20 +48,27 @@ digest) now run on Opus, not Sonnet. The constant name
 To bump the model: edit the literal below only. All three dispatchers
 (and any future consumer) pick up the new value on next deploy.
 
-**Before shipping a bump, run the live-SDK smoke** — mocked unit
-tests cannot catch an unrecognized model ID. The ak-yg2o incident is
-the reference failure here. The smoke is the test
+**MANUAL pre-bump smoke required** — mocked unit tests cannot catch
+an unrecognized model ID. The ak-yg2o incident is the reference
+failure here. The smoke is the test
 ``test_pinned_model_id_resolves_against_live_sdk`` in
 ``test_investment_agent_foundation.py``; it is gated behind
 ``SMOKE_SDK=1`` so local pytest runs don't incur SDK cost or require
 credentials.
 
-Local-dev smoke (one real SDK call against the pinned ID, ~60s)::
+**This recurrence guard is NOT yet automated.** As of ak-e9pc there
+is no branch-protection pytest run and no CI job that sets
+``SMOKE_SDK=1`` — ``deploy.yml`` only pulls and restarts. The smoke
+test itself is dormant / skipped-by-default in every normal pytest
+run. Follow-up ak-eo4s tracks wiring CI properly (branch-protection
+pytest + ``SMOKE_SDK=1`` live-pin-verify).
+
+Until ak-eo4s lands, **lead and mayor MUST manually run the smoke on
+any ``AGENT_MODEL_ID`` change before merge** — the test alone will
+skip without the flag. Local-dev smoke (one real SDK call against
+the pinned ID, ~60s)::
 
     SMOKE_SDK=1 pytest test_investment_agent_foundation.py -k smoke -v
-
-CI should set ``SMOKE_SDK=1`` on the branch-protection run so every
-bump is live-verified before merge.
 
 In addition, verify downstream behavior with the usual rate-task
 smoke after pin changes — the model's structured-output behavior

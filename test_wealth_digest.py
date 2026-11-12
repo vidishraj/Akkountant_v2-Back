@@ -358,10 +358,10 @@ class TestSystemPrompt(unittest.TestCase):
         self.assertIn("Never fabricate numbers", src)
         print("  ✓ anti-fabrication rule present")
 
-    def test_invoke_sonnet_enforces_header_belt_and_braces(self):
+    def test_invoke_agent_enforces_header_belt_and_braces(self):
         """Even if the model strips the header (bad prompt-follow),
-        _invoke_sonnet prepends it. Guards the personal-use framing."""
-        print("\n[ak-ran — _invoke_sonnet prepends header if model omits it]")
+        _invoke_agent prepends it. Guards the personal-use framing."""
+        print("\n[ak-ran — _invoke_agent prepends header if model omits it]")
         code = _source_code_only(_WEALTH_TASK_PATH)
         self.assertIn("if not digest.startswith(_HEADER):", code)
         self.assertIn('digest = f"{_HEADER}\\n\\n{digest}"', code)
@@ -409,10 +409,10 @@ class TestConfigAndFailSoft(unittest.TestCase):
 
 class TestV2FailFastOnInvalidUser(unittest.TestCase):
     """ak-ran v2 #6: run() must pre-flight-verify the user exists
-    BEFORE invoking Sonnet. A missing env var is fail-SOFT (config
+    BEFORE invoking the agent. A missing env var is fail-SOFT (config
     gap, no $$ wasted); a typo'd env var is fail-FAST at ERROR level
     so the misconfiguration surfaces in the jobs table + logs
-    immediately, no Sonnet spend."""
+    immediately, no agent spend."""
 
     def test_user_exists_method_present(self):
         print("\n[ak-ran v2 #6 — _user_exists helper method defined]")
@@ -423,11 +423,11 @@ class TestV2FailFastOnInvalidUser(unittest.TestCase):
         self.assertIn("User.userID == user_id", code)
         print("  ✓ helper present + uses User model with correct PK column")
 
-    def test_user_exists_called_before_invoke_sonnet(self):
+    def test_user_exists_called_before_invoke_agent(self):
         """Structural: the _user_exists check must appear BEFORE the
-        _invoke_sonnet call in run(). Order matters — we're pre-flight
-        gating on user existence to avoid the Sonnet spend."""
-        print("\n[ak-ran v2 #6 — _user_exists check precedes _invoke_sonnet in run()]")
+        _invoke_agent call in run(). Order matters — we're pre-flight
+        gating on user existence to avoid the agent spend."""
+        print("\n[ak-ran v2 #6 — _user_exists check precedes _invoke_agent in run()]")
         code = _source_code_only(_WEALTH_TASK_PATH)
         # Extract run() body.
         import re
@@ -438,15 +438,15 @@ class TestV2FailFastOnInvalidUser(unittest.TestCase):
         self.assertIsNotNone(m, "could not locate run() body")
         body = m.group(1)
         user_check_idx = body.find("self._user_exists(user_id)")
-        sonnet_idx = body.find("self._invoke_sonnet(")
+        agent_idx = body.find("self._invoke_agent(")
         self.assertGreaterEqual(user_check_idx, 0, "_user_exists check missing")
-        self.assertGreaterEqual(sonnet_idx, 0, "_invoke_sonnet call missing")
+        self.assertGreaterEqual(agent_idx, 0, "_invoke_agent call missing")
         self.assertLess(
-            user_check_idx, sonnet_idx,
-            "user-exists check must precede Sonnet invocation — "
+            user_check_idx, agent_idx,
+            "user-exists check must precede agent invocation — "
             "typo'd env var would otherwise waste $ every daily run",
         )
-        print("  ✓ user-exists check at run() body offset before sonnet call")
+        print("  ✓ user-exists check at run() body offset before agent call")
 
     def test_invalid_user_returns_failed_not_completed(self):
         """Distinct from the missing-env fail-SOFT (Completed): a
@@ -594,7 +594,7 @@ class TestBootstrapScript(unittest.TestCase):
 
 
 class TestAk3eoH1SdkRetryAndTimeout(unittest.TestCase):
-    """H1: _invoke_sonnet now wraps the SDK call in a retry loop using
+    """H1: _invoke_agent now wraps the SDK call in a retry loop using
     the ak-wty terminal-priority classifier + exponential backoff,
     and each attempt is bounded by asyncio.wait_for at
     _SDK_TIMEOUT_SECONDS. Source-inspection guards since running the
@@ -674,7 +674,7 @@ class TestAk3eoH1SdkRetryAndTimeout(unittest.TestCase):
         print("  ✓ TimeoutError branch present with retriable classification")
 
     def test_empty_text_treated_as_retriable(self):
-        """Sonnet sometimes returns nothing on a transient glitch —
+        """The agent sometimes returns nothing on a transient glitch —
         empty text should retry, not fail immediately."""
         print("\n[ak-3eo H1 — empty SDK text is retriable, not terminal]")
         code = _source_code_only(_WEALTH_TASK_PATH)
@@ -692,7 +692,7 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
     """H2: permission_mode moved from 'bypassPermissions' to
     'default'. User-controlled JSON payload wrapped in
     <user_data></user_data> tags. System prompt names the tags AND
-    instructs sonnet to treat their contents as DATA not
+    instructs the model to treat their contents as DATA not
     instructions, with an explicit injection-pattern block."""
 
     def test_permission_mode_is_default_not_bypass(self):
@@ -703,7 +703,7 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
         code = _source_code_only(_WEALTH_TASK_PATH)
         # New shape.
         self.assertIn('permission_mode="default"', code)
-        # And the pre-v2 shape is GONE from the _invoke_sonnet call
+        # And the pre-v2 shape is GONE from the _invoke_agent call
         # site. (The word 'bypassPermissions' may still appear in
         # comments explaining what changed — that's fine.)
         import re
@@ -714,15 +714,15 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
         # positional shape — guards the semantic (no accidental
         # rename) without being brittle to additive kwargs.
         m = re.search(
-            r"def _invoke_sonnet\(self, input_data[^)]*\):(.*?)"
+            r"def _invoke_agent\(self, input_data[^)]*\):(.*?)"
             r"(?=\n    def |\n\ndef |\Z)",
             code, re.DOTALL,
         )
-        self.assertIsNotNone(m, "could not locate _invoke_sonnet body")
+        self.assertIsNotNone(m, "could not locate _invoke_agent body")
         body = m.group(1)
         self.assertNotIn(
             'permission_mode="bypassPermissions"', body,
-            "_invoke_sonnet still uses bypassPermissions — H2 regressed",
+            "_invoke_agent still uses bypassPermissions — H2 regressed",
         )
         print("  ✓ default set; bypassPermissions removed from exec body")
 
@@ -734,10 +734,10 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
         print("  ✓ tag constants pinned")
 
     def test_prompt_text_wraps_payload_in_user_data_tags(self):
-        """The JSON payload passed to sonnet must be enclosed in the
+        """The JSON payload passed to the agent must be enclosed in the
         <user_data></user_data> block so the system prompt's injection
         defenses have a stable delimiter to reason about."""
-        print("\n[ak-3eo H2 — _invoke_sonnet wraps JSON in <user_data></user_data>]")
+        print("\n[ak-3eo H2 — _invoke_agent wraps JSON in <user_data></user_data>]")
         code = _source_code_only(_WEALTH_TASK_PATH)
         self.assertIn(
             'prompt_text = (\n            f"{_USER_DATA_OPEN}\\n{payload_json}\\n{_USER_DATA_CLOSE}"\n        )',
@@ -747,8 +747,8 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
 
     def test_system_prompt_has_security_block(self):
         """The system prompt now has an explicit SECURITY block that
-        names the tags, tells sonnet to treat their contents as DATA,
-        and enumerates common injection patterns to ignore."""
+        names the tags, tells the model to treat their contents as
+        DATA, and enumerates common injection patterns to ignore."""
         print("\n[ak-3eo H2 — system prompt has SECURITY block + injection-pattern enumeration]")
         src = _source(_WEALTH_TASK_PATH)
         # Section header.
@@ -768,7 +768,7 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
 
     def test_system_prompt_names_user_data_tags(self):
         """Tag names must appear literally in the system prompt so
-        sonnet has an unambiguous delimiter reference."""
+        the model has an unambiguous delimiter reference."""
         print("\n[ak-3eo H2 — system prompt names the <user_data> delimiter tags]")
         src = _source(_WEALTH_TASK_PATH)
         # The tag substring appears multiple times in the system prompt
