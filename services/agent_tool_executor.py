@@ -564,11 +564,26 @@ def _execute_fetch_earnings_calendar(user_id, service):
 
 
 def _execute_fetch_company_announcements(tool_input):
-    """Build a WebFetch plan for a symbol's BSE / NSE announcements.
+    """Build a hybrid lookup plan for a symbol's BSE / NSE
+    corporate announcements.
 
-    Returns canonical lookup URLs on both exchanges + extraction
-    hints. The agent then calls WebFetch on each URL and the
-    model picks the most-recent material disclosures.
+    NSE's announcements page keys on the trading ``symbol`` directly
+    so we produce a canonical WebFetch URL.
+
+    BSE's equivalent page keys on a **numeric scrip code**, NOT the
+    trading ticker — e.g. RELIANCE's BSE page is scrip 500325, not
+    ``?scrip=RELIANCE``. We don't carry a ticker→scrip resolver
+    server-side (would add a lookup dependency to this wrapper), so
+    BSE routes through a **WebSearch query**
+    (``BSE corporate announcements <SYMBOL>``) which Google / Bing
+    resolve to the correct scrip-coded page at search time. The
+    agent then WebFetches whichever BSE page the search surfaces.
+    Trades URL-determinism for search-index-freshness — acceptable,
+    and the ak-pb4n MINOR-2 fix for the pre-fix broken BSE URL.
+
+    Returns:
+      ``{tool, symbol, nse_urls (WebFetch targets),
+         bse_queries (WebSearch targets), extraction, instructions}``.
     """
     if not isinstance(tool_input, dict):
         raise ToolValidationError(
@@ -585,22 +600,23 @@ def _execute_fetch_company_announcements(tool_input):
     return {
         "tool": "fetch_company_announcements",
         "symbol": symbol,
-        # Canonical public pages — the agent WebFetches these; we
-        # don't hard-code API paths which drift more often than the
-        # consumer pages.
-        "urls": [
-            {
-                "exchange": "BSE",
-                "url": (
-                    f"https://www.bseindia.com/corporates/ann.html"
-                    f"?scrip={symbol}"
-                ),
-            },
+        # NSE: direct WebFetch — symbol-keyed URL is canonical.
+        "nse_urls": [
             {
                 "exchange": "NSE",
                 "url": (
                     f"https://www.nseindia.com/companies-listing/"
                     f"corporate-filings-announcements?symbol={symbol}"
+                ),
+            },
+        ],
+        # BSE: WebSearch query → search engine resolves to the
+        # scrip-coded page. See docstring for the ak-pb4n rationale.
+        "bse_queries": [
+            {
+                "exchange": "BSE",
+                "canonical_query": (
+                    f"BSE corporate announcements {symbol}"
                 ),
             },
         ],
@@ -612,12 +628,16 @@ def _execute_fetch_company_announcements(tool_input):
             "link to the full filing PDF if present",
         ],
         "instructions": (
-            "Call WebFetch on BOTH URLs if both are reachable — "
-            "coverage overlaps but isn't identical. Rank "
-            "disclosures by date (most recent first) and surface "
-            "material ones (dividends, acquisitions, "
-            "board-meeting outcomes, fundraising). Cite the "
-            "exchange + date for every item."
+            "For NSE: call WebFetch on each entry in 'nse_urls'. "
+            "For BSE: call WebSearch with each 'canonical_query' in "
+            "'bse_queries' and WebFetch the top result (the search "
+            "engine resolves the ticker → BSE's numeric scrip-code "
+            "page, which we can't produce directly server-side). "
+            "Combine both sources — coverage overlaps but isn't "
+            "identical. Rank disclosures by date (most recent "
+            "first) and surface material ones (dividends, "
+            "acquisitions, board-meeting outcomes, fundraising). "
+            "Cite the exchange + date for every item."
         ),
     }
 
