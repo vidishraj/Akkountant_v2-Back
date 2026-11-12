@@ -625,6 +625,13 @@ class StocksService(Base_MSN, ABC):
                     'current_value': current_value,
                     'unrealized_pnl': unrealized_pnl,
                     'day_change_amount': day_change_amount,
+                    # ak-yvjs (2026-11-12): companion to ak-qeex's
+                    # fail-closed guard. False when day_change_basis
+                    # was 0/None and day_change_amount was emitted as
+                    # 0 (semantic: "unknown day change") — lets the FE
+                    # distinguish "unknown" from "no movement" without
+                    # ambiguity. True when the math ran normally.
+                    'day_change_known': day_change_known,
 
                     # --- Kite's own settled-only P&L / day change (preserved
                     #     for observability; NOT the folded values) ---
@@ -752,6 +759,8 @@ class StocksService(Base_MSN, ABC):
         'current_value',
         'unrealized_pnl',
         'day_change_amount',
+        # ak-yvjs: fail-closed truthiness companion for day_change_amount.
+        'day_change_known',
         # MTF fields
         'mtf_quantity',
     )

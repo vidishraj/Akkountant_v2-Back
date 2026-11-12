@@ -506,7 +506,14 @@ def test_absent_optional_fields_default_to_zero():
     assert row["invested"] == pytest.approx(500.0)   # 5 × 100
     assert row["current_value"] == pytest.approx(550.0)  # 5 × 110
     assert row["close_price"] == 0
-    assert row["day_change_amount"] == pytest.approx(550.0)  # 5 × (110 − 0)
+    # ak-yvjs (2026-11-12): close_price absent AND no OHLC → poison
+    # basis (0). ak-qeex's fail-closed guard emits day_change_amount=0
+    # (semantic: "unknown") rather than the pre-ak-qeex phantom value
+    # of 5 × (110 − 0) = 550 — that number was the exact MAJOR the
+    # reviewer flagged. ``day_change_known is False`` lets FE see the
+    # "unknown" state distinctly from a true no-movement day.
+    assert row["day_change_amount"] == 0.0
+    assert row["day_change_known"] is False
 
 
 def test_none_valued_fields_are_coerced_to_zero():
@@ -526,7 +533,12 @@ def test_none_valued_fields_are_coerced_to_zero():
     assert row["invested"] == 0
     assert row["current_value"] == 0
     assert row["unrealized_pnl"] == 0
+    # ak-yvjs (2026-11-12): with close_price coerced to 0 and no OHLC
+    # today_open, day_change_basis is 0 → ak-qeex's fail-closed guard
+    # emits day_change_amount=0 with day_change_known=False (correct
+    # semantic for "no basis available", not "no movement").
     assert row["day_change_amount"] == 0
+    assert row["day_change_known"] is False
 
 
 def test_mtf_fields_default_to_zero_without_mtf():
