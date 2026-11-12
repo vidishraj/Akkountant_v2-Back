@@ -350,6 +350,14 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
     elif tool_name == "get_kite_token_status":
         return service.getKiteTokenStatus(user_id)
 
+    # ── ak-zai2 Kite Bundle 2 (2026-11-12): 2 previously-dead wrappers ──
+
+    elif tool_name == "get_kite_trades":
+        return service.fetchKiteTrades(user_id)
+
+    elif tool_name == "get_kite_margins":
+        return service.fetchKiteMargins(user_id)
+
     else:
         return {"error": f"Unknown investment tool: {tool_name}"}
 

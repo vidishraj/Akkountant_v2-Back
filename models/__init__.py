@@ -27,6 +27,11 @@ from models.investmentSnapshot import InvestmentSnapshot
 # /investment-snapshot/history endpoint. Imported BEFORE db.create_all()
 # so the fresh table is created on next boot. See model docstring.
 from models.stockHistoricalCandle import StockHistoricalCandle
+# ak-zai2 Kite Bundle 2 (2026-11-12): reconciliation issues log —
+# per-trade discrepancies between Kite's reported trades and the
+# locally-imported TradeAssociation rows. Import BEFORE
+# db.create_all() so the fresh table materializes on next boot.
+from models.reconciliationIssue import ReconciliationIssue
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PendingPaymentClaim
 from .customer_emails import CustomerEmail

@@ -470,6 +470,45 @@ class InvestmentController:
             return jsonify({"error": "Failed to fetch positions"}), 500
 
     @Logger.standardLogger
+    def fetchKiteMargins(self):
+        """ak-zai2 Bundle 2 (2026-11-12): available + used funds from
+        Kite across segments. Powers the dashboard "available cash"
+        tile. Cached 5 min in-service (margins don't change
+        sub-minute); FE can poll freely.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            margins = self.InvestmentService.fetchKiteMargins(user_id)
+            return jsonify({"margins": margins}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite margins: {str(e)}")
+            return jsonify({"error": "Failed to fetch margins"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteTrades(self):
+        """ak-zai2 Bundle 2 (2026-11-12): today's executed trades
+        from Kite. Read-only; serves the FE "today's trades" surface
+        + powers the daily ReconcileTradesTask cross-check.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            trades = self.InvestmentService.fetchKiteTrades(user_id)
+            return jsonify({"trades": trades}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite trades: {str(e)}")
+            return jsonify({"error": "Failed to fetch trades"}), 500
+
+    @Logger.standardLogger
     def syncKiteHoldings(self):
         """Sync Kite holdings to local database"""
         user_id = g.get('firebase_id')

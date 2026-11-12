@@ -25,6 +25,9 @@ from services.tasks.wealth_digest_constants import WEALTH_DIGEST_JOB_TITLE
 # ak-4o41 Bundle 1: daily Kite historical-candle backfill, powering the
 # /investment-snapshot/history trend chart endpoint. 24h self-reschedule.
 from services.tasks.BackfillHistoricalCandlesTask import BackfillHistoricalCandlesTask
+# ak-zai2 Kite Bundle 2 (2026-11-12): daily reconciliation task —
+# flags Kite trades missing from local TradeAssociation.
+from services.tasks.ReconcileTradesTask import ReconcileTradesTask
 from utils.logger import Logger
 
 
@@ -71,6 +74,9 @@ TASK_MAPPING = {
     # ak-4o41 Bundle 1 (2026-11-12): daily Kite historical-candle
     # backfill. 24h cadence. See task docstring + bead ak-4o41.
     "BackfillHistoricalCandles": BackfillHistoricalCandlesTask,
+    # ak-zai2 Bundle 2 (2026-11-12): daily Kite-vs-local trade
+    # reconciliation. 24h cadence. See task docstring + bead ak-zai2.
+    "ReconcileTrades": ReconcileTradesTask,
 }
 
 

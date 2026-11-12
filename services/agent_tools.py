@@ -784,6 +784,32 @@ INVESTMENT_TOOLS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
+    # ───── ak-zai2 Kite Bundle 2 (2026-11-12): wire the last two dead
+    # KiteService wrappers from the ak-f1a audit. Both are read-only
+    # broker APIs. Both pair with FE surfaces (get_trades → statement
+    # reconciliation; get_margins → dashboard tile).
+    {
+        "name": "get_kite_trades",
+        "description": (
+            "Fetch today's executed trades from Kite (all orders, "
+            "all legs). Returns per-trade records — trade_id, "
+            "instrument_token, trading symbol, transaction_type "
+            "(buy/sell), quantity, price, trade_date, order_id, "
+            "exchange. Use for intraday trade-log review + "
+            "cross-checking statement imports."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_kite_margins",
+        "description": (
+            "Fetch Kite account margins — available + used funds "
+            "across equity / commodity segments. Use when the user "
+            "asks 'how much can I deploy right now' or 'what's my "
+            "available cash'. Returns a nested dict keyed by segment."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
 ]
 
 TRANSACTION_TOOLS = [

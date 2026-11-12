@@ -381,6 +381,11 @@ class Akkountant(Flask):
             ('/kite/holdings', 'GET', self.investmentEP.fetchKiteHoldings),
             ('/kite/positions', 'GET', self.investmentEP.fetchKitePositions),
             ('/kite/sync-holdings', 'GET', self.investmentEP.syncKiteHoldings),
+            # ak-zai2 Kite Bundle 2 (2026-11-12): available-funds
+            # dashboard tile + today's-trades FE surface + daily
+            # reconciliation cross-check (via ReconcileTradesTask).
+            ('/kite/margins', 'GET', self.investmentEP.fetchKiteMargins),
+            ('/kite/trades', 'GET', self.investmentEP.fetchKiteTrades),
         ]
 
         for rule, method, view_func in investmentRoutes:

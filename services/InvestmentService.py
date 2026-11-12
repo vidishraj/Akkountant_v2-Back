@@ -66,6 +66,10 @@ class InvestmentService(BaseService):
         # Manual trigger resynchronizes the cache after a scheduler
         # miss or cold-start.
         "BackfillHistoricalCandles": "Backfill Kite Historical Candles",
+        # ak-zai2 Bundle 2 (2026-11-12): daily Kite-vs-local trade
+        # reconciliation. Flags Kite trades missing from local
+        # TradeAssociation; UI badge surfaces unresolved count.
+        "ReconcileTrades": "Reconcile Kite Trades vs Local",
     }
 
     def __init__(self):
@@ -1020,4 +1024,57 @@ class InvestmentService(BaseService):
     def fetchFOTrades(self, userId):
         """Fetch all individual F&O trades"""
         return self.FOService.get_fo_trades(userId)
+
+    # ───── ak-zai2 Kite Bundle 2 (2026-11-12): wire 2 dead wrappers ─────
+
+    def fetchKiteTrades(self, userId):
+        """ak-zai2: fetch today's executed trades from Kite.
+
+        Thin pass-through to KiteService.get_trades (previously dead
+        wrapper from the ak-f1a audit). Consumer: agent tool
+        ``get_kite_trades`` + ReconcileTradesTask broker-statement
+        cross-check.
+        """
+        return self.StockService.kite_service.get_trades(userId)
+
+    #: ak-zai2: in-memory margins cache. Per-user, 5-minute TTL.
+    #: Margins don't change sub-minute; batching this across the
+    #: FE's periodic polling + agent queries saves one HTTP round-
+    #: trip to Kite per cache hit. Dict keyed by user_id → (ts, data).
+    _kite_margins_cache_ttl_seconds = 300
+
+    def fetchKiteMargins(self, userId):
+        """ak-zai2: available + used funds across Kite segments.
+
+        Returns Kite's native margins shape (nested by segment).
+        5-minute in-memory cache per user to amortize across FE
+        dashboard polls + agent queries — margins don't change
+        sub-minute so this is safe.
+
+        Cache miss or expired → one `get_margins()` HTTP call; the
+        cache stores `(timestamp, data)` and is cleared on fetch
+        failure so a stale response doesn't persist indefinitely.
+        """
+        import time
+        cache = getattr(self, '_kite_margins_cache', None)
+        if cache is None:
+            cache = {}
+            self._kite_margins_cache = cache
+
+        now = time.monotonic()
+        entry = cache.get(userId)
+        if entry is not None:
+            ts, data = entry
+            if now - ts < self._kite_margins_cache_ttl_seconds:
+                return data
+
+        try:
+            data = self.StockService.kite_service.get_margins(userId)
+        except Exception:
+            # Fetch failed — evict stale entry so the NEXT call retries
+            # instead of serving a potentially-further-stale cache hit.
+            cache.pop(userId, None)
+            raise
+        cache[userId] = (now, data)
+        return data
 
