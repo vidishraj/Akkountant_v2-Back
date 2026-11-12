@@ -707,8 +707,15 @@ class TestAk3eoH2PermissionModeAndInjection(unittest.TestCase):
         # site. (The word 'bypassPermissions' may still appear in
         # comments explaining what changed — that's fine.)
         import re
+        # ak-rde9 Bead A (2026-11-12): signature extended with
+        # optional `user_id=None` kwarg for per-turn observability.
+        # The regex is now permissive on the trailing params but
+        # still anchors on `self, input_data` as the required
+        # positional shape — guards the semantic (no accidental
+        # rename) without being brittle to additive kwargs.
         m = re.search(
-            r"def _invoke_sonnet\(self, input_data\):(.*?)(?=\n    def |\n\ndef |\Z)",
+            r"def _invoke_sonnet\(self, input_data[^)]*\):(.*?)"
+            r"(?=\n    def |\n\ndef |\Z)",
             code, re.DOTALL,
         )
         self.assertIsNotNone(m, "could not locate _invoke_sonnet body")

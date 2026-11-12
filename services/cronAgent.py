@@ -24,6 +24,12 @@ from utils.sdk_runner import run_query_collect
 MCP_SERVER_NAME = "cron-agent-tools"
 MAX_HISTORY = 5  # Keep last 5 cycle summaries for context
 
+# ak-rde9 Bead A (2026-11-12): pinned model ID shared with
+# agentService + WealthDigestTask. Prevents alias-drift (ak-znk class
+# incident). Bump in agentService.AGENT_MODEL_ID + here + in
+# WealthDigestTask._MODEL together.
+_AGENT_MODEL_ID = "claude-sonnet-4-7"
+
 SYSTEM_PROMPT = """\
 You are an autonomous cron scheduler for a personal finance app. Your job is to check
 what investment data is stale and trigger refresh jobs when appropriate.
@@ -134,7 +140,11 @@ class CronAgent:
             )
 
             options = ClaudeAgentOptions(
-                model="sonnet",
+                # ak-rde9 Bead A (2026-11-12): pinned model ID shared
+                # with agentService + WealthDigestTask. See
+                # agentService.AGENT_MODEL_ID for rationale (alias-
+                # drift prevention; ak-znk-class incident guard).
+                model=_AGENT_MODEL_ID,
                 system_prompt=SYSTEM_PROMPT,
                 max_turns=10,
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
@@ -158,6 +168,9 @@ class CronAgent:
             async def run_query():
                 return await run_query_collect(
                     agent="cron", options=options, prompt=make_prompt(),
+                    # ak-rde9 Bead A (2026-11-12): associate the turn
+                    # with the CRON_USER_ID in the observability log.
+                    user_id=CRON_USER_ID,
                 )
 
             result = anyio.run(run_query)

@@ -58,11 +58,31 @@ def _make_sdk_stderr_logger(agent):
 
 
 def emit_agent_run(*, agent, model, turns, tools_called, latency_ms,
-                   status, error_class=None):
+                   status, error_class=None,
+                   user_id=None, tool_names=None,
+                   input_tokens=None, output_tokens=None):
     """Emit one structured `agent_run` log line.
 
     Format (space-separated key=value, grep-friendly):
-      agent_run agent=X model=Y turns=N tools_called=N latency_ms=N status=S [error_class=C]
+      agent_run agent=X model=Y turns=N tools_called=N latency_ms=N status=S
+        [error_class=C] [user=U] [tool_names=comma,sep,list]
+        [input_tokens=N output_tokens=N]
+
+    ak-rde9 Bead A (2026-11-12) extensions — all new fields optional
+    and backwards-compatible with pre-ak-rde9 callers:
+
+    * ``user_id``: Firebase user id. Emitted as ``user=<id>`` so
+      per-user agent activity is grep-able across a shared log file.
+    * ``tool_names``: ordered list of tool names invoked this turn.
+      Emitted as ``tool_names=name1,name2,...`` so an operator can
+      see WHICH tools were called without scraping the per-tool
+      ``tool_exec`` events separately. Commas are ascii-safe in log
+      parsing; no tool name contains a comma.
+    * ``input_tokens`` / ``output_tokens``: usage counts from the
+      SDK ResultMessage (when exposed). Emitted as
+      ``input_tokens=N output_tokens=N``. Absent fields are skipped
+      (not emitted as ``None``) so downstream parsers don't see
+      stray key=None values.
     """
     parts = [
         "agent_run",
@@ -75,6 +95,14 @@ def emit_agent_run(*, agent, model, turns, tools_called, latency_ms,
     ]
     if error_class:
         parts.append(f"error_class={error_class}")
+    if user_id is not None:
+        parts.append(f"user={user_id}")
+    if tool_names:
+        parts.append("tool_names=" + ",".join(tool_names))
+    if input_tokens is not None:
+        parts.append(f"input_tokens={input_tokens}")
+    if output_tokens is not None:
+        parts.append(f"output_tokens={output_tokens}")
     _logger.info(" ".join(parts))
 
 
@@ -89,18 +117,28 @@ class SdkRunResult:
     error_class: str | None
 
 
-async def run_query_collect(*, agent, options, prompt):
+async def run_query_collect(*, agent, options, prompt, user_id=None):
     """Run sdk_query, collect TextBlocks + structured_output, emit log line.
 
     `prompt` may be a string or an AsyncIterable per the SDK contract.
+
+    ak-rde9 Bead A (2026-11-12): now also accumulates tool_names (list)
+    and input_tokens / output_tokens (from ResultMessage.usage when
+    exposed by the SDK) and threads them into the ``agent_run`` log
+    line for per-turn observability. ``user_id`` is a new optional
+    kwarg the caller can pass to associate the turn with a Firebase
+    user id in logs.
     """
     start = time.monotonic()
     text_parts = []
     tool_calls = 0
+    tool_names = []
     turns = 0
     structured_output = None
     error_msg = None
     error_class = None
+    input_tokens = None
+    output_tokens = None
 
     # Auto-wire stderr capture if the caller didn't supply one. This covers
     # every run_query_collect call site (rate.*, mailProcessor extract paths,
@@ -122,12 +160,33 @@ async def run_query_collect(*, agent, options, prompt):
                         text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_calls += 1
+                        # ak-rde9: record the tool name for the
+                        # observability log. Guard against unexpected
+                        # block shapes.
+                        name = getattr(block, "name", None)
+                        if name:
+                            tool_names.append(str(name))
             elif isinstance(message, ResultMessage):
                 if getattr(message, "is_error", False):
                     error_msg = message.result or "Query failed"
                     error_class = "result_error"
                 if getattr(message, "structured_output", None) is not None:
                     structured_output = message.structured_output
+                # ak-rde9: capture token usage when SDK exposes it on
+                # the ResultMessage. Shape per claude_agent_sdk varies
+                # by version — defensively walk likely attribute paths.
+                usage = getattr(message, "usage", None)
+                if usage is not None:
+                    input_tokens = (
+                        getattr(usage, "input_tokens", None)
+                        if not isinstance(usage, dict)
+                        else usage.get("input_tokens")
+                    )
+                    output_tokens = (
+                        getattr(usage, "output_tokens", None)
+                        if not isinstance(usage, dict)
+                        else usage.get("output_tokens")
+                    )
     except Exception as e:
         error_msg = f"SDK exception: {e}"
         error_class = e.__class__.__name__
@@ -141,6 +200,10 @@ async def run_query_collect(*, agent, options, prompt):
         latency_ms=latency_ms,
         status="error" if error_msg else "ok",
         error_class=error_class,
+        user_id=user_id,
+        tool_names=tool_names,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
     return SdkRunResult(

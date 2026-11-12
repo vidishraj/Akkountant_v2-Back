@@ -35,6 +35,19 @@ from claude_agent_sdk import (
 
 MCP_SERVER_NAME = "agent_tools"
 
+# ak-rde9 Bead A (2026-11-12): pin the model ID across ALL agent
+# dispatchers (interactive chat here + cron rate agents in
+# cronAgent.py + wealth-digest in WealthDigestTask.py) to prevent
+# alias-drift class incidents. Overseer decision 2026-11-12 06:15Z
+# via /AskUserQuestion: use claude-sonnet-4-7 (latest pin).
+#
+# Same incident class guarded against as Aug-20 gold unit-drift
+# (ak-znk) — behaviour that depends on an alias resolving to a
+# specific model can change silently when the alias is rotated.
+# A pinned model ID is reproducible across deploys. Shared as a
+# module-level constant so a future bump touches one file.
+AGENT_MODEL_ID = "claude-sonnet-4-7"
+
 
 # Tools that require user confirmation before execution
 DESTRUCTIVE_TOOLS = {
@@ -771,12 +784,13 @@ class AgentService(BaseService):
                 except (KeyError, TypeError):
                     pass
             self.logger.info(
-                "chat_request agent=chat.%s model=sonnet max_turns=%d "
+                "chat_request agent=chat.%s model=%s max_turns=%d "
                 "perm=bypassPermissions sys_prompt_len=%d sys_prompt_sha=%s "
                 "tools_count=%d tools_json_sha=%s has_get_invoices_rule=%s "
                 "ci_from_required=%s ci_to_required=%s "
                 "messages_count=%d total_prompt_len=%d",
-                agent_type, MAX_TURNS, len(sys_prompt), sys_prompt_sha,
+                agent_type, AGENT_MODEL_ID, MAX_TURNS,
+                len(sys_prompt), sys_prompt_sha,
                 len(mcp_tool_names), tools_json_sha, has_get_invoices_rule,
                 ci_from_required, ci_to_required,
                 len(messages), len(prompt_text),
@@ -787,7 +801,7 @@ class AgentService(BaseService):
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
                 max_turns=MAX_TURNS,
-                model="sonnet",
+                model=AGENT_MODEL_ID,
                 allowed_tools=mcp_tool_names,
                 # Stderr capture for cross-family diagnosis (hq-wisp-l2jfz,
                 # hq-wisp-wzagg). v3.4: extra_args adds --debug-to-stderr so
@@ -812,10 +826,17 @@ class AgentService(BaseService):
             error_class = None
             turns = 0
             tool_calls = 0
+            # ak-rde9 Bead A (2026-11-12): accumulate per-turn
+            # observability — ordered tool names + token usage. Both
+            # flow into emit_agent_run below.
+            tool_names = []
+            input_tokens = None
+            output_tokens = None
             run_start = time.monotonic()
 
             async def run_query():
                 nonlocal error_msg, error_class, turns, tool_calls
+                nonlocal input_tokens, output_tokens
 
                 # Use AsyncIterable prompt to avoid SDK bug where string prompts
                 # close stdin before MCP control responses can be written back.
@@ -839,10 +860,27 @@ class AgentService(BaseService):
                                 text_parts.append(block.text)
                             elif isinstance(block, ToolUseBlock):
                                 tool_calls += 1
+                                name = getattr(block, "name", None)
+                                if name:
+                                    tool_names.append(str(name))
                     elif isinstance(message, ResultMessage):
                         if message.is_error:
                             error_msg = message.result or "Query failed"
                             error_class = "result_error"
+                        # ak-rde9: capture usage when the SDK exposes
+                        # it. Shape varies by version — defensive walk.
+                        usage = getattr(message, "usage", None)
+                        if usage is not None:
+                            input_tokens = (
+                                getattr(usage, "input_tokens", None)
+                                if not isinstance(usage, dict)
+                                else usage.get("input_tokens")
+                            )
+                            output_tokens = (
+                                getattr(usage, "output_tokens", None)
+                                if not isinstance(usage, dict)
+                                else usage.get("output_tokens")
+                            )
 
             try:
                 anyio.run(run_query)
@@ -858,6 +896,10 @@ class AgentService(BaseService):
                 latency_ms=int((time.monotonic() - run_start) * 1000),
                 status="error" if error_msg else "ok",
                 error_class=error_class,
+                user_id=user_id,
+                tool_names=tool_names,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
 
             if error_msg:
@@ -1039,8 +1081,14 @@ class AgentService(BaseService):
                         "is_error": True,
                     }
 
-                # Record tool execution event
-                tool_events.append(("tool_exec", {"tool": _tn}))
+                # ak-rde9 Bead A (2026-11-12): time the tool execution
+                # so the ``tool_exec`` event carries per-tool
+                # duration_ms. This feeds both the FE (richer event
+                # payload for the activity timeline) AND future
+                # observability aggregation (operator can chart
+                # tool-latency P50 / P99 across cycles by filtering
+                # tool_exec events with a specific tool name).
+                _tool_start = time.monotonic()
 
                 # Execute via existing services
                 # ak-9dz: file_attachment_service + conversation_id are
@@ -1058,6 +1106,16 @@ class AgentService(BaseService):
                     file_attachment_service=self.file_attachment_service,
                     conversation_id=conversation_id,
                 )
+                _tool_duration_ms = int(
+                    (time.monotonic() - _tool_start) * 1000
+                )
+                # Record tool execution event with duration. Deferred
+                # until after execute_tool so the event carries real
+                # timing rather than a to-be-filled placeholder.
+                tool_events.append((
+                    "tool_exec",
+                    {"tool": _tn, "duration_ms": _tool_duration_ms},
+                ))
 
                 # ak-e7g: distinguish handler-layer validation failures
                 # (surfaced with is_error=True so the LLM can retry with

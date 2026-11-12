@@ -312,6 +312,44 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
     elif tool_name == "get_rate_freshness":
         return service.getFileTimeStamps()
 
+    # ── ak-rde9 Bead A (2026-11-12): 8 previously-dead service methods ──
+
+    elif tool_name == "fetch_realized_pnl":
+        stype = MSNENUM[tool_input["service_type"]].value
+        return service.fetchRealizedPnL(stype, user_id)
+
+    elif tool_name == "fetch_fo_summary":
+        return service.fetchFOSummary(user_id)
+
+    elif tool_name == "fetch_fo_trades":
+        return service.fetchFOTrades(user_id)
+
+    elif tool_name == "fetch_investment_snapshots":
+        return service.getInvestmentSnapshots(
+            user_id,
+            date_from=tool_input.get("date_from"),
+            date_to=tool_input.get("date_to"),
+            investment_type=tool_input.get("investment_type"),
+        )
+
+    elif tool_name == "fetch_investment_emails":
+        return service.fetchInvestmentEmails(
+            user_id,
+            category=tool_input.get("category"),
+            page=tool_input.get("page", 1),
+            page_size=tool_input.get("page_size", 50),
+            service_type=tool_input.get("service_type"),
+        )
+
+    elif tool_name == "fetch_email_body":
+        return service.fetchEmailBody(user_id, tool_input["gmail_id"])
+
+    elif tool_name == "get_kite_login_url":
+        return {"login_url": service.getKiteLoginUrl()}
+
+    elif tool_name == "get_kite_token_status":
+        return service.getKiteTokenStatus(user_id)
+
     else:
         return {"error": f"Unknown investment tool: {tool_name}"}
 

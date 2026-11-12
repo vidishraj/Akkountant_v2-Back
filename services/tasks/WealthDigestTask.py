@@ -89,7 +89,12 @@ _HEADER = "[Personal use — not investment advice]"
 # Model + agent_type discriminator. agent_type is 'investment' per
 # Lead's Q1 GO — reuses the existing whitelist without needing to
 # extend VALID_AGENT_TYPES / agentEP / FE.
-_MODEL = "sonnet"
+#
+# ak-rde9 Bead A (2026-11-12): pinned model ID shared with
+# agentService.AGENT_MODEL_ID + cronAgent._AGENT_MODEL_ID. Prevents
+# alias-drift (ak-znk class incident guard). Bump in all three
+# together.
+_MODEL = "claude-sonnet-4-7"
 _AGENT_TYPE = "investment"
 
 # Notable-movers threshold: MF holdings whose day-over-day NAV moved
@@ -342,7 +347,10 @@ class WealthDigestTask(BaseTask):
             input_data = self._assemble_input(user_id)
 
             # 2. Invoke sonnet — batch, single turn, no tools.
-            digest_text = self._invoke_sonnet(input_data)
+            #    ak-rde9 Bead A (2026-11-12): user_id threaded through
+            #    for per-turn observability (agent_run log carries
+            #    user= tag).
+            digest_text = self._invoke_sonnet(input_data, user_id=user_id)
 
             # 3. Persist to the user's Wealth Digest conversation.
             # find_or_create_by_title guarantees convergence on a
@@ -607,7 +615,7 @@ class WealthDigestTask(BaseTask):
 
     # ── LLM invocation ─────────────────────────────────────────────────
 
-    def _invoke_sonnet(self, input_data):
+    def _invoke_sonnet(self, input_data, user_id=None):
         """Batch SDK call with retry + timeout: single user message,
         no tool loop, collect text and return.
 
@@ -686,6 +694,10 @@ class WealthDigestTask(BaseTask):
                     agent="wealth_digest",
                     options=options,
                     prompt=make_prompt(),
+                    # ak-rde9 Bead A (2026-11-12): associate the turn
+                    # with the dispatching Firebase user in the
+                    # observability log.
+                    user_id=user_id,
                 ),
                 timeout=_SDK_TIMEOUT_SECONDS,
             )

@@ -613,6 +613,141 @@ INVESTMENT_TOOLS = [
     # ak-9dz: file-download plumbing for CSV/PDF exports the investment
     # agent may produce (e.g. portfolio snapshot dumps). Shared def.
     ATTACH_FILE_TO_CHAT_TOOL,
+    # ───── ak-rde9 Bead A (2026-11-12): expose 8 previously-dead
+    # InvestmentService methods as agent tools. These were already
+    # live route handlers on the controller but had no corresponding
+    # tool wiring, so the investment agent couldn't invoke them even
+    # though the implementation + review surface already existed.
+    # Parity with controllers/investmentsEP.py route list.
+    {
+        "name": "fetch_realized_pnl",
+        "description": (
+            "Fetch realized P&L summary for a given security type. "
+            "Aggregates sell-side profit/loss across completed trades. "
+            "Use for 'how much profit have I booked this year' questions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_type": {
+                    "type": "string",
+                    "enum": ["Stocks", "Mutual_Funds", "NPS"],
+                    "description": "The type of security to summarize realized P&L for"
+                }
+            },
+            "required": ["service_type"]
+        }
+    },
+    {
+        "name": "fetch_fo_summary",
+        "description": (
+            "Fetch F&O (Futures & Options) P&L summary. Returns aggregate "
+            "profit/loss, trade counts, and underlying stats. Takes no args."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "fetch_fo_trades",
+        "description": (
+            "Fetch all individual F&O trades (futures + options legs). "
+            "Returns per-trade details — contract, strike, expiry, entry/exit, "
+            "P&L. Takes no args."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "fetch_investment_snapshots",
+        "description": (
+            "Fetch historical investment snapshots (per-day per-asset-type "
+            "totals from the investmentSnapshotTask daemon). Use for "
+            "growth-over-time queries. Optionally filter by date range + "
+            "investment type."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {
+                    "type": "string",
+                    "description": "Start date in YYYY-MM-DD format (optional)."
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "End date in YYYY-MM-DD format (optional)."
+                },
+                "investment_type": {
+                    "type": "string",
+                    "description": "Optional filter: Stocks, Mutual_Funds, NPS, EPF, PF, Gold."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "fetch_investment_emails",
+        "description": (
+            "Fetch processed investment-related emails (investment "
+            "confirmations, EPF passbooks, gold receipts, NPS statements). "
+            "Supports filtering by category + service type + pagination."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Optional filter: 'investment_confirmation', 'epf_passbook', 'gold_receipt', 'nps_statement'."
+                },
+                "service_type": {
+                    "type": "string",
+                    "description": "Optional service-type tag from extraction summary."
+                },
+                "page": {
+                    "type": "integer",
+                    "description": "1-based page number. Defaults to 1."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "description": "Rows per page. Defaults to 50."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "fetch_email_body",
+        "description": (
+            "Fetch the full body (HTML + text) of a specific processed email "
+            "by its Gmail ID. Pair with fetch_investment_emails to drill into "
+            "a specific confirmation's content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "gmail_id": {
+                    "type": "string",
+                    "description": "The Gmail message ID returned by fetch_investment_emails."
+                }
+            },
+            "required": ["gmail_id"]
+        }
+    },
+    {
+        "name": "get_kite_login_url",
+        "description": (
+            "Get the Kite Connect login URL for re-authenticating. Kite "
+            "access tokens expire at 6 AM IST daily; call this when the "
+            "user needs to reconnect. Takes no args."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_kite_token_status",
+        "description": (
+            "Check the user's Kite connection state. Returns "
+            "{connected, reconnect_required, reason, expires_at, login_url}. "
+            "Use before Kite-dependent operations to avoid 401 surprises."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
 ]
 
 TRANSACTION_TOOLS = [
