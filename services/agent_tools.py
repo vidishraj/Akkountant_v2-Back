@@ -77,6 +77,56 @@ an inline download card. Do NOT reply with a bare filesystem path like
 that message is a UX dead-end for the user. After the tool succeeds
 you do not need to repeat the URL in prose; the card carries it.
 
+## Web Intelligence (ak-6k2m Bead B)
+
+You have web-access tools for grounding answers in current market context:
+
+### Built-ins (free-form)
+- `WebSearch(query)` — current web search. Use for news, prices,
+  macro events, anything not covered by a domain wrapper.
+- `WebFetch(url)` — fetch a specific URL (e.g., an announcement page).
+
+News source policy: **you pick** — no domain allowlist. Prefer
+reputable sources (the official exchange, Reuters, Bloomberg, Mint,
+Economic Times, MoneyControl), and be explicit about the source
+whenever you cite a number.
+
+### Domain wrappers (canonical scaffolds)
+
+Each wrapper returns a **structured search plan** (canonical query,
+suggested sources, extraction hints). You then call `WebSearch` /
+`WebFetch` on the plan to pull live data. This keeps queries
+consistent + makes your reasoning auditable.
+
+- `fetch_stock_news(symbol, days_back=7)` — news for a symbol over
+  the window. Returns {canonical_query, date_hint, extraction}.
+- `fetch_earnings_calendar()` — upcoming earnings for currently-held
+  stocks. Reads fetch_user_securities then returns per-symbol
+  queries.
+- `fetch_company_announcements(symbol)` — BSE/NSE corporate
+  announcement page URLs for a symbol. Returns {urls, extraction}.
+- `fetch_macro_context()` — RBI repo rate / latest inflation / FOMC
+  upcoming. Returns {queries, sources}.
+- `fetch_fund_factsheet(scheme_code)` — AMC factsheet / expense
+  ratio / top holdings canonical query. Returns {queries, sources}.
+
+### Insert-after-web confirm-gate (ak-6k2m)
+
+If **any web tool (built-in or wrapper) fires in this turn** and you
+then try to `insert_investment`, a confirm-gate SSE event is raised
+and the insert is HELD until the user approves. Rationale:
+prompt-injection via scraped content → malicious insert is the one
+new attack class web access opens. The gate is the mitigation.
+
+**What this means for you**:
+- Web lookups for informational Q&A: no gate. Insert cases that
+  DON'T use web: no gate (default pre-existing flow).
+- Insert cases that DO follow a web lookup: the insert tool will
+  return an "Action cancelled — user confirmation required" error.
+  Tell the user you're asking them to confirm, surface the exact
+  data you were going to insert, and wait for their explicit
+  approval before retrying.
+
 ## Rules
 - Always fetch data via tools before answering. Never fabricate numbers.
 - ServiceType enum values: Stocks, Mutual_Funds, NPS (MSN) | EPF, PF, Gold (EPG)
@@ -844,6 +894,132 @@ INVESTMENT_TOOLS = [
             "the per-uuid endpoint is not exposed as an agent tool."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    # ───── ak-6k2m Bead B (2026-11-12): web intelligence wrappers.
+    # Each returns a structured SEARCH PLAN (canonical query +
+    # suggested sources + extraction hints) rather than performing
+    # live HTTP server-side — the agent then invokes WebSearch /
+    # WebFetch on the plan. Keeps queries consistent, makes the
+    # agent's chain-of-thought auditable, and leaves live HTTP
+    # concerns (rate-limits, scraping drift, cert pinning) on the
+    # SDK side where they already belong. Calling any of these
+    # trips the web-fetch-triggers-insert-confirm-gate in
+    # agentService._build_sdk_tools.
+    {
+        "name": "fetch_stock_news",
+        "description": (
+            "Return a canonical WebSearch plan for news about a "
+            "stock symbol over a recency window. Does NOT perform "
+            "the search itself — returns the query + extraction "
+            "hints; the agent then calls WebSearch on the plan. "
+            "Use before citing news. Open source policy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": (
+                        "Stock symbol / ticker (e.g., RELIANCE, "
+                        "INFY, 'HDFC Bank'). Case-insensitive."
+                    ),
+                },
+                "days_back": {
+                    "type": "integer",
+                    "description": (
+                        "Recency window in days (default 7). "
+                        "Caps at 30 — older news is rarely useful."
+                    ),
+                    "default": 7,
+                    "minimum": 1,
+                    "maximum": 30,
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "fetch_earnings_calendar",
+        "description": (
+            "Return upcoming-earnings WebSearch plans for the "
+            "user's currently-held stocks. Internally reads the "
+            "user's Stocks holdings (fetch_user_securities) to "
+            "scope the queries to actually-held symbols. Does NOT "
+            "perform the search itself — the agent calls WebSearch "
+            "per returned plan. Takes no args."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "fetch_company_announcements",
+        "description": (
+            "Return a canonical WebFetch plan for BSE / NSE "
+            "corporate announcements for a specific symbol. "
+            "Returns suggested official-exchange URLs + "
+            "extraction hints; the agent then calls WebFetch on "
+            "the URLs. Prefer this over WebSearch when the user "
+            "is asking about a specific disclosure "
+            "(acquisition / dividend / board-meeting outcome)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": (
+                        "Stock symbol (e.g., RELIANCE, INFY). "
+                        "Used to shape the BSE / NSE lookup URL."
+                    ),
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "fetch_macro_context",
+        "description": (
+            "Return canonical WebSearch plans for Indian macro "
+            "indicators the investment agent commonly needs: "
+            "RBI repo rate (current), latest CPI inflation print, "
+            "upcoming FOMC calendar. No args. The agent then "
+            "calls WebSearch per plan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "fetch_fund_factsheet",
+        "description": (
+            "Return a canonical search plan for a Mutual Fund "
+            "scheme factsheet by schemeCode: fund NAV, expense "
+            "ratio, top holdings, asset-allocation breakdown. "
+            "Pair with search_securities to resolve a name to "
+            "schemeCode first. Returns {queries, sources, "
+            "extraction}; the agent then calls WebSearch / "
+            "WebFetch on the plan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scheme_code": {
+                    "type": "string",
+                    "description": (
+                        "The AMFI schemeCode of the MF scheme. "
+                        "Use search_securities('Mutual_Funds', "
+                        "<name>) to resolve a user-supplied "
+                        "fund name to its code first."
+                    ),
+                },
+            },
+            "required": ["scheme_code"],
+        },
     },
 ]
 

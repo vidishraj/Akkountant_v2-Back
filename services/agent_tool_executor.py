@@ -370,8 +370,361 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
     elif tool_name == "get_kite_alerts":
         return service.fetchKiteAlerts(user_id)
 
+    # ── ak-6k2m Bead B (2026-11-12): web intelligence wrappers ──
+    #
+    # These wrappers return a structured SEARCH PLAN (canonical query +
+    # suggested sources + extraction hints) rather than performing live
+    # HTTP server-side. The agent then calls the SDK's WebSearch /
+    # WebFetch built-ins on the plan. Rationale: (a) keeps queries
+    # consistent across chats, (b) makes the agent's reasoning
+    # auditable (the exact query lands in tool_events), (c) leaves
+    # live-HTTP concerns (rate-limits, scraping drift, cert pinning)
+    # on the SDK side where they already belong.
+    #
+    # Each wrapper trips the web-fetch-used flag at the handler-closure
+    # layer (agentService._build_sdk_tools) — the executor itself
+    # doesn't carry that state. See WEB_WRAPPER_TOOLS there.
+
+    elif tool_name == "fetch_stock_news":
+        return _execute_fetch_stock_news(tool_input)
+
+    elif tool_name == "fetch_earnings_calendar":
+        return _execute_fetch_earnings_calendar(user_id, service)
+
+    elif tool_name == "fetch_company_announcements":
+        return _execute_fetch_company_announcements(tool_input)
+
+    elif tool_name == "fetch_macro_context":
+        return _execute_fetch_macro_context()
+
+    elif tool_name == "fetch_fund_factsheet":
+        return _execute_fetch_fund_factsheet(tool_input)
+
     else:
         return {"error": f"Unknown investment tool: {tool_name}"}
+
+
+# ── ak-6k2m Bead B (2026-11-12): web-wrapper implementations ─────────
+#
+# Each helper is a thin builder: validate args → build a canonical
+# search plan → return it. No HTTP; the SDK does the live fetch via
+# WebSearch / WebFetch on the returned plan. This makes every helper
+# unit-testable without mocking the network.
+
+
+# Cap on the days_back window — matches the input_schema at the tool
+# def. Enforced here too so a non-SDK caller (test harness) can't
+# sneak past the schema.
+_FETCH_STOCK_NEWS_MAX_DAYS_BACK = 30
+# Default recency window for fetch_stock_news when caller omits
+# days_back. Matches the tool def.
+_FETCH_STOCK_NEWS_DEFAULT_DAYS_BACK = 7
+
+
+def _execute_fetch_stock_news(tool_input):
+    """Build a canonical WebSearch plan for stock news.
+
+    Returns ``{tool, symbol, days_back, canonical_query, date_hint,
+    extraction, instructions}``. The agent then calls WebSearch on
+    ``canonical_query``.
+
+    Validation:
+      * ``symbol`` required, non-empty string after strip.
+      * ``days_back`` optional; defaults to 7; clamped to [1, 30].
+    """
+    if not isinstance(tool_input, dict):
+        raise ToolValidationError(
+            "fetch_stock_news: tool_input must be an object"
+        )
+    symbol = tool_input.get("symbol")
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ToolValidationError(
+            "fetch_stock_news: 'symbol' is required and must be a "
+            "non-empty string"
+        )
+    symbol = symbol.strip()
+
+    days_back_raw = tool_input.get(
+        "days_back", _FETCH_STOCK_NEWS_DEFAULT_DAYS_BACK,
+    )
+    try:
+        days_back = int(days_back_raw)
+    except (TypeError, ValueError):
+        raise ToolValidationError(
+            f"fetch_stock_news: 'days_back' must be an integer "
+            f"(got {days_back_raw!r})"
+        )
+    # Clamp rather than raise — the agent sometimes sends values that
+    # make sense semantically (e.g., 90) but are outside the schema.
+    # A clamp is friendlier than an is_error.
+    if days_back < 1:
+        days_back = 1
+    elif days_back > _FETCH_STOCK_NEWS_MAX_DAYS_BACK:
+        days_back = _FETCH_STOCK_NEWS_MAX_DAYS_BACK
+
+    return {
+        "tool": "fetch_stock_news",
+        "symbol": symbol,
+        "days_back": days_back,
+        "canonical_query": (
+            f"{symbol} stock news last {days_back} days"
+        ),
+        "date_hint": (
+            f"filter to items published within the last "
+            f"{days_back} days"
+        ),
+        "extraction": [
+            "headline",
+            "source (official exchange > Reuters / Bloomberg > "
+            "Mint / ET / MC > other)",
+            "publish date (verify within window)",
+            "one-sentence summary",
+        ],
+        "instructions": (
+            "Call WebSearch with 'canonical_query', then filter the "
+            "results per 'date_hint' + 'extraction'. Be explicit "
+            "about the SOURCE for every number you cite back to the "
+            "user."
+        ),
+    }
+
+
+def _execute_fetch_earnings_calendar(user_id, service):
+    """Build per-symbol WebSearch plans for the user's held stocks.
+
+    Reads ``service.fetchUserSecurities('Stocks', user_id)`` to scope
+    the queries to actually-held tickers. Returns ``{tool, symbols,
+    plans, instructions}`` — one plan per symbol, each with a
+    canonical query the agent can feed to WebSearch.
+
+    On a service fetch failure (service missing, DB down), returns a
+    structured ``{tool, error_class, message, ...}`` shape rather
+    than raising, so the LLM can fall back to free-form WebSearch.
+    """
+    try:
+        holdings = service.fetchUserSecurities(
+            MSNENUM["Stocks"].value, user_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"fetch_earnings_calendar: holdings fetch failed: {exc}",
+        )
+        return {
+            "tool": "fetch_earnings_calendar",
+            "error_class": "holdings_fetch_failed",
+            "message": str(exc),
+            "fallback": (
+                "Ask the user which symbols to look up, then call "
+                "WebSearch per symbol with the query template "
+                "'<SYMBOL> upcoming earnings date NSE BSE'."
+            ),
+        }
+
+    unwrapped = _unwrap_response(holdings)
+    items = []
+    if isinstance(unwrapped, dict):
+        items = (
+            unwrapped.get("data")
+            or unwrapped.get("results")
+            or []
+        )
+    elif isinstance(unwrapped, list):
+        items = unwrapped
+
+    symbols = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sym = item.get("stockCode") or item.get("symbol") or item.get("name")
+        if isinstance(sym, str) and sym.strip():
+            s = sym.strip()
+            if s not in symbols:
+                symbols.append(s)
+
+    plans = [
+        {
+            "symbol": s,
+            "canonical_query": f"{s} upcoming earnings date NSE BSE",
+        }
+        for s in symbols
+    ]
+
+    return {
+        "tool": "fetch_earnings_calendar",
+        "symbols": symbols,
+        "plans": plans,
+        "instructions": (
+            "For each entry in 'plans', call WebSearch with the "
+            "'canonical_query'. Extract the next earnings date + "
+            "expected EPS / revenue if the source includes it. "
+            "If 'symbols' is empty, the user holds no stocks — "
+            "tell them so and skip the WebSearch loop."
+        ),
+    }
+
+
+def _execute_fetch_company_announcements(tool_input):
+    """Build a WebFetch plan for a symbol's BSE / NSE announcements.
+
+    Returns canonical lookup URLs on both exchanges + extraction
+    hints. The agent then calls WebFetch on each URL and the
+    model picks the most-recent material disclosures.
+    """
+    if not isinstance(tool_input, dict):
+        raise ToolValidationError(
+            "fetch_company_announcements: tool_input must be an object"
+        )
+    symbol = tool_input.get("symbol")
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ToolValidationError(
+            "fetch_company_announcements: 'symbol' is required and "
+            "must be a non-empty string"
+        )
+    symbol = symbol.strip().upper()
+
+    return {
+        "tool": "fetch_company_announcements",
+        "symbol": symbol,
+        # Canonical public pages — the agent WebFetches these; we
+        # don't hard-code API paths which drift more often than the
+        # consumer pages.
+        "urls": [
+            {
+                "exchange": "BSE",
+                "url": (
+                    f"https://www.bseindia.com/corporates/ann.html"
+                    f"?scrip={symbol}"
+                ),
+            },
+            {
+                "exchange": "NSE",
+                "url": (
+                    f"https://www.nseindia.com/companies-listing/"
+                    f"corporate-filings-announcements?symbol={symbol}"
+                ),
+            },
+        ],
+        "extraction": [
+            "disclosure date",
+            "subject line / category (dividend, board-meeting, "
+            "acquisition, insider-trading, …)",
+            "one-sentence outcome / summary",
+            "link to the full filing PDF if present",
+        ],
+        "instructions": (
+            "Call WebFetch on BOTH URLs if both are reachable — "
+            "coverage overlaps but isn't identical. Rank "
+            "disclosures by date (most recent first) and surface "
+            "material ones (dividends, acquisitions, "
+            "board-meeting outcomes, fundraising). Cite the "
+            "exchange + date for every item."
+        ),
+    }
+
+
+def _execute_fetch_macro_context():
+    """Build canonical WebSearch plans for Indian macro indicators
+    the investment agent commonly needs.
+
+    Returns three plans (repo rate, inflation print, FOMC calendar)
+    with per-plan queries + suggested sources.
+    """
+    return {
+        "tool": "fetch_macro_context",
+        "plans": [
+            {
+                "indicator": "rbi_repo_rate",
+                "canonical_query": (
+                    "RBI repo rate current India latest MPC decision"
+                ),
+                "sources": [
+                    "rbi.org.in (official)",
+                    "livemint.com", "economictimes.indiatimes.com",
+                ],
+            },
+            {
+                "indicator": "india_cpi_inflation",
+                "canonical_query": (
+                    "India CPI inflation latest print MoSPI YoY"
+                ),
+                "sources": [
+                    "mospi.gov.in (official)",
+                    "livemint.com", "reuters.com",
+                ],
+            },
+            {
+                "indicator": "fomc_upcoming",
+                "canonical_query": (
+                    "FOMC next meeting date schedule Federal Reserve"
+                ),
+                "sources": [
+                    "federalreserve.gov (official)",
+                    "reuters.com",
+                ],
+            },
+        ],
+        "instructions": (
+            "Call WebSearch per plan. Prefer the official source "
+            "when present. For repo rate + CPI, cite the exact "
+            "percentage AND the announcement / print date. For "
+            "FOMC, cite the next meeting date."
+        ),
+    }
+
+
+def _execute_fetch_fund_factsheet(tool_input):
+    """Build a canonical search plan for a Mutual Fund scheme
+    factsheet by AMFI schemeCode.
+
+    Returns {queries, sources, extraction}; the agent then calls
+    WebSearch to resolve the schemeCode → fund name → factsheet
+    PDF, and WebFetch to pull the factsheet.
+    """
+    if not isinstance(tool_input, dict):
+        raise ToolValidationError(
+            "fetch_fund_factsheet: tool_input must be an object"
+        )
+    scheme_code = tool_input.get("scheme_code")
+    if not isinstance(scheme_code, str) or not scheme_code.strip():
+        raise ToolValidationError(
+            "fetch_fund_factsheet: 'scheme_code' is required and "
+            "must be a non-empty string (use "
+            "search_securities('Mutual_Funds', <name>) to resolve "
+            "a user-supplied name first)"
+        )
+    scheme_code = scheme_code.strip()
+
+    return {
+        "tool": "fetch_fund_factsheet",
+        "scheme_code": scheme_code,
+        "queries": [
+            f"AMFI scheme code {scheme_code} factsheet latest",
+            f"mutual fund scheme {scheme_code} expense ratio top "
+            f"holdings monthly factsheet",
+        ],
+        "sources": [
+            "amfiindia.com (official)",
+            "valueresearchonline.com",
+            "moneycontrol.com",
+            "The AMC's own site (HDFC AMC / ICICI Prudential / "
+            "SBI MF / etc.) — factsheet PDF is authoritative.",
+        ],
+        "extraction": [
+            "scheme full name",
+            "NAV + NAV date",
+            "expense ratio (direct + regular if listed)",
+            "top 10 holdings with % weight",
+            "asset allocation (equity / debt / cash)",
+            "benchmark index",
+        ],
+        "instructions": (
+            "Call WebSearch with 'queries' to find the latest "
+            "monthly factsheet (prefer the AMC's own PDF). Then "
+            "WebFetch the PDF URL. Extract per 'extraction'. "
+            "If the schemeCode doesn't resolve, ask the user to "
+            "name the fund so you can search_securities first."
+        ),
+    }
 
 
 def _execute_transaction_tool(tool_name, tool_input, user_id, service, mail_processor=None):

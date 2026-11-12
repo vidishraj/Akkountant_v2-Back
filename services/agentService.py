@@ -84,6 +84,36 @@ MAX_TURNS = 20
 # CLI permission semantics are not relied on.
 READ_ATTACHMENT_TOOL_NAME = "read_attachment"
 
+# ak-6k2m Bead B (2026-11-12): SDK-built-in web tools exposed to the
+# INVESTMENT agent only. Transaction + freelance personas keep their
+# existing MCP-only toolboxes.
+#
+# Historical hazard — the empty-TextBlocks class (hq-wisp-l2jfz /
+# hq-wisp-wzagg / SetGoldRate parity, April 2026): under Sonnet, adding
+# WebSearch + WebFetch to allowed_tools alongside tool-implying system
+# prompts was observed producing zero-TextBlock responses. Context
+# reset: Bead A (ak-rde9 / ak-yg2o) pinned the agent to
+# ``claude-opus-4-7``, which the Overseer accepted as the correct
+# class for web-grounded investment analysis. Opus behavior under
+# WebSearch + WebFetch is NOT the same regression surface as Sonnet's
+# was — but if sticky-poison-style silent-refuse symptoms resurface
+# after Bead B lands, this is the first suspect. Chat sentinel at
+# L908-929 catches the empty-TextBlocks tail and surfaces it to the
+# user instead of black-holing it.
+_WEB_BUILT_IN_TOOLS = ("WebSearch", "WebFetch")
+
+# ak-6k2m Bead B: domain wrappers that also count as "web fetch used"
+# for the insert-confirm-gate. Calling any of these inside a turn →
+# web_fetch_state["used"] flips True → a following insert_investment
+# requires user confirmation. See _build_sdk_tools handler closure.
+WEB_WRAPPER_TOOLS = frozenset({
+    "fetch_stock_news",
+    "fetch_earnings_calendar",
+    "fetch_company_announcements",
+    "fetch_macro_context",
+    "fetch_fund_factsheet",
+})
+
 
 def compute_allowed_tools(agent_type, mcp_tool_names, has_attachments):
     """Build the allowed_tools list for a given chat turn.
@@ -96,12 +126,31 @@ def compute_allowed_tools(agent_type, mcp_tool_names, has_attachments):
     architecturally inert under permission_mode='bypassPermissions'
     (allowed_tools entries are pre-approved → CLI never calls the gate).
 
+    ak-6k2m Bead B (2026-11-12): the investment agent also gets the
+    SDK-built-in ``WebSearch`` + ``WebFetch`` tools so it can ground
+    answers in current market context. Transaction + freelance
+    personas DO NOT get web — they operate exclusively on the
+    Overseer's own data. News-source policy per Overseer Q5: open
+    (no domain allowlist); the agent picks. The combination is
+    gated by the insert-confirm-gate in ``_build_sdk_tools`` so
+    prompt-injection via scraped content cannot drive a silent
+    insert_investment — see ``WEB_WRAPPER_TOOLS`` + the
+    ``web_fetch_state`` tracking in ``stream_chat``.
+
     Extracted to module scope so the wiring shape is directly unit-
     testable from the test suite without a live SDK / MCP server.
     """
     tools = list(mcp_tool_names)
-    if agent_type == "investment" and has_attachments:
-        tools.append(f"mcp__{MCP_SERVER_NAME}__{READ_ATTACHMENT_TOOL_NAME}")
+    if agent_type == "investment":
+        # ak-6k2m Bead B: SDK web built-ins for the investment agent.
+        # Appended rather than prepended to minimize diff on the
+        # observability sha-log (tools_json_sha below) + to keep the
+        # read_attachment line trailing when attachments are present.
+        tools.extend(_WEB_BUILT_IN_TOOLS)
+        if has_attachments:
+            tools.append(
+                f"mcp__{MCP_SERVER_NAME}__{READ_ATTACHMENT_TOOL_NAME}"
+            )
     return tools
 
 
@@ -499,6 +548,17 @@ class AgentService(BaseService):
         attachments = attachments or []
         tool_events = []  # Collected intermediate events (tool_exec, confirm)
         mutations = []
+        # ak-6k2m Bead B (2026-11-12): per-turn flag — flips True when
+        # ANY web-fetch tool (SDK built-in WebSearch/WebFetch OR one of
+        # the WEB_WRAPPER_TOOLS domain wrappers) fires. Used by the
+        # insert_investment handler closure to gate the insert behind a
+        # confirm-step SSE event. Rationale: prompt-injection via
+        # scraped content → silent insert is the attack class web
+        # access opens; this gate is the mitigation. Overseer explicit-
+        # chose this in Q4 (bead comment). Shape is a dict (not a bare
+        # bool) so the closure can mutate the ["used"] key by reference
+        # — bare bools don't rebind through a closure.
+        web_fetch_state = {"used": False}
         # ak-bq5: track the active conversation_id + collected assistant
         # text so the finally block can persist whatever made it out
         # (full or partial) without depending on the happy-path tail.
@@ -676,6 +736,10 @@ class AgentService(BaseService):
                 agent_type, config["tools"], user_id,
                 tool_events, mutations, confirmed_tools,
                 conversation_id=active_conversation_id,
+                # ak-6k2m Bead B: thread web_fetch_state so the
+                # insert_investment handler can gate on prior web
+                # tool use within THIS turn.
+                web_fetch_state=web_fetch_state,
             )
 
             # ak-1x4 pass 2: when this turn carries attachments, register
@@ -857,6 +921,17 @@ class AgentService(BaseService):
                                 name = getattr(block, "name", None)
                                 if name:
                                     tool_names.append(str(name))
+                                    # ak-6k2m Bead B: observe the
+                                    # SDK-built-in web tools here —
+                                    # they don't route through our
+                                    # MCP handler so the closure
+                                    # can't set the flag directly.
+                                    # The MCP WEB_WRAPPER_TOOLS set
+                                    # the flag from inside the
+                                    # handler itself (see
+                                    # _build_sdk_tools).
+                                    if name in _WEB_BUILT_IN_TOOLS:
+                                        web_fetch_state["used"] = True
                     elif isinstance(message, ResultMessage):
                         if message.is_error:
                             error_msg = message.result or "Query failed"
@@ -1040,7 +1115,7 @@ class AgentService(BaseService):
 
     def _build_sdk_tools(self, agent_type, tool_defs, user_id,
                          tool_events, mutations, confirmed_tools,
-                         conversation_id=None):
+                         conversation_id=None, web_fetch_state=None):
         """Build SdkMcpTool objects from tool definitions with handler closures.
 
         ak-9dz: `conversation_id` is threaded into the closure so the
@@ -1048,6 +1123,25 @@ class AgentService(BaseService):
         agent_file_attachments.conversation_id at insert time. Nullable
         end-to-end; the tool still works when no conversation is
         active (bootstrap turn before conversation_id is picked / created).
+
+        ak-6k2m Bead B (2026-11-12): ``web_fetch_state`` is an optional
+        dict {"used": bool} tracking whether any web-fetch tool fired
+        earlier in this turn. The handler closure:
+
+          * Sets ``web_fetch_state["used"] = True`` when the tool is
+            one of ``WEB_WRAPPER_TOOLS`` (SDK built-ins WebSearch /
+            WebFetch are observed in ``stream_chat``'s main message
+            loop instead — they don't route through this handler).
+          * Gates ``insert_investment`` behind a confirm-step SSE
+            event when ``web_fetch_state["used"]`` is True and the
+            insert hasn't already been confirmed. Prompt-injection
+            via scraped content → silent insert is the attack class
+            web access opens; the gate is the mitigation.
+
+        ``web_fetch_state=None`` (the default) disables the web-gate
+        entirely — preserves backwards compatibility for any caller
+        that constructs _build_sdk_tools without the new state
+        (e.g., existing test harness builds).
         """
         sdk_tools = []
 
@@ -1056,6 +1150,56 @@ class AgentService(BaseService):
 
             # Use default-arg capture to bind loop variable
             async def handler(args, _tn=tool_name, _at=agent_type):
+                # ak-6k2m Bead B: web-wrapper tools flip the per-turn
+                # flag BEFORE anything else — if the executor raises
+                # on validation, the flag still records that the model
+                # tried a web lookup. Belt-and-braces: the gate below
+                # will still fire on a subsequent insert.
+                if (
+                    web_fetch_state is not None
+                    and _tn in WEB_WRAPPER_TOOLS
+                ):
+                    web_fetch_state["used"] = True
+
+                # ak-6k2m Bead B: insert-after-web confirm-gate. Only
+                # applies when (a) web_fetch_state is wired, (b) a
+                # web tool has already fired this turn, (c) the
+                # tool now being called is insert_investment, and
+                # (d) this specific insert hasn't been confirmed yet
+                # (gate-token mirrors the DESTRUCTIVE_TOOLS pattern:
+                # the FE sends the tool_name in `confirmed_tools` on
+                # the retry turn to authorize execution).
+                if (
+                    web_fetch_state is not None
+                    and _tn == "insert_investment"
+                    and web_fetch_state["used"]
+                    and _tn not in confirmed_tools
+                ):
+                    msg = AgentService._get_web_insert_confirm_message(args)
+                    tool_events.append(("confirm", {
+                        "tool": _tn,
+                        "input": args,
+                        "message": msg,
+                        # ak-6k2m: explicit reason tag so FE can
+                        # distinguish this gate from the legacy
+                        # DESTRUCTIVE_TOOLS confirm — same event
+                        # type, different copy + icon surface.
+                        "reason": "web_fetch_prior_in_turn",
+                    }))
+                    return {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                f"Action cancelled — user confirmation required for {_tn} "
+                                "because a web lookup happened earlier in this turn. "
+                                "Please inform the user, surface the exact data you were "
+                                "going to insert, and wait for explicit approval before "
+                                "retrying."
+                            ),
+                        }],
+                        "is_error": True,
+                    }
+
                 # Check if destructive and not confirmed
                 if _tn in DESTRUCTIVE_TOOLS and _tn not in confirmed_tools:
                     msg = AgentService._get_confirmation_message(_tn, args)
@@ -1203,3 +1347,45 @@ class AgentService(BaseService):
             "process_mail_pipeline": "Scan Gmail for all financial emails and process them? This may take several minutes.",
         }
         return messages.get(tool_name, f"Execute {tool_name}?")
+
+    @staticmethod
+    def _get_web_insert_confirm_message(tool_input):
+        """ak-6k2m Bead B: build the confirm-step message for an
+        ``insert_investment`` that follows a web lookup in the same
+        turn. Includes a compact preview of what's about to be
+        inserted so the user can eyeball-verify the data before
+        approving.
+
+        The preview intentionally does NOT echo every nested field —
+        it surfaces the service_type + the key identifying fields
+        per shape (schemeCode / date / amount / quantity). A
+        determined prompt-injection attack can still produce
+        plausible-looking numbers; the user is the last line of
+        defense. The preview mitigates by making the numbers
+        visible rather than hidden behind an opaque "do insert"
+        prompt.
+        """
+        service_type = "unknown"
+        preview_bits = []
+        if isinstance(tool_input, dict):
+            service_type = str(tool_input.get("service_type", "unknown"))
+            data = tool_input.get("data")
+            if isinstance(data, dict):
+                # Order chosen to match the user's mental model: what
+                # security → when → how much. Fields missing from the
+                # payload are silently skipped (the per-service-type
+                # validator at agent_tool_executor._validate_insert_investment
+                # already enforces the required-field shape).
+                for key in (
+                    "schemeCode", "description", "date",
+                    "amount", "quantity",
+                    "employee_amount", "employer_amount",
+                    "goldType",
+                ):
+                    if key in data and data[key] not in (None, ""):
+                        preview_bits.append(f"{key}={data[key]}")
+        preview = ", ".join(preview_bits) if preview_bits else "<no data>"
+        return (
+            f"This insert follows a web lookup. Approve adding "
+            f"{service_type}: {preview}?"
+        )
