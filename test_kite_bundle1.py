@@ -399,3 +399,229 @@ def test_KITE_ROW_FIELDS_includes_today_open_for_enrichment_overlay():
     see today_open on the per-row shape.
     """
     assert "today_open" in StocksService.KITE_ROW_FIELDS
+
+
+# ── ak-qeex: fail-closed poison-basis guard (reviewer MAJOR) ─────────────
+
+def test_day_change_amount_fail_closed_on_today_open_zero():
+    """ak-qeex MAJOR: Kite OHLC can emit ``today_open=0`` on pre-open
+    ticks. The ak-4o41 initial resolve used ``today_open if today_open
+    is not None else close_price``, which passed ``0`` through as the
+    basis (0 ≠ None). Resulting day_change_amount =
+    qty × (last_price − 0) = qty × last_price = the full market value
+    masquerading as "today's change" (order-of-magnitude error on the
+    summary card).
+
+    Post-fix: basis==0 triggers fail-closed → day_change_amount = 0
+    ("unknown day change"), NOT the poison value.
+
+    Fixture: qty=451, last_price=1600. Poison path: 451 × 1600 =
+    721_600. Fail-closed path: 0.
+    """
+    svc = _stocks_service()
+    svc.kite_service.get_holdings.return_value = [_holding()]
+    svc.kite_service.get_ohlc.return_value = {
+        12345: {
+            "instrument_token": 12345,
+            # Kite OHLC emits 0 on pre-open ticks
+            "ohlc": {"open": 0, "high": 0, "low": 0, "close": 1585},
+        }
+    }
+
+    row = svc.fetch_kite_holdings("u1")[0]
+
+    assert row["today_open"] == 0.0
+    # Fail-closed: 0, NOT the poison value 721_600
+    assert row["day_change_amount"] == 0.0
+    assert row["day_change_amount"] != pytest.approx(721_600.0)
+
+
+def test_day_change_amount_fail_closed_on_both_bases_missing():
+    """Cold-sync edge: both ``today_open`` and ``close_price`` absent /
+    0. Earlier code would compute ``qty × last_price`` as "day change"
+    (poison). Fail-closed guard returns 0 instead.
+    """
+    svc = _stocks_service()
+    svc.kite_service.get_holdings.return_value = [
+        _holding(close_price=0)  # no yesterday close either
+    ]
+    svc.kite_service.get_ohlc.return_value = {}  # no OHLC
+
+    row = svc.fetch_kite_holdings("u1")[0]
+
+    assert row["today_open"] is None
+    assert row["day_change_amount"] == 0.0
+    # Negative: poison value would have been 451 × 1600 = 721_600
+    assert row["day_change_amount"] != pytest.approx(721_600.0)
+
+
+def test_day_change_amount_still_computed_when_basis_present():
+    """Regression guard on the fix: positive today_open or positive
+    close_price must STILL produce the correct day-change math (the
+    guard must only catch poison, not every path).
+    """
+    svc = _stocks_service()
+    # (a) today_open positive → used
+    svc.kite_service.get_holdings.return_value = [_holding()]
+    svc.kite_service.get_ohlc.return_value = {
+        12345: {"instrument_token": 12345, "ohlc": {"open": 1580}}
+    }
+    row = svc.fetch_kite_holdings("u1")[0]
+    assert row["day_change_amount"] == pytest.approx(9020.0)
+
+    # Reset singleton for the second scenario (cls._instance is sticky)
+    StocksService._instance = None
+    # (b) today_open missing, close_price positive → close_price used
+    svc2 = _stocks_service()
+    svc2.kite_service.get_holdings.return_value = [_holding()]
+    svc2.kite_service.get_ohlc.return_value = {}
+    row2 = svc2.fetch_kite_holdings("u1")[0]
+    assert row2["day_change_amount"] == pytest.approx(6765.0)
+
+
+# ── ak-qeex MINOR-2: Phase-C aggregation + coverage-omission ────────────
+
+def test_aggregate_portfolio_history_basic_sum_per_date():
+    """THE Phase-C aggregation core: for each date, sum qty × close
+    across all tokens that have a candle for that date.
+
+    Fixture: 2 tokens (100 qty + 50 qty). 3 trading days. Both tokens
+    report every day. Expected per-date totals = full Σ(qty × close).
+    """
+    from datetime import date
+    from decimal import Decimal
+    from services.portfolio_history_aggregator import aggregate_portfolio_history
+
+    token_qty = {
+        111: Decimal("100"),
+        222: Decimal("50"),
+    }
+    candles = [
+        # (token, date, close)
+        (111, date(2026, 11, 10), Decimal("1600")),
+        (222, date(2026, 11, 10), Decimal("300")),
+        (111, date(2026, 11, 11), Decimal("1620")),
+        (222, date(2026, 11, 11), Decimal("305")),
+        (111, date(2026, 11, 12), Decimal("1630")),
+        (222, date(2026, 11, 12), Decimal("310")),
+    ]
+
+    result = aggregate_portfolio_history(token_qty, candles)
+
+    assert len(result) == 3
+    assert result[0] == {"date": "2026-11-10", "total_value": 100 * 1600 + 50 * 300}
+    assert result[1] == {"date": "2026-11-11", "total_value": 100 * 1620 + 50 * 305}
+    assert result[2] == {"date": "2026-11-12", "total_value": 100 * 1630 + 50 * 310}
+
+
+def test_aggregate_portfolio_history_omits_incomplete_coverage_dates():
+    """THE coverage-omission invariant: a date where ONE held token
+    has no candle is DROPPED entirely — no phantom dip from the
+    missing instrument's zero contribution.
+
+    Fixture: 2 tokens held. Day 1 and Day 3 have both candles; Day 2
+    only token 111 reports. Expected output: Day 1 and Day 3 only.
+    If the fold had included Day 2 with just token 111's contribution
+    (100 × 1620 = 162_000), it would appear as a sharp dip vs Day 1's
+    155_000 and Day 3's 178_000.
+
+    Mutation discriminator: a naive aggregator that emits every seen
+    date returns 3 rows with Day 2 total_value = 162_000; the correct
+    output is 2 rows (Day 2 OMITTED).
+    """
+    from datetime import date
+    from decimal import Decimal
+    from services.portfolio_history_aggregator import aggregate_portfolio_history
+
+    token_qty = {
+        111: Decimal("100"),
+        222: Decimal("50"),
+    }
+    candles = [
+        (111, date(2026, 11, 10), Decimal("1600")),
+        (222, date(2026, 11, 10), Decimal("300")),
+        # Day 2: token 111 reports, token 222 is MISSING
+        (111, date(2026, 11, 11), Decimal("1620")),
+        (111, date(2026, 11, 12), Decimal("1630")),
+        (222, date(2026, 11, 12), Decimal("310")),
+    ]
+
+    result = aggregate_portfolio_history(token_qty, candles)
+
+    # Day 2 OMITTED (incomplete coverage)
+    assert len(result) == 2
+    dates = [r["date"] for r in result]
+    assert "2026-11-11" not in dates
+    assert dates == ["2026-11-10", "2026-11-12"]
+    # Total values unaffected
+    assert result[0]["total_value"] == 100 * 1600 + 50 * 300
+    assert result[1]["total_value"] == 100 * 1630 + 50 * 310
+
+
+def test_aggregate_portfolio_history_empty_token_qty_returns_empty():
+    """Pre-first-holding edge: no held stocks → ``[]`` regardless of
+    candle content. Avoids division / shape errors in a cold-start
+    portfolio.
+    """
+    from services.portfolio_history_aggregator import aggregate_portfolio_history
+    assert aggregate_portfolio_history({}, []) == []
+
+
+def test_aggregate_portfolio_history_output_sorted_ascending():
+    """The FE renders a line chart left-to-right in chronological
+    order. The aggregator must emit entries sorted ascending by date
+    so FE doesn't have to resort.
+    """
+    from datetime import date
+    from decimal import Decimal
+    from services.portfolio_history_aggregator import aggregate_portfolio_history
+
+    token_qty = {1: Decimal("1")}
+    # Deliberately out-of-order input
+    candles = [
+        (1, date(2026, 11, 12), Decimal("103")),
+        (1, date(2026, 11, 10), Decimal("101")),
+        (1, date(2026, 11, 11), Decimal("102")),
+    ]
+
+    result = aggregate_portfolio_history(token_qty, candles)
+    dates = [r["date"] for r in result]
+    assert dates == ["2026-11-10", "2026-11-11", "2026-11-12"]
+
+
+def test_aggregate_portfolio_history_skips_unexpected_tokens():
+    """Defense-in-depth: if the candle query returns a token NOT in
+    ``token_qty`` (would require a buggy .in_() filter widening), the
+    aggregator skips it rather than KeyError'ing.
+    """
+    from datetime import date
+    from decimal import Decimal
+    from services.portfolio_history_aggregator import aggregate_portfolio_history
+
+    token_qty = {111: Decimal("100")}
+    candles = [
+        (111, date(2026, 11, 10), Decimal("1600")),
+        (999, date(2026, 11, 10), Decimal("500")),  # un-held token
+    ]
+
+    result = aggregate_portfolio_history(token_qty, candles)
+    # Only token 111's contribution — 999 silently skipped
+    assert result == [{"date": "2026-11-10", "total_value": 100 * 1600}]
+
+
+def test_aggregate_portfolio_history_fractional_quantity():
+    """Decimal quantities (e.g. a MF-ish 12.5 units; not typical for
+    Indian equity but the type permits it) must be preserved through
+    the Σ(qty × close) math without float-precision drift.
+    """
+    from datetime import date
+    from decimal import Decimal
+    from services.portfolio_history_aggregator import aggregate_portfolio_history
+
+    token_qty = {1: Decimal("12.5")}
+    candles = [(1, date(2026, 11, 10), Decimal("100.37"))]
+
+    result = aggregate_portfolio_history(token_qty, candles)
+    # 12.5 × 100.37 = 1254.625 — exact Decimal math; float coerce
+    # preserves it bit-for-bit at this magnitude.
+    assert result[0]["total_value"] == 1254.625

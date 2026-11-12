@@ -817,31 +817,13 @@ class InvestmentService(BaseService):
         if not candles:
             return []
 
-        # Aggregate: per-date total_value = Σ (qty × close).
-        # Strict "every held instrument has a candle for this date" —
-        # a date is in the output only if ALL held tokens have a
-        # candle. This avoids phantom dips when ONE instrument's
-        # candle is missing (would drag total_value down by its full
-        # contribution, misleading the chart).
-        per_date_sum = {}
-        per_date_count = {}
-        for token, trade_date, close in candles:
-            per_date_sum.setdefault(trade_date, Decimal(0))
-            per_date_count.setdefault(trade_date, 0)
-            per_date_sum[trade_date] += token_qty[token] * close
-            per_date_count[trade_date] += 1
-
-        expected_coverage = len(token_qty)
-        result = []
-        for d in sorted(per_date_sum.keys()):
-            if per_date_count[d] < expected_coverage:
-                # Incomplete-coverage date — omit (see comment above).
-                continue
-            result.append({
-                'date': d.strftime('%Y-%m-%d'),
-                'total_value': float(per_date_sum[d]),
-            })
-        return result
+        # Aggregation + coverage-omission is pure logic — delegated to
+        # `services.portfolio_history_aggregator.aggregate_portfolio_history`
+        # so it can be unit-tested in isolation without needing a real
+        # DB session or the full InvestmentService import chain
+        # (ak-qeex MINOR-2).
+        from services.portfolio_history_aggregator import aggregate_portfolio_history
+        return aggregate_portfolio_history(token_qty, candles)
 
     def getInvestmentSnapshots(self, user_id, date_from=None, date_to=None, investment_type=None):
         """Query investment snapshots for growth charts."""

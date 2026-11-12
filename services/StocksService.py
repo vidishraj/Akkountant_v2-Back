@@ -555,6 +555,34 @@ class StocksService(Base_MSN, ABC):
                 )
                 day_change_basis = today_open if today_open is not None else close_price
 
+                # ak-qeex fix (2026-11-12): fail-closed guard on poison
+                # basis. If `day_change_basis` is 0 / None / falsy after
+                # the today_open-vs-close_price resolve, emit
+                # day_change_amount = 0 (semantic: "unknown day change")
+                # instead of the current math's qty × last_price (which
+                # would surface the full market value as "today's
+                # change" — an order-of-magnitude error on the summary
+                # card).
+                #
+                # Edges that trip this:
+                #   * Kite OHLC emits today_open=0 on pre-open ticks
+                #     (bypasses the `is not None` check in the resolve
+                #     above because 0 != None but is still a poison
+                #     basis).
+                #   * close_price absent + OHLC-fallback-basis absent
+                #     (both missing — cold-sync edge pre-first holdings
+                #     refresh).
+                #   * Any future field addition that lands here with 0
+                #     from `.get(..., 0) or 0` coercion.
+                #
+                # Reviewer verdict on ak-4o41 (3202ea6) called this out
+                # as MAJOR. 0 is better than phantom-full-value as the
+                # degraded default — FE renders 0 as "no change today"
+                # which matches user mental model on a missing-data day.
+                # If FE needs to distinguish "unknown" from "no change",
+                # a `day_change_known: bool` field can land as follow-up.
+                day_change_known = bool(day_change_basis)
+
                 # Folded money math (Path A: Kite average_price as
                 # broker-canonical blended avg). If Overseer stamps Path B or
                 # C, `invested` and `unrealized_pnl` shift to
@@ -564,7 +592,12 @@ class StocksService(Base_MSN, ABC):
                 invested = float(total_qty) * float(average_price)
                 current_value = float(total_qty) * float(last_price)
                 unrealized_pnl = current_value - invested
-                day_change_amount = float(total_qty) * (float(last_price) - float(day_change_basis))
+                # ak-qeex fix: fail-closed on poison basis (see guard above).
+                day_change_amount = (
+                    float(total_qty) * (float(last_price) - float(day_change_basis))
+                    if day_change_known
+                    else 0.0
+                )
 
                 formatted_holding = {
                     'symbol': holding.get('tradingsymbol'),
