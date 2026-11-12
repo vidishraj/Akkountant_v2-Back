@@ -986,7 +986,17 @@ class InvestmentService(BaseService):
         return self.StockService.fetch_kite_positions(userId)
 
     def syncKiteHoldings(self, userId):
-        """Sync Kite holdings to local database"""
+        """Sync Kite holdings to local database.
+
+        ak-n9im (2026-11-12): thin pass-through to
+        ``StocksService.sync_kite_holdings_to_db``. See THAT
+        docstring for the full UPSERT + rollback-safe semantic
+        contract — Kite holdings are MERGED into
+        PurchasedSecurities (insert-or-update by user/securityCode
+        pair, no DELETE, single-transaction rollback on any
+        failure). Safe to call from a user-initiated refresh button
+        with no confirm-gate.
+        """
         return self.StockService.sync_kite_holdings_to_db(userId)
 
     def fetchRealizedPnL(self, securityType, userId):

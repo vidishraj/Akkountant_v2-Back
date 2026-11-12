@@ -844,11 +844,48 @@ class StocksService(Base_MSN, ABC):
             raise
 
     def sync_kite_holdings_to_db(self, userId):
-        """Sync Kite holdings to local database"""
+        """Sync Kite holdings into the local PurchasedSecurities table.
+
+        ak-n9im (2026-11-12) semantic audit — **UPSERT + rollback-safe**,
+        NOT delete-then-replace:
+
+          * Reads Kite's current holdings via ``fetch_kite_holdings``.
+          * For every holding with ``quantity > 0``, looks up by the
+            ``(userID, securityCode)`` pair. Missing row → INSERT a new
+            ``PurchasedSecurities`` with a fresh buyID. Existing row →
+            UPDATE ``buyQuant`` + ``buyPrice`` IFF quantities differ
+            (idempotent — unchanged holdings are a no-op).
+          * **No DELETE path.** Rows for symbols Kite no longer reports
+            (e.g., a stock the user sold outside Akkountant) are
+            PRESERVED. Operator convention: Akkountant keeps the
+            purchase-history ledger even when the broker's current
+            view no longer carries the position.
+          * **Transaction-wrapped.** All inserts/updates are staged on
+            the shared session and committed once at the end. Any
+            exception (Kite HTTP failure mid-sync, SQLAlchemy error,
+            etc.) triggers ``session.rollback()`` before re-raising —
+            a transient Kite failure CANNOT leave the local DB in a
+            half-synced state.
+          * Holdings with ``quantity <= 0`` are skipped entirely (not
+            inserted, not updated) — those represent fully-exited
+            positions Kite hasn't dropped from the response yet.
+
+        Safe to invoke from a user-initiated refresh button without a
+        confirm-gate (FE-4 ak-gkqp verified this contract). Safe to
+        invoke repeatedly / concurrently — the pair lookup +
+        quantity-equality check make the operation idempotent across
+        reruns.
+
+        Returns ``{synced: N, total_holdings: M}`` — ``synced`` counts
+        inserts + updates (i.e. rows actually touched this run),
+        ``total_holdings`` is Kite's response size including skipped
+        zero-qty rows. ``synced == 0`` means every holding Kite
+        reported already matched the local DB.
+        """
         try:
             holdings = self.fetch_kite_holdings(userId)
             synced_count = 0
-            
+
             for holding in holdings:
                 if holding['quantity'] > 0:  # Only sync holdings with positive quantity
                     # Check if this holding already exists in our database
@@ -856,7 +893,7 @@ class StocksService(Base_MSN, ABC):
                         PurchasedSecurities.userID == userId,
                         PurchasedSecurities.securityCode == holding['symbol']
                     ).first()
-                    
+
                     if not existing:
                         # Create new entry
                         randomBuyId = self.genericUtil.generate_custom_buyID()
@@ -877,11 +914,11 @@ class StocksService(Base_MSN, ABC):
                             existing.buyQuant = holding['quantity']
                             existing.buyPrice = holding['average_price']
                             synced_count += 1
-            
+
             self.db.session.commit()
             self.logger.info(f"Synced {synced_count} holdings from Kite to database for user {userId}")
             return {"synced": synced_count, "total_holdings": len(holdings)}
-            
+
         except Exception as e:
             self.db.session.rollback()
             self.logger.error(f"Error syncing Kite holdings to database for user {userId}: {str(e)}")

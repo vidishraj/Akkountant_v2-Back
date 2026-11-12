@@ -584,7 +584,17 @@ class InvestmentController:
 
     @Logger.standardLogger
     def syncKiteHoldings(self):
-        """Sync Kite holdings to local database"""
+        """Sync Kite holdings to local database.
+
+        ak-n9im (2026-11-12) — **upsert, non-destructive** (see
+        ``StocksService.sync_kite_holdings_to_db`` for the full
+        semantic contract). Rows for symbols Kite no longer
+        reports are PRESERVED (purchase-history ledger kept).
+        All writes are in a single transaction rolled back on
+        failure, so a mid-sync Kite failure cannot leave the DB
+        half-synced. Safe to expose as a user-initiated refresh
+        button without a FE confirm-gate (verified ak-gkqp FE-4).
+        """
         user_id = g.get('firebase_id')
         if not user_id:
             return jsonify({"error": "User ID not found"}), 400
