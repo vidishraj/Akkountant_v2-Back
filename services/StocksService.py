@@ -514,6 +514,13 @@ class StocksService(Base_MSN, ABC):
         """
         try:
             holdings = self.kite_service.get_holdings(userId)
+            # ak-4o41 Bundle 1 (2026-11-12): batch-fetch today's OHLC
+            # for all held instruments to refine day_change_amount with
+            # today's `open` instead of yesterday's `close`. Falls back
+            # to close_price-basis math on Kite failure (ak-w4p behavior
+            # preserved) so a Kite /quote/ohlc outage never 500s the
+            # enrichment path. See _fetch_today_open_batch docstring.
+            today_opens = self._fetch_today_open_batch(userId, holdings)
             formatted_holdings = []
 
             for holding in holdings:
@@ -529,6 +536,25 @@ class StocksService(Base_MSN, ABC):
                 last_price = holding.get('last_price', 0) or 0
                 close_price = holding.get('close_price', 0) or 0
 
+                # ak-4o41 Bundle 1: prefer today's `open` from /ohlc
+                # for the intraday day-change baseline; fall back to
+                # yesterday's `close_price` when OHLC was unavailable.
+                # Semantic:
+                #   today_open present  → intraday-only change (move
+                #                          from today's open)
+                #   today_open absent   → classic day P&L (move from
+                #                          yesterday's close)
+                # Overseer dispatch 2026-11-12: "intraday day-change
+                # should use `last_price` vs today's `open` … not
+                # day-close math".
+                instrument_token = holding.get('instrument_token')
+                today_open = (
+                    today_opens.get(instrument_token)
+                    if today_opens and instrument_token is not None
+                    else None
+                )
+                day_change_basis = today_open if today_open is not None else close_price
+
                 # Folded money math (Path A: Kite average_price as
                 # broker-canonical blended avg). If Overseer stamps Path B or
                 # C, `invested` and `unrealized_pnl` shift to
@@ -538,7 +564,7 @@ class StocksService(Base_MSN, ABC):
                 invested = float(total_qty) * float(average_price)
                 current_value = float(total_qty) * float(last_price)
                 unrealized_pnl = current_value - invested
-                day_change_amount = float(total_qty) * (float(last_price) - float(close_price))
+                day_change_amount = float(total_qty) * (float(last_price) - float(day_change_basis))
 
                 formatted_holding = {
                     'symbol': holding.get('tradingsymbol'),
@@ -555,6 +581,11 @@ class StocksService(Base_MSN, ABC):
                     'average_price': average_price,
                     'last_price': last_price,
                     'close_price': close_price,
+                    # ak-4o41 Bundle 1: today's open from /ohlc (None
+                    # when OHLC fetch failed — fallback already applied
+                    # to day_change_amount above; emitted here for FE
+                    # observability + intraday indicators).
+                    'today_open': today_open,
 
                     # --- ak-yz9c folded money math ---
                     'invested': invested,
@@ -592,6 +623,68 @@ class StocksService(Base_MSN, ABC):
             self.logger.error(f"Error fetching Kite holdings for user {userId}: {str(e)}")
             raise
 
+    def _fetch_today_open_batch(self, userId, holdings):
+        """ak-4o41 Bundle 1: batch-fetch today's `open` for held instruments.
+
+        Called once per :py:meth:`fetch_kite_holdings` invocation (one
+        extra Kite `/quote/ohlc` HTTP round-trip per user cycle, batched
+        across all held tokens). Returns ``{instrument_token:
+        today_open_float}``.
+
+        On ANY failure (Kite auth expired, HTTP error, empty holdings,
+        malformed response) returns ``{}`` — the caller then falls
+        back to ``close_price``-basis math, preserving ak-w4p's
+        no-500-on-Kite-failure invariant. The day-change number is
+        less accurate without live open but the enrichment stays
+        functional.
+
+        Args:
+          userId: Kite-authed user id.
+          holdings: raw Kite ``holdings()`` payload (list of dicts
+                    each carrying an ``instrument_token``).
+        """
+        if not holdings:
+            return {}
+        tokens = [
+            int(h['instrument_token'])
+            for h in holdings
+            if h.get('instrument_token') is not None
+        ]
+        if not tokens:
+            return {}
+        try:
+            quotes = self.kite_service.get_ohlc(userId, tokens)
+        except KiteAuthError as exc:
+            # Expected daily state post-6 AM IST — same semantics as
+            # kite_holdings_index: degrade quietly, don't take the
+            # enrichment down.
+            self.logger.warning(
+                f"ak-4o41: OHLC fetch skipped for day-change refinement "
+                f"(auth): {exc}"
+            )
+            return {}
+        except Exception as exc:
+            self.logger.warning(
+                f"ak-4o41: OHLC fetch failed for day-change refinement; "
+                f"falling back to close_price basis: {exc}"
+            )
+            return {}
+
+        result = {}
+        for key, quote in (quotes or {}).items():
+            if not isinstance(quote, dict):
+                continue
+            token = quote.get('instrument_token')
+            ohlc = quote.get('ohlc') or {}
+            today_open = ohlc.get('open')
+            if token is None or today_open is None:
+                continue
+            try:
+                result[int(token)] = float(today_open)
+            except (TypeError, ValueError):
+                continue
+        return result
+
     #: Fields copied from a Kite holding onto a securities-list row. Kept
     #: snake_case and at the row's top level.
     #:
@@ -617,6 +710,10 @@ class StocksService(Base_MSN, ABC):
         'day_change_percentage',
         'average_price',
         'last_price',
+        # ak-4o41 Bundle 1: today's open from Kite /ohlc (None on
+        # fetch failure — fallback already applied to
+        # day_change_amount upstream).
+        'today_open',
         # Folded money math (ak-yz9c)
         'invested',
         'current_value',

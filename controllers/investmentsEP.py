@@ -361,6 +361,32 @@ class InvestmentController:
         return jsonify(self.InvestmentService.fetchInvestmentEmails(user_id, category, page, page_size, service_type, categories)), 200
 
     @Logger.standardLogger
+    def fetchPortfolioHistory(self):
+        """ak-4o41 Bundle 1 (supersedes ak-874): N-day portfolio trend.
+
+        Returns per-day total portfolio value aggregated from the
+        Kite historical-candle cache. See
+        ``InvestmentService.getPortfolioHistory`` docstring for the
+        constant-composition semantic + edge cases.
+
+        Query params:
+          * ``days``: int, defaults to 30; clamped to [7, 365] by
+            the service layer.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        days_param = request.args.get('days')
+        try:
+            result = self.InvestmentService.getPortfolioHistory(
+                user_id, days=days_param
+            )
+            return jsonify(result), 200
+        except Exception as e:
+            self.logger.error(f"Error fetching portfolio history: {str(e)}")
+            return jsonify({"error": "Failed to fetch portfolio history"}), 500
+
+    @Logger.standardLogger
     def fetchInvestmentSnapshots(self):
         """Fetch historical investment snapshots for growth charts."""
         user_id = g.get('firebase_id')

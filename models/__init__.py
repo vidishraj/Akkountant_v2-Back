@@ -22,6 +22,11 @@ from models.processedEmails import ProcessedEmails
 from models.statementPeriods import StatementPeriod
 from models.transferLinks import TransferLink
 from models.investmentSnapshot import InvestmentSnapshot
+# ak-4o41 Bundle 1: historical EOD candles cache (per-instrument per-day
+# OHLCV), populated by BackfillHistoricalCandlesTask and consumed by the
+# /investment-snapshot/history endpoint. Imported BEFORE db.create_all()
+# so the fresh table is created on next boot. See model docstring.
+from models.stockHistoricalCandle import StockHistoricalCandle
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PendingPaymentClaim
 from .customer_emails import CustomerEmail

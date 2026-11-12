@@ -61,6 +61,11 @@ class InvestmentService(BaseService):
         # the shared WEALTH_DIGEST_JOB_TITLE constant so a rename
         # only touches one file.
         WEALTH_DIGEST_JOB_TITLE: "Wealth Digest (daily briefing)",
+        # ak-4o41 Bundle 1 (2026-11-12): daily Kite historical-candle
+        # backfill. Powers /investment-snapshot/history trend chart.
+        # Manual trigger resynchronizes the cache after a scheduler
+        # miss or cold-start.
+        "BackfillHistoricalCandles": "Backfill Kite Historical Candles",
     }
 
     def __init__(self):
@@ -668,6 +673,175 @@ class InvestmentService(BaseService):
             "page": page,
             "pageSize": page_size,
         }
+
+    # ──────────────── ak-4o41 Bundle 1 — Kite historical trend ──────────
+
+    #: Default history window for the trend chart (ak-874 spec).
+    _HISTORY_DEFAULT_DAYS = 30
+    #: Hard clamp on the window to bound query cost. 365d matches the
+    #: BackfillHistoricalCandlesTask cold-start fetch; asking for more
+    #: would return empty rows for the tail anyway.
+    _HISTORY_MAX_DAYS = 365
+    #: Minimum useful window. 1-day charts aren't a trend; reject
+    #: smaller values up front rather than returning a single point.
+    _HISTORY_MIN_DAYS = 7
+
+    def getPortfolioHistory(self, user_id, days=None):
+        """ak-4o41 Bundle 1 (supersedes ak-874): N-day portfolio trend.
+
+        Returns per-day total portfolio value aggregated from the
+        ``stockHistoricalCandles`` cache maintained by
+        ``BackfillHistoricalCandlesTask``:
+
+          ``sum(buyQuant_i × close_i_on_date) across held stocks_i``
+
+        for each trade_date in the requested window. Non-stock asset
+        types (MF / NPS / Gold / PPF / EPF) are NOT folded in by this
+        bundle — they come from different sources (NAV cache / EPF
+        extraction) and have their own historical shapes. Follow-up
+        work can union those in once their historical caches exist.
+
+        ## Shape
+
+        Returns ``[{date, total_value}, ...]`` sorted ascending by
+        date. ``total_value`` is a float (INR). Days with no candles
+        for every held instrument (e.g. a market holiday) are
+        OMITTED from the response — callers chart only trading days
+        and the FE renders those as a continuous line.
+
+        Pre-first-backfill-run: returns ``[]`` gracefully (empty
+        candle table). FE's placeholder renders unchanged.
+
+        ## Portfolio composition semantic
+
+        Uses TODAY's held quantities applied to each past date's
+        close. This is the "constant-composition trend" shape — it
+        answers "what would today's portfolio have been worth on
+        date X" rather than "what did I actually hold on date X".
+        For a 30-day trend chart on a buy-and-hold portfolio this is
+        a correct approximation; for a day-trading portfolio it
+        would drift. ak-874's filer accepted the constant-composition
+        semantic as sufficient for the WealthDigest trend anchor.
+
+        Scope deliberately excludes handling of sold holdings and
+        adds-during-the-window — a future bead can fold the
+        ``securityTransactions`` table in if the composition-drift
+        error becomes visible.
+
+        ## Args
+
+        * ``user_id``: Firebase user id.
+        * ``days``: optional int. Defaults to
+          ``_HISTORY_DEFAULT_DAYS`` (30). Clamped to
+          ``[_HISTORY_MIN_DAYS, _HISTORY_MAX_DAYS]``.
+        """
+        from datetime import date, timedelta
+        from decimal import Decimal
+        from models.purchasedSecurities import PurchasedSecurities
+        from models.stockHistoricalCandle import StockHistoricalCandle
+        from sqlalchemy import and_
+
+        try:
+            window = int(days) if days is not None else self._HISTORY_DEFAULT_DAYS
+        except (TypeError, ValueError):
+            window = self._HISTORY_DEFAULT_DAYS
+        window = max(self._HISTORY_MIN_DAYS,
+                     min(self._HISTORY_MAX_DAYS, window))
+
+        # Held stocks (active, non-zero qty) for THIS user — the
+        # candle cache is market-wide but holdings are per-user.
+        held = (
+            self.db.session.query(PurchasedSecurities)
+            .filter(
+                PurchasedSecurities.userID == user_id,
+                PurchasedSecurities.securityType == 'Stocks',
+                PurchasedSecurities.buyQuant > 0,
+            )
+            .all()
+        )
+        if not held:
+            return []
+
+        # Resolve each symbol → instrument_token via the SetKiteStockDetails
+        # instrument dump. Unresolved symbols are LOGGED + SKIPPED (same
+        # pattern as BackfillHistoricalCandlesTask — one soft failure
+        # shouldn't break the whole trend).
+        try:
+            stock_list = self.StockService.JsonDownloadService.getStockList()
+        except (FileNotFoundError, OSError):
+            self.logger.warning(
+                "getPortfolioHistory: instrument dump missing — "
+                "cannot resolve symbols; returning empty history"
+            )
+            return []
+        sym_to_token = {}
+        for row in stock_list.get('data', []):
+            code = row.get('stockCode')
+            token = row.get('instrument_token')
+            if code and token is not None:
+                sym_to_token[code] = int(token)
+
+        # Build the (token, qty) list for aggregation. Each held row
+        # becomes a (token, buyQuant) tuple; duplicates across different
+        # buyID rows for the same symbol accumulate at group-time.
+        token_qty = {}
+        for h in held:
+            token = sym_to_token.get(h.securityCode)
+            if token is None:
+                self.logger.warning(
+                    f"getPortfolioHistory: no instrument_token for "
+                    f"{h.securityCode} — skipping in trend aggregation"
+                )
+                continue
+            token_qty[token] = token_qty.get(token, Decimal(0)) + Decimal(str(h.buyQuant))
+
+        if not token_qty:
+            return []
+
+        # Fetch candles for the held tokens within the date window.
+        today = date.today()
+        from_date = today - timedelta(days=window)
+        candles = (
+            self.db.session.query(
+                StockHistoricalCandle.instrument_token,
+                StockHistoricalCandle.trade_date,
+                StockHistoricalCandle.close,
+            )
+            .filter(
+                StockHistoricalCandle.instrument_token.in_(list(token_qty.keys())),
+                StockHistoricalCandle.trade_date >= from_date,
+                StockHistoricalCandle.trade_date <= today,
+            )
+            .all()
+        )
+        if not candles:
+            return []
+
+        # Aggregate: per-date total_value = Σ (qty × close).
+        # Strict "every held instrument has a candle for this date" —
+        # a date is in the output only if ALL held tokens have a
+        # candle. This avoids phantom dips when ONE instrument's
+        # candle is missing (would drag total_value down by its full
+        # contribution, misleading the chart).
+        per_date_sum = {}
+        per_date_count = {}
+        for token, trade_date, close in candles:
+            per_date_sum.setdefault(trade_date, Decimal(0))
+            per_date_count.setdefault(trade_date, 0)
+            per_date_sum[trade_date] += token_qty[token] * close
+            per_date_count[trade_date] += 1
+
+        expected_coverage = len(token_qty)
+        result = []
+        for d in sorted(per_date_sum.keys()):
+            if per_date_count[d] < expected_coverage:
+                # Incomplete-coverage date — omit (see comment above).
+                continue
+            result.append({
+                'date': d.strftime('%Y-%m-%d'),
+                'total_value': float(per_date_sum[d]),
+            })
+        return result
 
     def getInvestmentSnapshots(self, user_id, date_from=None, date_to=None, investment_type=None):
         """Query investment snapshots for growth charts."""

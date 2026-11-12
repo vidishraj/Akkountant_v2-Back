@@ -22,6 +22,9 @@ from services.tasks.checkStatementsTask import CheckStatementTask
 from services.tasks.SetStockOldCodes import SetStockOldCodes
 from services.tasks.WealthDigestTask import WealthDigestTask
 from services.tasks.wealth_digest_constants import WEALTH_DIGEST_JOB_TITLE
+# ak-4o41 Bundle 1: daily Kite historical-candle backfill, powering the
+# /investment-snapshot/history trend chart endpoint. 24h self-reschedule.
+from services.tasks.BackfillHistoricalCandlesTask import BackfillHistoricalCandlesTask
 from utils.logger import Logger
 
 
@@ -65,6 +68,9 @@ TASK_MAPPING = {
     # / bootstrap so a typo becomes a compile-time NameError instead
     # of a silent routing miss.
     WEALTH_DIGEST_JOB_TITLE: WealthDigestTask,
+    # ak-4o41 Bundle 1 (2026-11-12): daily Kite historical-candle
+    # backfill. 24h cadence. See task docstring + bead ak-4o41.
+    "BackfillHistoricalCandles": BackfillHistoricalCandlesTask,
 }
 
 

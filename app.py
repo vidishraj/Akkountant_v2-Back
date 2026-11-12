@@ -371,6 +371,10 @@ class Akkountant(Flask):
             ('/fetchInvestmentEmails', 'GET', self.investmentEP.fetchInvestmentEmails),
             ('/fetchEmailBody', 'GET', self.investmentEP.fetchEmailBody),
             ('/fetchInvestmentSnapshots', 'GET', self.investmentEP.fetchInvestmentSnapshots),
+            # ak-4o41 Bundle 1 (2026-11-12, supersedes ak-874): N-day
+            # portfolio trend for WealthDigest PortfolioTrendChart,
+            # aggregated from Kite historical-candle cache.
+            ('/investment-snapshot/history', 'GET', self.investmentEP.fetchPortfolioHistory),
             ('/kite/login-url', 'GET', self.investmentEP.getKiteLoginUrl),
             ('/kite/status', 'GET', self.investmentEP.fetchKiteTokenStatus),
             ('/kite/generate-session', 'POST', self.investmentEP.generateKiteSession),

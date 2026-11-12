@@ -356,3 +356,124 @@ class KiteService(BaseService):
         sips = self._call(user_id, "MF SIPs", lambda k: k.mf_sips())
         self.logger.info(f"Fetched {len(sips)} MF SIPs from Kite for user {user_id}")
         return sips
+
+    # ────────────────── ak-4o41 Bundle 1 — new wrappers ─────────────────
+
+    def get_historical_data(self, user_id, instrument_token, interval,
+                            from_date, to_date, continuous=False, oi=False):
+        """Fetch historical OHLCV candles for one instrument.
+
+        Routes through :py:meth:`_call` so token-expired failures surface as
+        ``KiteTokenExpired`` consistent with every other wrapper in this
+        file (reconnect-required pattern established in ak-w4p).
+
+        Args:
+          instrument_token: integer token from the SetKiteStockDetails
+                            instrument dump (NOT trading symbol).
+          interval: one of ``minute``, ``3minute``, ``5minute``,
+                    ``10minute``, ``15minute``, ``30minute``, ``60minute``,
+                    ``day`` (Kite's own vocabulary).
+          from_date, to_date: ``datetime`` or ``date`` instances; the SDK
+                              serializes them to Kite's expected
+                              ``YYYY-MM-DD HH:MM:SS`` form.
+          continuous: pass True only for F&O continuous contracts; equity
+                      callers leave it False.
+          oi: include open-interest column (F&O only; ignored for equity).
+
+        Returns:
+          List of candle dicts ``{date, open, high, low, close, volume}``.
+          Kite returns an empty list on dates with no trading (weekends
+          / holidays); callers must tolerate that without complaint.
+
+        Rate limits (Kite docs): 3 req/s on the historical endpoint. Call
+        sites using this wrapper in bulk (e.g. BackfillHistoricalCandlesTask)
+        should throttle themselves accordingly.
+        """
+        candles = self._call(
+            user_id,
+            f"historical ({instrument_token} {interval})",
+            lambda k: k.historical_data(
+                instrument_token=instrument_token,
+                from_date=from_date,
+                to_date=to_date,
+                interval=interval,
+                continuous=continuous,
+                oi=oi,
+            ),
+        )
+        self.logger.info(
+            f"Fetched {len(candles)} {interval} candles for "
+            f"instrument_token={instrument_token} "
+            f"({from_date} → {to_date}) for user {user_id}"
+        )
+        return candles
+
+    def get_ltp(self, user_id, instruments):
+        """Fetch last traded price for a batch of instruments.
+
+        ``instruments`` is a list of either ``"EXCHANGE:SYMBOL"`` strings
+        or integer instrument_tokens (Kite accepts either). Batch limit
+        is 500 per call per Kite docs; callers responsible for chunking.
+
+        Returns Kite's native dict shape:
+          ``{instrument_key: {instrument_token, last_price}, …}``
+        where ``instrument_key`` is the exact form the caller passed.
+        """
+        quotes = self._call(
+            user_id,
+            f"LTP ({len(instruments)} instruments)",
+            lambda k: k.ltp(instruments),
+        )
+        self.logger.info(
+            f"Fetched LTP for {len(quotes)} instruments from Kite "
+            f"for user {user_id}"
+        )
+        return quotes
+
+    def get_ohlc(self, user_id, instruments):
+        """Fetch OHLC + LTP for a batch of instruments.
+
+        Preferred over ``get_quote`` for enrichment: returns today's
+        open / high / low / close (= previous-day close) + last_price in
+        a compact shape, without the depth / OI overhead ``quote``
+        carries. Batch limit 500/call per Kite docs.
+
+        Returns Kite's native dict shape:
+          ``{instrument_key: {instrument_token, last_price, ohlc: {open, high, low, close}}, …}``
+
+        Enables accurate intraday day-change math:
+          ``day_change = (last_price - ohlc.open) * qty``
+        vs the pre-ak-4o41 approximation using the previous session's
+        close_price from the stale daily instrument dump.
+        """
+        quotes = self._call(
+            user_id,
+            f"OHLC ({len(instruments)} instruments)",
+            lambda k: k.ohlc(instruments),
+        )
+        self.logger.info(
+            f"Fetched OHLC for {len(quotes)} instruments from Kite "
+            f"for user {user_id}"
+        )
+        return quotes
+
+    def get_quote(self, user_id, instruments):
+        """Fetch full market quote (depth + OI + OHLC + LTP) for a batch.
+
+        Preferred over ``get_ohlc`` only when the caller actually needs
+        the depth book or open-interest fields (currently neither is
+        consumed inside akkountant). Kept here for feature-parity with
+        Kite's SDK and future Bundle-2+ work. Batch limit 500/call.
+
+        Returns Kite's native dict shape (rich — see Kite docs).
+        """
+        quotes = self._call(
+            user_id,
+            f"quote ({len(instruments)} instruments)",
+            lambda k: k.quote(instruments),
+        )
+        self.logger.info(
+            f"Fetched full quote for {len(quotes)} instruments from "
+            f"Kite for user {user_id}"
+        )
+        return quotes
