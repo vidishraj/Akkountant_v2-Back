@@ -386,6 +386,16 @@ class Akkountant(Flask):
             # reconciliation cross-check (via ReconcileTradesTask).
             ('/kite/margins', 'GET', self.investmentEP.fetchKiteMargins),
             ('/kite/trades', 'GET', self.investmentEP.fetchKiteTrades),
+            # ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces —
+            # active GTTs with LTP-distance overlay + price alerts +
+            # per-alert trigger history drill-down.
+            ('/kite/gtts', 'GET', self.investmentEP.fetchKiteGtts),
+            ('/kite/alerts', 'GET', self.investmentEP.fetchKiteAlerts),
+            (
+                '/kite/alerts/<alert_uuid>/history',
+                'GET',
+                self.investmentEP.fetchKiteAlertHistory,
+            ),
         ]
 
         for rule, method, view_func in investmentRoutes:

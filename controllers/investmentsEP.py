@@ -508,6 +508,80 @@ class InvestmentController:
             self.logger.error(f"Error fetching Kite trades: {str(e)}")
             return jsonify({"error": "Failed to fetch trades"}), 500
 
+    # ───── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces ─────
+
+    @Logger.standardLogger
+    def fetchKiteGtts(self):
+        """ak-dx98 Bundle 3: active GTT monitors with LTP-distance
+        enrichment. Serves the FE "Active monitors" dashboard
+        section. 5-min per-user cache in-service (GTTs don't change
+        sub-minute at the account level). KiteAuthError → the
+        shared reconnect response shape.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            gtts = self.InvestmentService.fetchKiteGtts(user_id)
+            return jsonify({"gtts": gtts}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite GTTs: {str(e)}")
+            return jsonify({"error": "Failed to fetch GTTs"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteAlerts(self):
+        """ak-dx98 Bundle 3: price alerts for the user. Serves the
+        FE "Active monitors" alerts panel. 5-min per-user cache
+        in-service. Alert-history drill-down uses the per-uuid
+        endpoint below.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            alerts = self.InvestmentService.fetchKiteAlerts(user_id)
+            return jsonify({"alerts": alerts}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite alerts: {str(e)}")
+            return jsonify({"error": "Failed to fetch alerts"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteAlertHistory(self, alert_uuid):
+        """ak-dx98 Bundle 3: trigger log for a single alert.
+
+        ``alert_uuid`` is the Kite-issued alert identifier (path
+        parameter — Flask already URL-decodes). We refuse empty /
+        obviously-malformed input before touching Kite so a missing
+        param can't produce a confusing upstream error.
+
+        No cache — drill-down view wants fresh data.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        if not alert_uuid or not isinstance(alert_uuid, str):
+            return jsonify({"error": "Alert UUID is required"}), 400
+
+        try:
+            history = self.InvestmentService.fetchKiteAlertHistory(
+                user_id, alert_uuid,
+            )
+            return jsonify({"history": history}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(
+                f"Error fetching Kite alert history "
+                f"uuid={alert_uuid}: {str(e)}"
+            )
+            return jsonify({"error": "Failed to fetch alert history"}), 500
+
     @Logger.standardLogger
     def syncKiteHoldings(self):
         """Sync Kite holdings to local database"""

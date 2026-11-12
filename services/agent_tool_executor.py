@@ -358,6 +358,18 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
     elif tool_name == "get_kite_margins":
         return service.fetchKiteMargins(user_id)
 
+    # ── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring wrappers ──
+    # Both read-only, no-param, account-level — same shape as the
+    # Bundle 2 wrappers above. GTTs carry LTP-distance enrichment
+    # on active triggers so the agent can answer "how close is my
+    # stop-loss to firing" without a follow-up OHLC call.
+
+    elif tool_name == "get_kite_gtts":
+        return service.fetchKiteGtts(user_id)
+
+    elif tool_name == "get_kite_alerts":
+        return service.fetchKiteAlerts(user_id)
+
     else:
         return {"error": f"Unknown investment tool: {tool_name}"}
 

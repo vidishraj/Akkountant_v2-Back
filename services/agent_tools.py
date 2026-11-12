@@ -810,6 +810,41 @@ INVESTMENT_TOOLS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []}
     },
+    # ───── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces.
+    # Both read-only account-level APIs. GTTs carry a per-active-
+    # trigger LTP + distance_pct enrichment so the agent can answer
+    # "how close is my stop-loss to firing?" without a follow-up
+    # OHLC call.
+    {
+        "name": "get_kite_gtts",
+        "description": (
+            "Fetch the user's GTT (Good-Till-Triggered) orders from "
+            "Kite with LTP-distance enrichment on active triggers. "
+            "Each item has status / type (single / OCO two-leg) / "
+            "condition / orders. Active triggers also carry a "
+            "'monitor' block with current_ltp + distance_pct (signed "
+            "% gap between LTP and trigger value; list of 2 for OCO). "
+            "Use when the user asks 'show my active monitors' or "
+            "'how close is my stop-loss to firing'."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_kite_alerts",
+        "description": (
+            "Fetch the user's price alerts from Kite (Alerts API). "
+            "Includes both 'simple' alerts (notify on trigger) and "
+            "'ato' alerts (Alert-Triggers-Order; auto-places the "
+            "order blueprint when triggered). Each item has uuid / "
+            "name / type / status / lhs (watched quantity) / "
+            "operator / rhs (comparison value). Use when the user "
+            "asks 'what alerts do I have set' or 'show my active "
+            "alerts'. For the trigger log of a specific alert, "
+            "direct the user to the dashboard alert-history view — "
+            "the per-uuid endpoint is not exposed as an agent tool."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
 ]
 
 TRANSACTION_TOOLS = [

@@ -477,3 +477,119 @@ class KiteService(BaseService):
             f"Kite for user {user_id}"
         )
         return quotes
+
+    # ────────────────── ak-dx98 Bundle 3 — monitoring wrappers ──────────
+    #
+    # GTTs (good-till-triggered orders) + Alerts (newer API). Both are
+    # read-only account-level endpoints. GTT is long-stable in Kite's
+    # Python SDK; the Alerts API is newer and the SDK's named wrappers
+    # don't universally exist across versions, so alerts route through
+    # the SDK's raw ``_get()`` HTTP escape hatch. Both pass through
+    # ``_call()`` so token-expired failures surface as
+    # ``KiteTokenExpired`` like every other wrapper in this file.
+    #
+    # Rate limits (Kite docs): standard 10 req/s on these endpoints —
+    # same budget as holdings / positions / margins. The 5-min
+    # per-user cache in InvestmentService.fetchKiteGtts /
+    # fetchKiteAlerts does most of the work.
+
+    def get_gtt_triggers(self, user_id):
+        """Fetch all GTT triggers for the user.
+
+        Returns Kite's native list shape — each item has:
+          * ``id`` (int trigger_id)
+          * ``status`` (``active`` / ``triggered`` / ``cancelled`` /
+            ``expired``)
+          * ``type`` (``single`` / ``two-leg`` OCO)
+          * ``condition`` (dict with ``instrument_token``,
+            ``tradingsymbol``, ``exchange``, ``trigger_values``,
+            ``last_price``)
+          * ``orders`` (list of order blueprints the GTT would place)
+          * ``created_at`` / ``updated_at`` / ``expires_at``
+
+        See Kite docs: https://kite.trade/docs/connect/v3/gtt/
+        """
+        triggers = self._call(
+            user_id, "GTT triggers", lambda k: k.get_gtts(),
+        )
+        self.logger.info(
+            f"Fetched {len(triggers)} GTT triggers from Kite for user "
+            f"{user_id}"
+        )
+        return triggers
+
+    def get_gtt_trigger(self, user_id, trigger_id):
+        """Fetch a single GTT trigger by ID (any age, any status).
+
+        Useful when a UI drill-down needs the full server-side record —
+        the list endpoint returns the same shape but a direct fetch
+        bypasses the list's active+recent window (Kite returns active
+        + last 7 days on the list call; this method returns ANY GTT).
+        """
+        trigger = self._call(
+            user_id,
+            f"GTT trigger {trigger_id}",
+            lambda k: k.get_gtt(trigger_id),
+        )
+        self.logger.info(
+            f"Fetched GTT trigger id={trigger_id} from Kite for user "
+            f"{user_id}"
+        )
+        return trigger
+
+    def get_alerts(self, user_id):
+        """Fetch all price alerts for the user.
+
+        Kite caps active alerts at 500/user. Returns the raw API list —
+        each item has:
+          * ``uuid`` (string identifier)
+          * ``user_id``
+          * ``type`` (``simple`` standard price alert, or ``ato`` which
+            auto-places an order on trigger — requires ``basket`` on
+            create)
+          * ``status`` (``enabled`` / ``disabled``)
+          * ``name`` (user-chosen label)
+          * ``lhs_exchange`` / ``lhs_tradingsymbol`` / ``lhs_attribute``
+            — the quantity the alert watches
+          * ``operator`` (``<=`` / ``>=`` / ``<`` / ``>`` / ``==``)
+          * ``rhs_type`` + ``rhs_constant`` OR ``rhs_exchange`` + ``rhs_tradingsymbol``
+            — the comparison value / instrument
+          * ``basket`` (for ``ato`` alerts — order blueprint)
+          * ``created_at`` / ``updated_at``
+
+        The kiteconnect Python SDK's named wrapper for alerts isn't
+        uniformly available across versions (Alerts is a newer REST
+        surface), so we route via the SDK's raw ``_get()`` escape
+        hatch — same transport, same auth, same error semantics.
+        """
+        alerts = self._call(
+            user_id, "alerts", lambda k: k._get("/alerts"),
+        )
+        self.logger.info(
+            f"Fetched {len(alerts) if alerts is not None else 0} alerts "
+            f"from Kite for user {user_id}"
+        )
+        return alerts if alerts is not None else []
+
+    def get_alert_history(self, user_id, alert_uuid):
+        """Fetch the full trigger history for a single alert.
+
+        Powers the "did my alert actually fire?" audit view. Returns
+        a list of trigger events — each with ``triggered_at``,
+        ``meta`` (the lhs value at trigger), and (for ``ato`` alerts)
+        the placed order outcome.
+
+        Same raw-``_get`` fallback as ``get_alerts`` for SDK-version-
+        portability reasons.
+        """
+        history = self._call(
+            user_id,
+            f"alert history {alert_uuid}",
+            lambda k: k._get(f"/alerts/{alert_uuid}/history"),
+        )
+        self.logger.info(
+            f"Fetched alert history uuid={alert_uuid} "
+            f"({len(history) if history is not None else 0} entries) "
+            f"from Kite for user {user_id}"
+        )
+        return history if history is not None else []

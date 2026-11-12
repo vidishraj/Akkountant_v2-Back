@@ -1078,3 +1078,225 @@ class InvestmentService(BaseService):
         cache[userId] = (now, data)
         return data
 
+    # ───── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces ─────
+
+    #: 5-min per-user cache for GTTs — identical pattern to the
+    #: margins cache. GTTs don't change sub-minute at the user level
+    #: (place/modify/cancel is rare per-user activity); FE can poll
+    #: the dashboard section freely without hammering Kite.
+    _kite_gtts_cache_ttl_seconds = 300
+
+    #: Same TTL for alerts. Alerts fire async + trigger history is
+    #: fetched via a separate per-alert endpoint, so the list cache
+    #: here doesn't hide fresh triggers from the drill-down view.
+    _kite_alerts_cache_ttl_seconds = 300
+
+    def fetchKiteGtts(self, userId):
+        """ak-dx98 Bundle 3: active GTT monitors with LTP-distance
+        enrichment.
+
+        Flow:
+          1. Pull GTTs via KiteService.get_gtt_triggers (cached).
+          2. For ACTIVE triggers only, batch-fetch current OHLC via
+             get_ohlc (Bundle 1's wrapper) to compute
+             last_price + distance %.
+          3. Return per-GTT dicts with
+             ``current_ltp`` + ``distance_pct`` appended under a
+             new ``monitor`` key; ``monitor=null`` for non-active
+             triggers or if the OHLC batch fetch fails
+             (fail-soft — the GTT list is still useful without the
+             distance overlay).
+
+        5-min per-user cache mirrors the margins pattern. Cache
+        failure evicts so the NEXT call re-fetches rather than
+        serving indefinitely-stale data.
+        """
+        import time
+        cache = getattr(self, '_kite_gtts_cache', None)
+        if cache is None:
+            cache = {}
+            self._kite_gtts_cache = cache
+
+        now = time.monotonic()
+        entry = cache.get(userId)
+        if entry is not None:
+            ts, data = entry
+            if now - ts < self._kite_gtts_cache_ttl_seconds:
+                return data
+
+        try:
+            triggers = (
+                self.StockService.kite_service.get_gtt_triggers(userId)
+            )
+        except Exception:
+            cache.pop(userId, None)
+            raise
+
+        enriched = self._enrich_gtts_with_ltp(userId, triggers)
+        cache[userId] = (now, enriched)
+        return enriched
+
+    def _enrich_gtts_with_ltp(self, userId, triggers):
+        """Append ``monitor`` block to each active GTT with current
+        LTP + distance %.
+
+        Non-active triggers (``triggered`` / ``cancelled`` /
+        ``expired``) get ``monitor=None`` — the distance is only
+        meaningful while the GTT is watching. OHLC batch-fetch
+        failure → every active GTT gets ``monitor=None`` with a
+        structured ``monitor_error`` note (fail-soft; the list is
+        still useful).
+
+        distance_pct is the signed % gap between current LTP and
+        the trigger value — positive if LTP is above the trigger
+        (for a sell-GTT, closer to firing; for a buy-GTT, further
+        from firing). OCO (two-leg) GTTs get a list of distances,
+        one per leg.
+        """
+        if not isinstance(triggers, list):
+            return triggers
+
+        # 1. Collect (exchange, tradingsymbol) pairs from active GTTs
+        # so we can batch the OHLC fetch.
+        active_keys = []
+        for trig in triggers:
+            if not isinstance(trig, dict):
+                continue
+            if trig.get("status") != "active":
+                continue
+            cond = trig.get("condition") or {}
+            exch = cond.get("exchange")
+            sym = cond.get("tradingsymbol")
+            if exch and sym:
+                key = f"{exch}:{sym}"
+                if key not in active_keys:
+                    active_keys.append(key)
+
+        quote_lookup = {}
+        monitor_error = None
+        if active_keys:
+            try:
+                quote_lookup = (
+                    self.StockService.kite_service.get_ohlc(
+                        userId, active_keys,
+                    )
+                )
+                if not isinstance(quote_lookup, dict):
+                    quote_lookup = {}
+            except Exception as exc:
+                # Fail-soft — the GTT list is still useful without the
+                # LTP overlay. Record the error class so the FE can
+                # show a subtle "distance temporarily unavailable" hint
+                # rather than a broken number.
+                self.logger.warning(
+                    f"fetchKiteGtts: OHLC enrichment failed for user "
+                    f"{userId}: {exc}"
+                )
+                quote_lookup = {}
+                monitor_error = str(exc)
+
+        # 2. Enrich — in-place mutation of the per-trigger dicts.
+        for trig in triggers:
+            if not isinstance(trig, dict):
+                continue
+            if trig.get("status") != "active":
+                trig["monitor"] = None
+                continue
+            cond = trig.get("condition") or {}
+            exch = cond.get("exchange")
+            sym = cond.get("tradingsymbol")
+            trig_values = cond.get("trigger_values") or []
+            if not (exch and sym):
+                trig["monitor"] = None
+                continue
+            q = quote_lookup.get(f"{exch}:{sym}")
+            if q is None:
+                trig["monitor"] = (
+                    {"error_class": "ohlc_fetch_failed",
+                     "message": monitor_error}
+                    if monitor_error else
+                    {"error_class": "quote_unavailable",
+                     "message": (
+                         f"Kite returned no OHLC for {exch}:{sym}"
+                     )}
+                )
+                continue
+            ltp = q.get("last_price")
+            if ltp is None or not trig_values:
+                trig["monitor"] = {
+                    "current_ltp": ltp,
+                    "distance_pct": None,
+                }
+                continue
+            # Per-leg distance %. OCO GTTs have 2 trigger values; we
+            # compute both. Guard div-by-zero on degenerate
+            # trigger=0 inputs (shouldn't happen but defense-in-
+            # depth — crash here would poison the whole dashboard).
+            distances = []
+            for tv in trig_values:
+                try:
+                    tv_f = float(tv)
+                    if tv_f == 0:
+                        distances.append(None)
+                    else:
+                        distances.append(
+                            round((float(ltp) - tv_f) / tv_f * 100.0, 4)
+                        )
+                except (TypeError, ValueError):
+                    distances.append(None)
+            trig["monitor"] = {
+                "current_ltp": ltp,
+                # Single-leg GTTs: scalar; OCO: list of 2 scalars.
+                "distance_pct": (
+                    distances[0] if len(distances) == 1 else distances
+                ),
+            }
+
+        return triggers
+
+    def fetchKiteAlerts(self, userId):
+        """ak-dx98 Bundle 3: price alerts for the user.
+
+        Returns Kite's native list shape. 5-min per-user cache,
+        same pattern as margins / gtts. Cache failure evicts so
+        the NEXT call retries rather than serving stale.
+
+        No LTP enrichment — alerts carry an ``lhs_attribute``
+        reference to the quantity they watch; whether that's a
+        price, OI, or spread is per-alert. Leave the FE to
+        pair-render with ``fetchKiteAlertHistory`` on drill-down.
+        """
+        import time
+        cache = getattr(self, '_kite_alerts_cache', None)
+        if cache is None:
+            cache = {}
+            self._kite_alerts_cache = cache
+
+        now = time.monotonic()
+        entry = cache.get(userId)
+        if entry is not None:
+            ts, data = entry
+            if now - ts < self._kite_alerts_cache_ttl_seconds:
+                return data
+
+        try:
+            data = self.StockService.kite_service.get_alerts(userId)
+        except Exception:
+            cache.pop(userId, None)
+            raise
+        cache[userId] = (now, data)
+        return data
+
+    def fetchKiteAlertHistory(self, userId, alert_uuid):
+        """ak-dx98 Bundle 3: trigger log for a single alert.
+
+        Pass-through to KiteService.get_alert_history. No cache —
+        per-alert queries are small + the drill-down view WANTS
+        fresh data (the user is typically asking "did my alert
+        fire recently?"). ``alert_uuid`` is validated at the
+        endpoint layer; this method trusts the caller.
+        """
+        return self.StockService.kite_service.get_alert_history(
+            userId, alert_uuid,
+        )
+
