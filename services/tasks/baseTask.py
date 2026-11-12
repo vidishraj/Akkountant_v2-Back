@@ -5,12 +5,20 @@ from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
 
 import requests
+from flask import g, current_app
 
 from models.Jobs import Job
 from services import JsonDownloadService
 from services.InvestmentService import InvestmentService
 from services.transactionsService import TransactionService
 from utils.logger import Logger
+
+# ak-e2a1 (2026-11-12): module-level logger for the BaseTask.db
+# @property's legacy-fallback branch. BaseTask subclasses init
+# their own self.logger (varies by subclass), so the property
+# can't reliably read self.logger. Mirrors services.Base_Service's
+# own _logger pattern.
+_logger = Logger(__name__).get_logger()
 
 
 # The task is to give a row. The row should be updated
@@ -94,6 +102,91 @@ class BaseTask(ABC):
         self.status = row.status
         self.due_date = row.due_date
         self.user_id = row.user_id
+
+    # ───── ak-e2a1 (2026-11-12): shared ``self.db`` for subclasses ─────
+    #
+    # Pre-fix, several Kite-adjacent tasks referenced ``self.db``
+    # directly (BackfillHistoricalCandlesTask, ReconcileTradesTask).
+    # BaseTask never exposed ``db``, so every access raised
+    # AttributeError. The error was then swallowed by the tasks'
+    # broad ``except Exception`` in ``_get_first_kite_user`` and
+    # surfaced as the misleading "No user with Kite access token"
+    # soft-skip — leaving both tables (stockHistoricalCandles +
+    # reconciliation_issues) silently empty until operator-triggered
+    # scheduler cycle after ak-iqum restart. See bead ak-e2a1.
+    #
+    # Lookup order matches services.Base_Service.db (same incident
+    # class, same resolver shape):
+    #   1. ``g.db`` — scheduler sets this at the task-invocation
+    #      boundary (``_run_overdue_scheduler`` / ``_run_job_processor``)
+    #      so inside a task tick ``g.db`` is always the app-level
+    #      Flask-SQLAlchemy singleton.
+    #   2. ``current_app.db`` — direct attribute on the configured
+    #      Akkountant app, bound at ``_setup_database`` time. Covers
+    #      app-context-but-no-g path (unlikely under current
+    #      scheduler, defensive for future callers).
+    #   3. Legacy fallback: fresh create_engine+scoped_session with a
+    #      loud WARN. Reached only when a subclass runs with NO Flask
+    #      app context at all — rare (test harness mis-setup, direct
+    #      CLI invoke). Leaks connections; mirrors the behavior
+    #      services.Base_Service shipped so a drop-in refactor to
+    #      ``self.db`` doesn't surprise any legacy caller.
+    #
+    # Rationale for @property vs plain attribute: scheduler loops
+    # hold a single long-lived app_context for all tick lifecycles.
+    # A plain-attribute snapshot taken at __init__ would be stale
+    # if the scheduler's flask_app rebinds its .db (unlikely but
+    # defensive). The property resolves per-access so every task
+    # read always sees the current app singleton.
+    @property
+    def db(self):
+        """Retrieve the DB handle (session + metadata).
+
+        See the ak-e2a1 module comment above for the full lookup
+        order + rationale.
+        """
+        # 1. Scheduler-set g.db wins.
+        try:
+            g_db = g.get('db') if g else None
+        except RuntimeError:
+            # g accessed outside app context — fall through to
+            # current_app branch which re-checks the same condition
+            # via its own RuntimeError handling.
+            g_db = None
+        if g_db is not None:
+            return g_db
+        # 2. current_app.db — Flask-SQLAlchemy singleton.
+        try:
+            app_db = current_app.db
+        except RuntimeError:
+            # No app context — fall through to legacy fallback.
+            app_db = None
+        except AttributeError:
+            # app resolves but pre-_setup_database (boot path);
+            # fall through.
+            app_db = None
+        if app_db is not None:
+            return app_db
+        # 3. Legacy fallback — no Flask app context at all. Mirrors
+        # services.Base_Service.db's legacy branch. Loud WARN so
+        # misconfigured callers surface; connection-leak ack'd (same
+        # cost as pre-Path-B).
+        from utils.DotDict import DotDict
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker, scoped_session
+        _logger.warning(
+            "BaseTask.db: called with no g.db AND no Flask app "
+            "context — returning legacy fresh-engine + scoped_session. "
+            "Leaks connections; wrap the caller in app.app_context() "
+            "or have the scheduler set g.db = app.db before running "
+            "the task (standard scheduler convention)."
+        )
+        DATABASE_URL = os.getenv('DATABASE_URL')
+        engine = create_engine(DATABASE_URL)
+        db_session = scoped_session(sessionmaker(autocommit=False,
+                                                 autoflush=False,
+                                                 bind=engine))
+        return DotDict({'session': db_session})
 
     def startTask(self):
         result, status, interval = self.run()

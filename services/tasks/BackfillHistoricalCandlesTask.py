@@ -385,7 +385,19 @@ class BackfillHistoricalCandlesTask(BaseTask):
 
         Single-user app today; matches the pattern used by
         SetKiteStockDetails.
+
+        ak-e2a1 (2026-11-12): exception handling split into two
+        branches. **Code bugs** (AttributeError / NameError /
+        TypeError) propagate so the task returns ``Failed`` with
+        the real traceback instead of masquerading as the soft
+        "No user with Kite access token" skip (which tricked
+        every reviewer + mayor + lead-verify into thinking the
+        task was Kite-unconfigured rather than broken). **DB /
+        auth errors** (SQLAlchemyError) soft-swallow + return
+        None as before — those legitimately indicate the user-
+        config state we can't observe.
         """
+        from sqlalchemy.exc import SQLAlchemyError
         try:
             user_token = (
                 self.db.session.query(UserToken)
@@ -395,6 +407,19 @@ class BackfillHistoricalCandlesTask(BaseTask):
             if user_token and user_token.access_token:
                 return user_token.user_id
             return None
+        except (AttributeError, NameError, TypeError):
+            # Code bug — re-raise so the task returns Failed with
+            # the real cause. Soft-swallowing this is what let
+            # ak-e2a1 reach production.
+            raise
+        except SQLAlchemyError as exc:
+            self.logger.error(f"Error getting Kite user (DB): {exc}")
+            return None
         except Exception as exc:
-            self.logger.error(f"Error getting Kite user: {exc}")
+            # Unknown runtime failure — log distinctly as "unexpected"
+            # so it's distinguishable from the DB-layer branch above.
+            self.logger.error(
+                f"Error getting Kite user (unexpected): {exc}",
+                exc_info=True,
+            )
             return None

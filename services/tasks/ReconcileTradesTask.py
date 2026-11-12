@@ -233,7 +233,14 @@ class ReconcileTradesTask(BaseTask):
 
         Single-user app today; same pattern as
         SetKiteStockDetails / BackfillHistoricalCandlesTask.
+
+        ak-e2a1 (2026-11-12): see BackfillHistoricalCandlesTask
+        ._get_first_kite_user docstring for the exception-handling
+        split rationale. Code bugs propagate; SQLAlchemy errors
+        soft-swallow with a distinct log; other exceptions log
+        with exc_info so stack traces reach journalctl.
         """
+        from sqlalchemy.exc import SQLAlchemyError
         try:
             user_token = (
                 self.db.session.query(UserToken)
@@ -243,8 +250,19 @@ class ReconcileTradesTask(BaseTask):
             if user_token and user_token.access_token:
                 return user_token.user_id
             return None
+        except (AttributeError, NameError, TypeError):
+            # Code bug — re-raise so the task returns Failed with
+            # the real cause. Soft-swallowing this is what let
+            # ak-e2a1 reach production.
+            raise
+        except SQLAlchemyError as exc:
+            self.logger.error(f"Error getting Kite user (DB): {exc}")
+            return None
         except Exception as exc:
-            self.logger.error(f"Error getting Kite user: {exc}")
+            self.logger.error(
+                f"Error getting Kite user (unexpected): {exc}",
+                exc_info=True,
+            )
             return None
 
 
