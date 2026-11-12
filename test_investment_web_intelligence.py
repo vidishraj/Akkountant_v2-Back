@@ -446,6 +446,72 @@ def test_fetch_company_announcements_rejects_missing_symbol():
         _execute_fetch_company_announcements({})
 
 
+def test_fetch_company_announcements_system_prompt_summary_matches_return_shape():
+    """ak-7izj: system-prompt wrapper summary (L107 area) must
+    mention the ACTUAL return keys — nse_urls + bse_queries — not
+    the pre-ak-pb4n `{urls, extraction}`. Doc drift from the BSE
+    WebSearch switch would make the summary lie to the agent at
+    tool-selection time."""
+    src = _read_source("services/agent_tools.py")
+    # New shape must be named verbatim in the summary line.
+    assert "{nse_urls, bse_queries, extraction}" in src, (
+        "Web Intelligence wrapper summary for "
+        "fetch_company_announcements must reference "
+        "{nse_urls, bse_queries, extraction} — ak-7izj doc fix "
+        "missing or regressed"
+    )
+    # Old shape must be gone — that key doesn't exist in the return
+    # anymore and claiming it does misleads the agent at call time.
+    # Scope to the wrapper-summary bullet so a hit elsewhere (docs
+    # block citing history) wouldn't false-positive; the bullet
+    # starts with the backticked tool name.
+    import re
+    bullet_m = re.search(
+        r"- `fetch_company_announcements\(symbol\)`[^\n]*(?:\n[^\n]*)*?"
+        r"(?=\n\s*- |\n\n)",
+        src,
+    )
+    assert bullet_m is not None, "could not locate wrapper summary bullet"
+    assert "{urls, extraction}" not in bullet_m.group(0), (
+        "pre-ak-7izj `{urls, extraction}` return-shape still present "
+        "in the system-prompt wrapper summary — doc drift back to "
+        "the broken pre-ak-pb4n form"
+    )
+
+
+def test_fetch_company_announcements_tool_def_description_reflects_hybrid_shape():
+    """ak-7izj: tool-def description must describe the hybrid
+    NSE-WebFetch / BSE-WebSearch plan — not the pre-ak-pb4n "WebFetch
+    the URLs" phrasing which told the agent to WebFetch a URL that
+    would 404 on BSE. Grep scoped to the tool def block."""
+    import re
+    src = _read_source("services/agent_tools.py")
+    # Grab the tool-def dict for fetch_company_announcements.
+    m = re.search(
+        r'"name":\s*"fetch_company_announcements".*?"required":\s*\[\s*"symbol"\s*\]',
+        src, re.DOTALL,
+    )
+    assert m is not None, (
+        "could not locate fetch_company_announcements tool def"
+    )
+    block = m.group(0)
+    # Distinguishing phrasing from the ak-7izj rewrite.
+    assert "NSE as a WebFetch URL" in block, (
+        "tool description must name 'NSE as a WebFetch URL' — "
+        "ak-7izj rewrite missing"
+    )
+    assert "BSE as a WebSearch query" in block, (
+        "tool description must name 'BSE as a WebSearch query' — "
+        "ak-7izj rewrite missing"
+    )
+    # Negative: the pre-ak-7izj symbol-input description that told
+    # the agent BSE is a URL lookup must be gone.
+    assert "shape the BSE / NSE lookup URL" not in block, (
+        "pre-ak-7izj input-schema description that implied BSE is "
+        "a URL lookup is still present — ak-7izj doc drift"
+    )
+
+
 def test_fetch_macro_context_returns_three_plans():
     out = _execute_fetch_macro_context()
     assert out["tool"] == "fetch_macro_context"

@@ -104,7 +104,8 @@ consistent + makes your reasoning auditable.
   stocks. Reads fetch_user_securities then returns per-symbol
   queries.
 - `fetch_company_announcements(symbol)` — BSE/NSE corporate
-  announcement page URLs for a symbol. Returns {urls, extraction}.
+  announcement lookup for a symbol.
+  Returns {nse_urls, bse_queries, extraction}.
 - `fetch_macro_context()` — RBI repo rate / latest inflation / FOMC
   upcoming. Returns {queries, sources}.
 - `fetch_fund_factsheet(scheme_code)` — AMC factsheet / expense
@@ -980,12 +981,15 @@ INVESTMENT_TOOLS = [
     {
         "name": "fetch_company_announcements",
         "description": (
-            "Return a canonical WebFetch plan for BSE / NSE "
-            "corporate announcements for a specific symbol. "
-            "Returns suggested official-exchange URLs + "
-            "extraction hints; the agent then calls WebFetch on "
-            "the URLs. Prefer this over WebSearch when the user "
-            "is asking about a specific disclosure "
+            "Return a canonical plan with NSE as a WebFetch URL + "
+            "BSE as a WebSearch query (BSE announcements are "
+            "scrip-code-keyed, not ticker-keyed, so we route BSE "
+            "through a search query the engine resolves at lookup "
+            "time). The agent WebFetches the NSE URL and "
+            "WebSearches each BSE query, then WebFetches the "
+            "resolved announcement pages. Prefer this over a "
+            "free-form WebSearch when the user is asking about a "
+            "specific disclosure "
             "(acquisition / dividend / board-meeting outcome)."
         ),
         "input_schema": {
@@ -995,7 +999,8 @@ INVESTMENT_TOOLS = [
                     "type": "string",
                     "description": (
                         "Stock symbol (e.g., RELIANCE, INFY). "
-                        "Used to shape the BSE / NSE lookup URL."
+                        "Used to shape the NSE lookup URL and "
+                        "BSE WebSearch query."
                     ),
                 },
             },
