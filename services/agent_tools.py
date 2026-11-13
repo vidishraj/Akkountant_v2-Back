@@ -1432,6 +1432,98 @@ FREELANCE_TOOLS = [
     ATTACH_FILE_TO_CHAT_TOOL,
 ]
 
+
+# ─── ak-npdf (2026-11-13): confirm-gate UX tone classifier ─────────────────────
+#
+# Future-proofs the FE confirm-gate's icon/color/copy selection against a
+# new destructive or mutation tool landing with a name that doesn't match
+# the pre-ak-npdf heuristic ``tool.startsWith("delete")``. See bead ak-npdf
+# for the ak-6lyp FE-7 MINOR follow-up rationale.
+#
+# IMPORTANT: this is **tone-only**. It is NOT the trigger-gate — that is
+# ``agentService.DESTRUCTIVE_TOOLS`` ("which tools require user confirmation
+# before firing"). The two are intentionally separate concerns:
+#   * ``DESTRUCTIVE_TOOLS`` (trigger): e.g. ``sync_kite_holdings`` is in
+#     the set because it writes DB rows and we want the user to approve;
+#     but it's classified as ``mutation`` here because it doesn't DELETE
+#     anything (see ak-n9im audit — upsert-only).
+#   * ``destructiveness`` (tone): selects the FE dialog's visual language
+#     — red/trash for destructive, amber/edit for mutation, neutral/info
+#     for read.
+#
+# Values: ``"destructive"`` | ``"mutation"`` | ``"read"`` (default).
+#
+# A tool NOT in either explicit set defaults to ``"read"``. Safe default:
+# a new fetch_* / get_* / search_* tool gets neutral tone and no accidental
+# alarm icon. The DRIFT TO WATCH is the opposite: a new DELETE/PURGE/WIPE/
+# REMOVE tool that gets added to ``DESTRUCTIVE_TOOLS`` (trigger set) but
+# NOT to the destructive classifier below — it would fire the gate with
+# the softer mutation tone. The
+# ``test_tool_destructiveness_classifier.py`` drift guard asserts every
+# ``DESTRUCTIVE_TOOLS`` member is also classified ``destructive`` here.
+
+TOOL_DESTRUCTIVENESS_DESTRUCTIVE = frozenset({
+    # Investments
+    "delete_single_investment",
+    "delete_all_investments",
+    # Files
+    "delete_file",
+    # Freelance
+    "delete_invoice",
+    "delete_customer",
+})
+
+TOOL_DESTRUCTIVENESS_MUTATION = frozenset({
+    # Investments — write/update but no delete.
+    "insert_investment",
+    "sync_kite_holdings",       # upsert per ak-n9im audit
+    "attach_file_to_chat",      # writes agent_file_attachments row
+    # Transactions
+    "update_transaction",
+    "scan_emails_for_transactions",
+    "scan_statements",
+    "process_mail_pipeline",
+    # Freelance
+    "create_invoice",
+    "update_invoice",
+    "create_customer",
+    "update_customer",
+    # Rate / job scheduling
+    "trigger_rate_refresh",
+})
+
+
+def get_tool_destructiveness(tool_name):
+    """Return the UX-tone classification for ``tool_name``: one of
+    ``"destructive"`` / ``"mutation"`` / ``"read"``.
+
+    ``"read"`` is the implicit default for any tool not explicitly
+    in the two sets above (fetch_* / get_* / search_* / web wrappers
+    / read_attachment / etc.). See the module comment above for the
+    tone-vs-trigger distinction.
+    """
+    if tool_name in TOOL_DESTRUCTIVENESS_DESTRUCTIVE:
+        return "destructive"
+    if tool_name in TOOL_DESTRUCTIVENESS_MUTATION:
+        return "mutation"
+    return "read"
+
+
+# Stamp ``destructiveness`` onto every tool def across all 3 agent
+# registries so the field rides with the tool metadata. Module-load
+# one-time pass — keeps tool defs in sync with the classifier
+# without 60+ per-tool dict-literal edits, and lets any future
+# consumer that reads a tool def directly (not just the SSE confirm
+# event) see the field. SdkMcpTool construction in
+# ``agentService._build_sdk_tools`` only reads name / description /
+# input_schema / handler so the extra key is inert on that path.
+for _registry in (INVESTMENT_TOOLS, TRANSACTION_TOOLS, FREELANCE_TOOLS):
+    for _tool_def in _registry:
+        _name = _tool_def.get("name")
+        if isinstance(_name, str):
+            _tool_def["destructiveness"] = get_tool_destructiveness(_name)
+
+
 # ─── Lookup helpers ────────────────────────────────────────────────────────────
 
 AGENT_CONFIGS = {

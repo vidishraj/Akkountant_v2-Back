@@ -10,7 +10,7 @@ import os
 import time
 import anyio
 from services.Base_Service import BaseService
-from services.agent_tools import get_agent_config
+from services.agent_tools import get_agent_config, get_tool_destructiveness
 from services.agent_tool_executor import execute_tool, TOOL_ERROR_KEY
 from utils.logger import Logger
 from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
@@ -1185,6 +1185,12 @@ class AgentService(BaseService):
                         # DESTRUCTIVE_TOOLS confirm — same event
                         # type, different copy + icon surface.
                         "reason": "web_fetch_prior_in_turn",
+                        # ak-npdf: FE tone selector. insert_investment
+                        # is classified "mutation" — the web-gate adds
+                        # a prompt-injection-risk REASON on top, but
+                        # the underlying tool is still a mutation
+                        # (inserts a row; doesn't delete).
+                        "destructiveness": get_tool_destructiveness(_tn),
                     }))
                     return {
                         "content": [{
@@ -1207,6 +1213,13 @@ class AgentService(BaseService):
                         "tool": _tn,
                         "input": args,
                         "message": msg,
+                        # ak-npdf: FE tone selector. Replaces the
+                        # pre-ak-npdf FE heuristic
+                        # `tool.startsWith("delete")` which would
+                        # wrongly give the softer mutation tone to
+                        # a future destructive tool named with a
+                        # different prefix (purge_*, remove_*, etc.).
+                        "destructiveness": get_tool_destructiveness(_tn),
                     }))
                     return {
                         "content": [{
