@@ -367,7 +367,8 @@ class WealthDigestService(BaseService):
             .first()
         )
 
-    def _latest_job_error(self, user_id: str) -> dict | None:
+    def _latest_job_error(self, user_id: str,
+                          success_ts: datetime | None = None) -> dict | None:
         """Latest WealthDigest Job error surfaced as `{at, message}` or None.
 
         Shape (ak-5vg v3 — matches FE type `last_error: {at, message} | null`):
@@ -375,7 +376,9 @@ class WealthDigestService(BaseService):
 
         Returns None if:
           * no WealthDigest Job row exists for the user, OR
-          * the most recent Job's status != "Failed" (task recovered).
+          * the most recent Job's status != "Failed" (task recovered), OR
+          * (ak-ucta) a successful digest landed MORE RECENTLY than the
+            latest Failed Job — see cross-reference rationale below.
 
         Jobs table logs one row per scheduled cycle attempt; a Failed
         row's `result` column carries the operator-actionable message
@@ -400,7 +403,26 @@ class WealthDigestService(BaseService):
         SYSTEM_BOOTSTRAP-style fallback (recall ak-ran), this filter
         silently returns None → the "task errored" banner would not
         show even when the task genuinely failed. Revisit when Phase-2
-        multi-user or bootstrap-shape change lands."""
+        multi-user or bootstrap-shape change lands.
+
+        ak-ucta (2026-11-13) — cross-reference against success_ts:
+        the pre-ak-ucta shape only checked "is the LATEST Job row
+        Failed". The Aug 30 "failures==10 → no new Pending created"
+        edge (hit during the pre-Opus Sonnet outage) left a Failed
+        row as the latest even after the Nov 12 bootstrap re-seed
+        + successful scheduler recovery wrote a fresh AgentMessage.
+        Result: the stale Aug 30 banner persisted indefinitely next
+        to a Nov 12 success banner (bead ak-ucta observed symptom).
+
+        Fix: callers pass the latest-success AgentMessage.ts as
+        ``success_ts``; if it's newer than the Failed Job's
+        ``due_date``, the error is historical and we return None. No
+        schema migration needed — we already have the authoritative
+        "latest success" timestamp on the read-side (AgentMessage
+        rows are the ground truth; Jobs is the scheduler-history
+        audit log). Preserves diagnostic history (Failed row stays;
+        we just stop surfacing it to the user).
+        """
         latest = (
             self.db.session.query(Job)
             .filter(
@@ -411,6 +433,16 @@ class WealthDigestService(BaseService):
             .first()
         )
         if latest is None or latest.status != "Failed":
+            return None
+        # ak-ucta: suppress historical errors superseded by a newer
+        # successful digest. Guard both sides defensively — ``due_date``
+        # is nullable in principle; ``success_ts`` is optional kwarg
+        # (callers without a known success fall back to old shape).
+        if (
+            success_ts is not None
+            and latest.due_date is not None
+            and success_ts > latest.due_date
+        ):
             return None
         return {
             "at": latest.due_date.isoformat() if latest.due_date else None,
@@ -477,7 +509,10 @@ class WealthDigestService(BaseService):
         """
         ts = msg.ts
         read_at = self._get_user_read_at(user_id)
-        last_error = self._latest_job_error(user_id)
+        # ak-ucta: pass the AgentMessage.ts as the "latest success"
+        # cross-reference so a historical Failed Job older than this
+        # successful digest is correctly hidden from the FE banner.
+        last_error = self._latest_job_error(user_id, success_ts=ts)
         parsed = parse_digest_content(msg.content)
         return {
             "date": ts.date().isoformat() if ts else None,
