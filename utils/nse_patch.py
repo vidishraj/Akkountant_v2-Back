@@ -40,8 +40,26 @@ import logging
 
 log = logging.getLogger(__name__)
 
+# ak-3hkb (2026-11-21): NSE migrated NextApi from .com to .in. The
+# original .com URL now returns HTTP 301 → .in, and nsepython's
+# nsefetch does NOT follow the cross-TLD redirect (library design
+# + cookie-bastion state isn't portable across the TLD boundary) —
+# the call returns empty equityResponse → adapter emits {} →
+# findSecurity returns None → StocksService silently renders
+# ₹0.00 / -100% for the user's entire stock portfolio
+# (rig CRITICAL by constraint #2: misleading money display).
+#
+# Verified live from a lead OCI host:
+#   curl -L "https://www.nseindia.in/api/NextApi/apiClient/GetQuoteApi
+#            ?functionName=getSymbolData&marketType=N&series=EQ&symbol=BHEL"
+#   → HTTP 200 with full equityResponse incl. priceInfo.lastPrice.
+#
+# This is the surgical 1-char fix; a runtime 301-WARN probe
+# ("also worth doing" per bead) is deferred as a follow-up —
+# test_nse_patch_tld_drift pins the URL literal at commit time so
+# the next NSE TLD move surfaces in CI, not in silent-zero-stocks.
 _BASE_URL = (
-    "https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi"
+    "https://www.nseindia.in/api/NextApi/apiClient/GetQuoteApi"
     "?functionName=getSymbolData&marketType=N&series=EQ&symbol="
 )
 

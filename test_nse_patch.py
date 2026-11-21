@@ -211,6 +211,64 @@ def test_neither_library_importable_no_crash():
     print("  ✓ Import succeeds with empty _patched_libraries (warns + no-op)")
 
 
+# ── ak-3hkb (2026-11-21): NSE TLD drift guard ────────────────────────────
+#
+# NSE migrated NextApi from .com to .in on ~2026-11 (confirmed live via
+# 301 Location header probe from a lead OCI host). The pre-ak-3hkb
+# URL literal pinned ``nseindia.com``; nsefetch doesn't follow the
+# cross-TLD redirect, so every stock fetch returned empty and the
+# Investments page silently rendered ₹0.00 / -100% (rig CRITICAL
+# constraint #2: misleading money display).
+#
+# The pre-existing test_patched_hits_nextapi_url asserts the NextApi
+# path but NOT the TLD — so NSE's TLD move slipped through it. This
+# guard pins the TLD literal so the next TLD/host move surfaces in
+# CI instead of as silent-zero stocks in prod.
+
+
+def test_base_url_uses_current_nse_tld():
+    """ak-3hkb drift guard: ``_BASE_URL`` must point at ``nseindia.in``
+    (the current live TLD). Blocks regression to the stale
+    ``nseindia.com`` form."""
+    _purge_patch_cache()
+    import utils.nse_patch
+    assert "nseindia.in" in utils.nse_patch._BASE_URL, (
+        f"nse_patch._BASE_URL must use nseindia.in (NSE's current "
+        f"TLD per ak-3hkb live probe); got: {utils.nse_patch._BASE_URL}"
+    )
+    assert "nseindia.com" not in utils.nse_patch._BASE_URL, (
+        f"nse_patch._BASE_URL still references the stale nseindia.com "
+        f"TLD — ak-3hkb fix regressed. Prod symptom: all stocks "
+        f"render ₹0.00 / -100% because nsefetch doesn't follow the "
+        f".com → .in 301. Got: {utils.nse_patch._BASE_URL}"
+    )
+    print("  ✓ _BASE_URL uses nseindia.in (ak-3hkb drift guard)")
+
+
+def test_patched_hits_current_tld_url():
+    """ak-3hkb: the real monkey-patched call-path must ship the
+    .in-TLD URL to nsefetch — not just the module constant.
+    Belt-and-braces against a future refactor that pulls the URL
+    from a different source than ``_BASE_URL``."""
+    _purge_patch_cache()
+    lib, rahu = _install_fake_nsepython(nsefetch_return=_NEXTAPI_RESPONSE)
+    import utils.nse_patch  # noqa: F401
+    lib.nse_eq("BHEL")
+    call_args = rahu.nsefetch.call_args
+    url = (
+        call_args.args[0] if call_args.args
+        else call_args.kwargs.get("url", "")
+    )
+    assert "nseindia.in" in url, (
+        f"patched nse_eq must call nsefetch with .in-TLD URL; got: {url}"
+    )
+    assert "nseindia.com" not in url, (
+        f"patched nse_eq is still hitting the stale .com TLD — "
+        f"ak-3hkb regression. Got: {url}"
+    )
+    print(f"  ✓ Patched call-path uses .in TLD: ...{url[-80:]}")
+
+
 if __name__ == "__main__":
     print("nse_patch unit tests — v8 ak-m4r (NextApi monkey-patch + adapter)")
     print("=" * 70)
@@ -222,6 +280,8 @@ if __name__ == "__main__":
     test_fetchStockRates_compatibility()
     test_patches_nsepythonserver_too()
     test_neither_library_importable_no_crash()
+    test_base_url_uses_current_nse_tld()
+    test_patched_hits_current_tld_url()
     print("\n" + "=" * 70)
     print("All nse_patch tests passed.")
     sys.exit(0)
