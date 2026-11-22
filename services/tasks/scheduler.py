@@ -28,6 +28,11 @@ from services.tasks.BackfillHistoricalCandlesTask import BackfillHistoricalCandl
 # ak-zai2 Kite Bundle 2 (2026-11-12): daily reconciliation task —
 # flags Kite trades missing from local TradeAssociation.
 from services.tasks.ReconcileTradesTask import ReconcileTradesTask
+# ak-v8z1 (ak-ofir Phase 2A, 2026-11-22): daily AMFI historical-NAV
+# backfill. Sibling of BackfillHistoricalCandlesTask for stocks.
+from services.tasks.BackfillAMFIHistoricalNAVsTask import (
+    BackfillAMFIHistoricalNAVsTask,
+)
 from utils.logger import Logger
 
 
@@ -77,6 +82,11 @@ TASK_MAPPING = {
     # ak-zai2 Bundle 2 (2026-11-12): daily Kite-vs-local trade
     # reconciliation. 24h cadence. See task docstring + bead ak-zai2.
     "ReconcileTrades": ReconcileTradesTask,
+    # ak-v8z1 (ak-ofir Phase 2A, 2026-11-22): daily AMFI historical-
+    # NAV backfill. 24h cadence. Populates mfHistoricalNavs so the
+    # Phase 2B synthesis script can reconstruct past-date portfolio
+    # values for the trend chart. See task docstring + bead ak-v8z1.
+    "BackfillAMFIHistoricalNAVs": BackfillAMFIHistoricalNAVsTask,
 }
 
 

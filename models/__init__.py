@@ -32,6 +32,14 @@ from models.stockHistoricalCandle import StockHistoricalCandle
 # locally-imported TradeAssociation rows. Import BEFORE
 # db.create_all() so the fresh table materializes on next boot.
 from models.reconciliationIssue import ReconciliationIssue
+# ak-v8z1 (ak-ofir Phase 2A, 2026-11-22): per-asset-class historical
+# NAV / rate caches feeding the Phase 2B synthesis script. Each is a
+# simple (identifier, date, value) UPSERT target. Imported BEFORE
+# db.create_all() so the fresh tables materialize on next boot. See
+# per-model docstrings for source + writer wire-up.
+from models.mfHistoricalNav import MFHistoricalNav
+from models.npsHistoricalNav import NPSHistoricalNav
+from models.goldHistoricalRate import GoldHistoricalRate
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PendingPaymentClaim
 from .customer_emails import CustomerEmail
