@@ -400,6 +400,43 @@ def _execute_investment_tool(tool_name, tool_input, user_id, service):
     elif tool_name == "fetch_fund_factsheet":
         return _execute_fetch_fund_factsheet(tool_input)
 
+    # ── ak-p8ix Bead C (2026-11-22): server-side analyst layer ──
+    #
+    # Pure math moved OFF the agent + ONTO deterministic Python
+    # functions. See services/portfolio_analytics.py for the
+    # module docstring + the per-tool rationale.
+
+    elif tool_name == "portfolio_allocation":
+        from services.portfolio_analytics import portfolio_allocation
+        return portfolio_allocation(
+            service, user_id,
+            as_of_date=tool_input.get("as_of_date"),
+        )
+
+    elif tool_name == "benchmark_compare":
+        from services.portfolio_analytics import benchmark_compare
+        return benchmark_compare(
+            service, user_id,
+            from_date=tool_input.get("from_date"),
+            to_date=tool_input.get("to_date"),
+            benchmark=tool_input.get("benchmark"),
+        )
+
+    elif tool_name == "position_sizing":
+        from services.portfolio_analytics import position_sizing
+        return position_sizing(
+            service, user_id,
+            symbol=tool_input.get("symbol"),
+            target_allocation_pct=tool_input.get("target_allocation_pct"),
+        )
+
+    elif tool_name == "concentration_risk":
+        from services.portfolio_analytics import concentration_risk
+        return concentration_risk(
+            service, user_id,
+            threshold_pct=tool_input.get("threshold_pct"),
+        )
+
     else:
         return {"error": f"Unknown investment tool: {tool_name}"}
 

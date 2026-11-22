@@ -78,6 +78,25 @@ MUTATION_TOOLS = {
 
 MAX_TURNS = 20
 
+# ak-p8ix Bead C (2026-11-22): sliding-window bound on the number of
+# conversation turns included in the prompt. Pre-ak-p8ix,
+# ``_format_conversation`` concatenated EVERY historical turn
+# unbounded — context grew linearly with conversation age, eventually
+# bumping into the model's context window + inflating per-turn cost
+# on a long-running single conversation.
+#
+# Value: 20 turns == 40 messages (10 user + 10 assistant pairs
+# assuming strict alternation; fewer in practice because
+# tool_events + partial_assistant interleave). Picked at the
+# "remembers the last few hours of a live back-and-forth" bar
+# without pulling in day-old context the model doesn't need.
+#
+# Older turns are silently dropped. A per-request telemetry log
+# emits the pruned count so operator can tune this if digests /
+# long-threaded conversations start losing context the user
+# relied on.
+_HISTORY_MAX_MESSAGES = 40
+
 # Name of the per-turn custom MCP tool that exposes attached files to
 # the investment agent. Confinement is enforced inside the handler's
 # closure (membership check against the resolved attachment_id set);
@@ -763,7 +782,9 @@ class AgentService(BaseService):
             )
 
             # Format conversation history as prompt text
-            prompt_text = self._format_conversation(messages)
+            # ak-p8ix Bead C (2026-11-22): logger passed through for
+            # history_window telemetry.
+            prompt_text = self._format_conversation(messages, logger=self.logger)
 
             # ak-1x4 pass 2: inject the attachments block into the last
             # user message. The block lists each attachment_id (NOT the
@@ -1304,31 +1325,78 @@ class AgentService(BaseService):
         return sdk_tools
 
     @staticmethod
-    def _format_conversation(messages):
-        """Format message history into a prompt string for claude_agent_sdk."""
+    def _format_conversation(messages, logger=None):
+        """Format message history into a prompt string for claude_agent_sdk.
+
+        ak-p8ix Bead C (2026-11-22): sliding-window bound. Pre-ak-p8ix,
+        this method concatenated EVERY historical turn unbounded —
+        context grew linearly with conversation age. New: keep only
+        the most recent ``_HISTORY_MAX_MESSAGES`` messages (older
+        history dropped silently). The LATEST message always makes
+        it through regardless of its position relative to the
+        window (user's current turn is the point of the call).
+
+        Partial-assistant messages are skipped BEFORE the window-
+        count so they don't consume budget.
+
+        ``logger`` (optional): if provided, emit a single INFO log
+        line with the pruned count — grep-anchor ``history_window``
+        so operator can tune the constant from journalctl. The
+        caller (stream_chat) is the only production entry point and
+        already carries ``self.logger``; the kwarg stays optional
+        so unit tests can skip it.
+        """
         if not messages:
             return ""
 
-        # Single message — return content directly
+        # Single message — return content directly (unchanged behavior).
         if len(messages) == 1:
             content = messages[0].get("content", "")
             return content if isinstance(content, str) else str(content)
 
-        # Multi-turn — include history
-        history_parts = []
-        for msg in messages[:-1]:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "partial_assistant":
-                continue
-            if isinstance(content, str):
-                prefix = "User" if role == "user" else "Assistant"
-                history_parts.append(f"{prefix}: {content}")
-
+        # Separate the latest message from the history — the latest
+        # always goes through regardless of the window.
         latest_msg = messages[-1]
         latest_content = latest_msg.get("content", "")
         if not isinstance(latest_content, str):
             latest_content = str(latest_content)
+
+        history_msgs = [
+            m for m in messages[:-1]
+            if m.get("role") != "partial_assistant"
+        ]
+        total_history = len(history_msgs)
+
+        # Sliding window — keep only the most recent N history
+        # messages. Older than the window = pruned (dropped).
+        if total_history > _HISTORY_MAX_MESSAGES:
+            pruned_count = total_history - _HISTORY_MAX_MESSAGES
+            history_msgs = history_msgs[-_HISTORY_MAX_MESSAGES:]
+        else:
+            pruned_count = 0
+
+        # Telemetry — one log line per call so operators can see
+        # whether the window is actually firing for the Overseer's
+        # long-running conversations.
+        if logger is not None:
+            try:
+                logger.info(
+                    "history_window total_history=%d kept=%d "
+                    "pruned=%d max=%d",
+                    total_history, len(history_msgs), pruned_count,
+                    _HISTORY_MAX_MESSAGES,
+                )
+            except Exception:
+                # Telemetry must never break the format path.
+                pass
+
+        history_parts = []
+        for msg in history_msgs:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                prefix = "User" if role == "user" else "Assistant"
+                history_parts.append(f"{prefix}: {content}")
 
         if history_parts:
             history = "\n\n".join(history_parts)

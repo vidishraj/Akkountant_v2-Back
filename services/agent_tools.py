@@ -1049,6 +1049,155 @@ INVESTMENT_TOOLS = [
             "required": ["scheme_code"],
         },
     },
+    # ───── ak-p8ix Bead C (2026-11-22): server-side analyst layer.
+    # Pure math moved OFF the agent + ONTO deterministic Python
+    # functions so the agent quotes verbatim (same discipline
+    # fetch_portfolio_summary already applies to per-asset totals).
+    # No network — these are tool-layer BUSINESS math, not web
+    # intelligence. See services/portfolio_analytics.py.
+    {
+        "name": "portfolio_allocation",
+        "description": (
+            "Current cross-asset allocation % by rupee value — "
+            "Stocks / Mutual_Funds / NPS / EPF / PF (PPF) / Gold "
+            "+ FO-P&L if present. Returns {total, fo_pnl, "
+            "by_asset_type: [{type, value, pct}]} sorted by value "
+            "descending. Use for 'what's my allocation', 'where "
+            "am I overweight', or as the base for a rebalance "
+            "recommendation. Server-side math — quote verbatim; "
+            "do NOT re-derive percentages in-prompt."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "as_of_date": {
+                    "type": "string",
+                    "description": (
+                        "RESERVED — currently raises if passed. "
+                        "Omit for the current valuation. A future "
+                        "follow-up will wire arbitrary-past-date "
+                        "queries via the snapshot table."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "benchmark_compare",
+        "description": (
+            "Portfolio return over [from_date, to_date] vs a "
+            "benchmark index. Portfolio side computed internally "
+            "from stockHistoricalCandles (ak-4o41 Bundle 1); "
+            "benchmark side returned as a canonical WebSearch "
+            "plan — the agent follows up by calling WebSearch "
+            "with the plan's canonical_query to pull the "
+            "benchmark return, then compares. Default benchmark "
+            "'Nifty 50'. Fails with insufficient_data when the "
+            "candle cache doesn't cover >=2 trading days in the "
+            "window — suggests BackfillHistoricalCandlesTask hasn't "
+            "run yet / needs operator attention."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_date": {
+                    "type": "string",
+                    "description": (
+                        "ISO-8601 'YYYY-MM-DD' start date "
+                        "(inclusive)."
+                    ),
+                },
+                "to_date": {
+                    "type": "string",
+                    "description": (
+                        "ISO-8601 'YYYY-MM-DD' end date "
+                        "(inclusive). Must be >= from_date."
+                    ),
+                },
+                "benchmark": {
+                    "type": "string",
+                    "description": (
+                        "Benchmark index name. Default 'Nifty 50'. "
+                        "Other common values: 'Nifty Next 50', "
+                        "'Sensex', 'Nifty Midcap 150', 'Nifty "
+                        "Smallcap 250'. Shapes the WebSearch "
+                        "canonical_query emitted on the return."
+                    ),
+                },
+            },
+            "required": ["from_date", "to_date"],
+        },
+    },
+    {
+        "name": "position_sizing",
+        "description": (
+            "Compute rupee delta to reach target_allocation_pct "
+            "for a symbol. Returns {current_value, current_pct, "
+            "target_pct, target_value, delta_rupees, direction} "
+            "— direction is 'buy' / 'trim' / 'hold'. Use when the "
+            "user asks 'how much more of X should I buy to get "
+            "to Y%' or 'how much should I trim to get under Y%'. "
+            "Server-side math — quote delta_rupees verbatim."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": (
+                        "Stock symbol / scheme name / scheme code. "
+                        "Case-insensitive; matches against the "
+                        "user's held securities across Stocks / "
+                        "Mutual_Funds / NPS caches. Use "
+                        "search_securities first if the user's "
+                        "name is approximate."
+                    ),
+                },
+                "target_allocation_pct": {
+                    "type": "number",
+                    "description": (
+                        "Target weight % post-rebalance. Range "
+                        "[0, 100]. Value outside this range "
+                        "returns invalid_target. Interpret as the "
+                        "FINAL target weight, not a multiplier."
+                    ),
+                    "minimum": 0,
+                    "maximum": 100,
+                },
+            },
+            "required": ["symbol", "target_allocation_pct"],
+        },
+    },
+    {
+        "name": "concentration_risk",
+        "description": (
+            "Flag positions above threshold_pct of total portfolio "
+            "value. Returns {threshold_pct, total, flagged: "
+            "[{security, asset_type, value, pct}]} sorted by pct "
+            "descending. Default threshold 10% (conventional "
+            "retail bar). Flagged=[] means the portfolio is "
+            "well-diversified at that threshold — agent should "
+            "say so explicitly rather than report silence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "threshold_pct": {
+                    "type": "number",
+                    "description": (
+                        "Flag positions whose value is >= this %. "
+                        "Range [0, 100]. Out-of-range silently "
+                        "clamps to the 10% default."
+                    ),
+                    "minimum": 0,
+                    "maximum": 100,
+                    "default": 10,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 TRANSACTION_TOOLS = [
