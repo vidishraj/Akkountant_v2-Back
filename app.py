@@ -595,9 +595,28 @@ class Akkountant(Flask):
             ('/files/list', 'GET', self.fileStorageEP.list_files),
             ('/files/<fileId>/download', 'GET', self.fileStorageEP.download_file),
             ('/files/<fileId>/view', 'GET', self.fileStorageEP.view_file),
+            # ak-kxdr (2026-11-22): DELETE /files/<fileId> is now a
+            # SOFT-delete (behavior change — rows get deleted_at set,
+            # disk file preserved for 30 days). Hard-delete requires
+            # the DELETE /files/trash/<fileId> endpoint with the
+            # confirm-id destructive gate.
             ('/files/<fileId>', 'DELETE', self.fileStorageEP.delete_file),
             ('/files/<fileId>/label', 'PUT', self.fileStorageEP.update_label),
             ('/files/<fileId>/move', 'PUT', self.fileStorageEP.move_file),
+            # ak-kxdr: trash surface — list / restore / hard-delete.
+            # Restore is user_id-scoped with the IDOR-leak 404-not-403
+            # shape from ak-05af. Hard-delete gates on confirm_id ==
+            # fileId (§23 #5 destructive-gate; operator must echo
+            # the id to prove intent).
+            ('/files/trash', 'GET', self.fileStorageEP.list_trash),
+            (
+                '/files/trash/<fileId>/restore', 'POST',
+                self.fileStorageEP.restore_file,
+            ),
+            (
+                '/files/trash/<fileId>', 'DELETE',
+                self.fileStorageEP.hard_delete_file,
+            ),
             ('/folders', 'POST', self.fileStorageEP.create_folder),
             ('/folders/<folderId>', 'PUT', self.fileStorageEP.rename_folder),
             ('/folders/<folderId>', 'DELETE', self.fileStorageEP.delete_folder),

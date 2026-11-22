@@ -36,6 +36,10 @@ from services.tasks.BackfillAMFIHistoricalNAVsTask import (
 # ak-v55t (2026-11-22): daily Kite instrument-master cache refresh.
 # Backs /kite/instruments/search (autocomplete).
 from services.tasks.InstrumentsCacheTask import InstrumentsCacheTask
+# ak-kxdr (2026-11-22): daily vault-trash cleanup. Hard-DROPs
+# user_files rows whose deleted_at is past the 30-day retention
+# window. See task docstring + bead ak-kxdr.
+from services.tasks.VaultTrashCleanupTask import VaultTrashCleanupTask
 from utils.logger import Logger
 
 
@@ -95,6 +99,11 @@ TASK_MAPPING = {
     # /kite/instruments/search autocomplete surface serves DB-backed
     # LIKE queries without hitting Kite on every keystroke.
     "InstrumentsCache": InstrumentsCacheTask,
+    # ak-kxdr (2026-11-22): daily vault-trash cleanup. 24h cadence.
+    # Hard-DROPs user_files rows past the 30-day soft-delete
+    # retention window. Zero blast radius on pre-ak-kxdr rows
+    # (deleted_at IS NULL → cleanup query selects zero).
+    "VaultTrashCleanup": VaultTrashCleanupTask,
 }
 
 
