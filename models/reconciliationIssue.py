@@ -86,6 +86,17 @@ class ReconciliationIssue(Base):
     #: Operator-set via future resolution UI. Nullable so a freshly-
     #: detected issue has no resolved_at until explicitly cleared.
     resolved_at = Column(DateTime, nullable=True)
+    #: ak-cipj: optional operator-supplied free-text note captured at
+    #: resolve time (e.g. "manually reconciled via statement reupload"
+    #: or "ignore — pre-production test trade"). Nullable so a freshly
+    #: detected issue has no note until explicitly resolved AND the
+    #: operator chose to annotate. Capped at 500 chars at the service
+    #: boundary; longer input is silently truncated rather than 400'd
+    #: — this is a convenience field, not a strict contract. Schema
+    #: addition requires an infra migration on existing databases
+    #: (coordinate with akkountant_infra); fresh installs pick it up
+    #: via Base.metadata.create_all.
+    resolution_note = Column(String(500), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

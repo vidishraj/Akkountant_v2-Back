@@ -1,8 +1,11 @@
 """
 Reconciliation service for statement-based transaction management,
-cross-instrument transfer linking, and zero-sum verification.
+cross-instrument transfer linking, zero-sum verification, and
+trade-level broker-statement reconciliation (ak-cipj Phase 1 read
+surface for the ak-zai2 write-only ReconcileTradesTask pipeline).
 """
 
+import json
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -10,11 +13,26 @@ from decimal import Decimal
 from sqlalchemy import and_, func
 from sqlalchemy.exc import IntegrityError
 
+from models.reconciliationIssue import ReconciliationIssue
 from models.transactions import Transactions
 from models.statementPeriods import StatementPeriod
 from models.transferLinks import TransferLink
 from services.Base_Service import BaseService
 from utils.logger import Logger
+
+
+# ak-cipj: operator-supplied resolution_note is capped at the column
+# width (500) at the service boundary. Longer input is truncated
+# rather than 400'd — the field is a convenience annotation, not a
+# strict contract. See ReconciliationIssue.resolution_note docstring.
+_RESOLUTION_NOTE_MAX_LEN = 500
+
+# ak-cipj: valid values for the ``status`` filter on list_trade_issues.
+# Checked at the controller boundary (raises 400 on unknown) AND at
+# the service boundary (silently falls back to 'open' for defense in
+# depth, so a caller that bypasses the controller still gets a safe
+# default rather than returning ALL issues to a buggy UI).
+_LIST_STATUS_VALID = frozenset({"open", "resolved", "all"})
 
 
 # Keywords that indicate inter-instrument transfers
@@ -543,4 +561,157 @@ class ReconciliationService(BaseService):
             "uncovered_banks": [],  # Would need opted banks list to compute
             "reconciliation_run": link_count > 0,
             "transfer_links_count": link_count,
+        }
+
+    # ── ak-cipj: Trade reconciliation read surface ────────────────────
+    #
+    # ReconcileTradesTask (ak-zai2) runs daily post-market-close and
+    # writes ``ReconciliationIssue`` rows for Kite-reported trades
+    # absent from the local ``TradeAssociation`` table. Prior to
+    # ak-cipj the pipeline was write-only (verified: zero controller
+    # endpoint, zero service read method, zero FE call — the Home
+    # "Reconciliation · Zerodha vs statement" card was a sample
+    # placeholder with no backing). These two methods close the loop:
+    # Overseer can see flagged issues and mark them resolved.
+    #
+    # Design notes:
+    #   * user_id-scoped on every query — single-user app today but
+    #     cheap to preserve the pattern so a future multi-user move
+    #     isn't a security defect.
+    #   * 404 on user mismatch (not 403) to avoid leaking issue-
+    #     existence to the wrong user. Identical shape to a nonexistent
+    #     id.
+    #   * resolve is idempotent — double-resolve returns 200 with
+    #     ``idempotent=True`` so the FE can distinguish a no-op repeat
+    #     from a fresh resolution for UI semantics. First-set
+    #     ``resolved_at`` is preserved on repeat to keep the audit
+    #     trail of WHEN the issue was first closed.
+    #   * discrepancy_detail is JSON-loaded at the service boundary
+    #     so the controller returns a structured object instead of a
+    #     json-string-inside-json; matches the on-wire shape of other
+    #     read endpoints. Falls back to the raw string if json.loads
+    #     fails (defensive against a hand-written row).
+
+    def list_trade_issues(self, user_id, status="open"):
+        """Return list of ReconciliationIssue rows for user, filtered
+        by status.
+
+        Args:
+            user_id: Firebase user id (required; all queries scoped).
+            status: one of ``'open'`` (resolved_at IS NULL — default),
+                ``'resolved'`` (resolved_at IS NOT NULL), ``'all'``.
+                Unknown values fall back to ``'open'`` defensively.
+
+        Returns:
+            list of dicts with id / kite_trade_id / discrepancy_type /
+            discrepancy_detail (parsed JSON or raw str) / detected_at
+            (ISO) / resolved_at (ISO or None) / resolution_note.
+            Sorted by detected_at descending so the review surface
+            shows newest discrepancies first.
+        """
+        if status not in _LIST_STATUS_VALID:
+            status = "open"
+        q = self.db.session.query(ReconciliationIssue).filter(
+            ReconciliationIssue.user_id == user_id,
+        )
+        if status == "open":
+            q = q.filter(ReconciliationIssue.resolved_at.is_(None))
+        elif status == "resolved":
+            q = q.filter(ReconciliationIssue.resolved_at.isnot(None))
+        # 'all' → no resolved_at filter
+        rows = q.order_by(ReconciliationIssue.detected_at.desc()).all()
+        return [self._serialize_trade_issue(r) for r in rows]
+
+    def resolve_trade_issue(self, user_id, issue_id, resolution_note=None):
+        """Mark a trade reconciliation issue resolved. Idempotent.
+
+        Args:
+            user_id: Firebase user id (required; scoped read-then-
+                mutate guards against cross-user mutation).
+            issue_id: integer primary key.
+            resolution_note: optional operator-supplied free-text;
+                truncated to 500 chars at the service boundary.
+
+        Returns:
+            Tuple ``(result_dict, http_status)``:
+              * ``(404, {"error": ...})`` — not found OR user mismatch
+                (same shape in both cases; see docstring rationale).
+              * ``(200, {id, resolved_at, resolution_note,
+                idempotent})`` — fresh resolve OR idempotent repeat.
+                ``idempotent=True`` when the row was already resolved
+                (first-set ``resolved_at`` preserved).
+        """
+        issue = self.db.session.query(ReconciliationIssue).filter(
+            ReconciliationIssue.id == issue_id,
+            ReconciliationIssue.user_id == user_id,
+        ).first()
+        if issue is None:
+            return {"error": "Issue not found"}, 404
+
+        if issue.resolved_at is not None:
+            # Idempotent: already resolved. Preserve original
+            # resolved_at + resolution_note (don't overwrite).
+            return {
+                "id": issue.id,
+                "resolved_at": issue.resolved_at.isoformat(),
+                "resolution_note": issue.resolution_note,
+                "idempotent": True,
+            }, 200
+
+        issue.resolved_at = datetime.utcnow()
+        if resolution_note:
+            # Truncate rather than reject — see module-level constant
+            # docstring for the convenience-over-strictness rationale.
+            issue.resolution_note = str(resolution_note)[
+                :_RESOLUTION_NOTE_MAX_LEN
+            ]
+        try:
+            self.db.session.commit()
+        except Exception as exc:
+            self.db.session.rollback()
+            self.logger.error(
+                f"Failed to resolve ReconciliationIssue id={issue_id} "
+                f"user_id={user_id}: {exc}"
+            )
+            return {"error": "Resolve failed"}, 500
+
+        return {
+            "id": issue.id,
+            "resolved_at": issue.resolved_at.isoformat(),
+            "resolution_note": issue.resolution_note,
+            "idempotent": False,
+        }, 200
+
+    @staticmethod
+    def _serialize_trade_issue(row):
+        """Shape a ReconciliationIssue row for the API response.
+
+        discrepancy_detail is stored as a JSON string (ReconcileTrades
+        Task uses json.dumps per models/reconciliationIssue.py L76-80).
+        Parse it here so the controller emits structured JSON rather
+        than a string-inside-string. Falls back to the raw string if
+        the row somehow carries non-JSON (defensive against hand-
+        inserted records or a format drift).
+        """
+        detail = row.discrepancy_detail
+        if detail:
+            try:
+                detail = json.loads(detail)
+            except (TypeError, ValueError):
+                # Raw string pass-through — logged at WARN by the
+                # caller if they care; here we just keep the field
+                # populated rather than nulling a legitimate value.
+                pass
+        return {
+            "id": row.id,
+            "kite_trade_id": row.kite_trade_id,
+            "discrepancy_type": row.discrepancy_type,
+            "discrepancy_detail": detail,
+            "detected_at": (
+                row.detected_at.isoformat() if row.detected_at else None
+            ),
+            "resolved_at": (
+                row.resolved_at.isoformat() if row.resolved_at else None
+            ),
+            "resolution_note": row.resolution_note,
         }

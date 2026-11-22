@@ -29,6 +29,7 @@ from controllers.jobEmailEP import JobEmailController
 from controllers.portfolioVisitorEP import PortfolioVisitorController
 from controllers.wealthDigestEP import WealthDigestController  # ak-5vg
 from controllers.userFilesEP import UserFilesController  # ak-9dz
+from controllers.reconciliationEP import ReconciliationController  # ak-cipj
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -239,6 +240,13 @@ class Akkountant(Flask):
         self.wealthDigestEP = WealthDigestController(self.wealthDigestService)
         self.portfolioVisitorService = PortfolioVisitorService()
         self.portfolioVisitorEP = PortfolioVisitorController(self.portfolioVisitorService)
+        # ak-cipj: trade-reconciliation read + resolve surface. Wires
+        # the existing ReconcileTradesTask (ak-zai2) write-only
+        # pipeline through to Overseer. Reuses the already-instantiated
+        # ReconciliationService above (L194); no duplicate instance.
+        self.reconciliationEP = ReconciliationController(
+            self.reconciliationService,
+        )
 
     def _setup_schedulers(self):
         """Set up background daemon threads (CronAgent, mail, snapshots).
@@ -340,6 +348,18 @@ class Akkountant(Flask):
             ('/zeroSumReport', 'POST', self.transactionEP.zeroSumReport),
             ('/statementPeriods', 'GET', self.transactionEP.statementPeriods),
             ('/reconciliationStatus', 'GET', self.transactionEP.reconciliationStatus),
+            # ak-cipj: trade-reconciliation read + resolve. Surfaces
+            # ReconciliationIssue rows (written by ReconcileTradesTask
+            # ak-zai2) to the Overseer so the Home-card badge + review
+            # page have real data. List + resolve are user_id-scoped
+            # via g.firebase_id; resolve is idempotent (double-resolve
+            # = noop 200 with idempotent=True, first-set resolved_at
+            # preserved).
+            ('/reconciliation/issues', 'GET', self.reconciliationEP.listIssues),
+            (
+                '/reconciliation/issues/<issue_id>/resolve', 'POST',
+                self.reconciliationEP.resolveIssue,
+            ),
             # ak-ex2: post-fallback non-savings row stripper. Called by
             # infra during the ak-32o HDFC re-parse cycle for each file
             # tagged reconciliation_fallback=True by ak-ifc-v3.
