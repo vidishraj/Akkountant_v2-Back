@@ -390,6 +390,53 @@ class InvestmentController:
             return jsonify({"error": "Failed to fetch portfolio history"}), 500
 
     @Logger.standardLogger
+    def fetchStockCandles(self, security_code):
+        """ak-ue7l (2026-11-22): per-stock OHLC candles from the
+        local ``stockHistoricalCandles`` cache (populated daily by
+        BackfillHistoricalCandlesTask / ak-4o41).
+
+        Serves from the local cache — NO Kite broker call per
+        request. That's the whole point of ak-4o41: a chart load
+        that re-hit Kite would burn the 3 req/s historical rate
+        limit and 401 on the daily 6 AM IST token-expiry.
+
+        Path param:
+          * ``security_code``: trading symbol (e.g. 'RELIANCE').
+
+        Query param:
+          * ``range``: window string — ``'7d'`` / ``'30d'`` /
+            ``'90d'`` / ``'1y'`` / ``'365d'`` etc. Default
+            ``'90d'``. Clamped to [1, 730] days by the service.
+
+        Response:
+          ``{"candles": [{date, open, high, low, close, volume}, ...]}``
+          sorted by date ascending. Empty list on unresolved
+          symbol or no candles in the window (soft-fail; FE
+          renders empty-state chart rather than crashing).
+
+        READ-ONLY per bead — no destructive paths.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        range_param = request.args.get('range')
+        try:
+            candles = self.InvestmentService.fetchStockCandles(
+                security_code, range_str=range_param,
+            )
+            return jsonify({
+                "candles": candles,
+                "security_code": security_code,
+            }), 200
+        except Exception as e:
+            self.logger.error(
+                f"Error fetching stock candles for "
+                f"{security_code!r}: {str(e)}"
+            )
+            return jsonify({"error": "Failed to fetch candles"}), 500
+
+    @Logger.standardLogger
     def fetchInvestmentSnapshots(self):
         """Fetch historical investment snapshots for growth charts."""
         user_id = g.get('firebase_id')

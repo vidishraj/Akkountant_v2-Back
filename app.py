@@ -395,6 +395,16 @@ class Akkountant(Flask):
             # portfolio trend for WealthDigest PortfolioTrendChart,
             # aggregated from Kite historical-candle cache.
             ('/investment-snapshot/history', 'GET', self.investmentEP.fetchPortfolioHistory),
+            # ak-ue7l (2026-11-22): per-stock OHLC candles for the
+            # FE candlestick / line chart on MSNDetail (Stock view).
+            # Serves from the local stockHistoricalCandles cache
+            # populated daily by BackfillHistoricalCandlesTask
+            # (ak-4o41) — ZERO Kite calls per chart render.
+            # READ-ONLY.
+            (
+                '/investments/stock/<security_code>/candles', 'GET',
+                self.investmentEP.fetchStockCandles,
+            ),
             ('/kite/login-url', 'GET', self.investmentEP.getKiteLoginUrl),
             ('/kite/status', 'GET', self.investmentEP.fetchKiteTokenStatus),
             ('/kite/generate-session', 'POST', self.investmentEP.generateKiteSession),

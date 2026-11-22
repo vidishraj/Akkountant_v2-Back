@@ -829,6 +829,132 @@ class InvestmentService(BaseService):
         from services.portfolio_history_aggregator import aggregate_portfolio_history
         return aggregate_portfolio_history(token_qty, candles)
 
+    # ak-ue7l (2026-11-22): per-stock OHLC candle fetch for charting.
+    #
+    # Serves ``stockHistoricalCandles`` directly (populated by the
+    # daily BackfillHistoricalCandlesTask from ak-4o41). Zero Kite
+    # calls per FE chart render — that's ak-4o41's whole point. The
+    # alternative (wrap live KiteService.get_historical_data per
+    # request) would burn Kite's 3 req/s + would 401 on the daily
+    # 6 AM IST token-expiry window for every chart load.
+    #
+    # Range values accepted: integer-N + 'd' / 'y' suffix
+    # (e.g. '7d' / '30d' / '90d' / '1y' / '365d'). Default '90d'.
+    # Clamped to [_CANDLES_MIN_DAYS, _CANDLES_MAX_DAYS] after parse.
+
+    #: Candle-window default + bounds. Cold-start populates 365 days
+    #: via BackfillHistoricalCandlesTask so the cap matches that
+    #: ceiling with margin; the floor prevents an empty-range query
+    #: returning nothing when the FE sends '0d' by accident.
+    _CANDLES_MIN_DAYS = 1
+    _CANDLES_MAX_DAYS = 730  # 2× cold-start cap, headroom for future
+    _CANDLES_DEFAULT_DAYS = 90
+
+    def fetchStockCandles(self, security_code, range_str=None):
+        """Return OHLC+volume candles for a stock from the local
+        ``stockHistoricalCandles`` cache.
+
+        Args:
+          security_code: the stock's trading symbol (matches
+            ``PurchasedSecurities.securityCode`` / Kite's
+            ``tradingsymbol``). Resolved to ``instrument_token``
+            via ``JsonDownloadService.getStockList()`` — the same
+            symbol-to-token map ``BackfillHistoricalCandlesTask``
+            uses to populate the cache.
+          range_str: window string like ``'7d'`` / ``'30d'`` /
+            ``'90d'`` / ``'1y'``. Parsed via
+            ``_parse_range_days``. None / malformed → default 90d.
+
+        Returns:
+          ``[{date, open, high, low, close, volume}, ...]``
+          sorted by date ascending. Empty list on unresolved
+          symbol or no cached candles in the window (soft-fail
+          so a FE chart renders an empty state rather than
+          crashing).
+        """
+        from datetime import date, timedelta
+        from models.stockHistoricalCandle import StockHistoricalCandle
+
+        window = self._parse_range_days(range_str)
+
+        # Resolve security_code → instrument_token via the same
+        # SetKiteStockDetails instrument dump BackfillHistoricalCandlesTask
+        # uses. A missing dump returns [] (soft-fail; FE renders
+        # empty chart rather than 500).
+        try:
+            stock_list = self.StockService.JsonDownloadService.getStockList()
+        except (FileNotFoundError, OSError):
+            self.logger.warning(
+                f"fetchStockCandles: instrument dump missing — "
+                f"cannot resolve {security_code!r}; returning []"
+            )
+            return []
+
+        instrument_token = None
+        for row in stock_list.get("data", []):
+            if row.get("stockCode") == security_code:
+                token = row.get("instrument_token")
+                if token is not None:
+                    instrument_token = int(token)
+                    break
+        if instrument_token is None:
+            self.logger.warning(
+                f"fetchStockCandles: no instrument_token for "
+                f"{security_code!r} — returning []"
+            )
+            return []
+
+        from_date = date.today() - timedelta(days=window)
+        rows = (
+            self.db.session.query(StockHistoricalCandle)
+            .filter(
+                StockHistoricalCandle.instrument_token == instrument_token,
+                StockHistoricalCandle.trade_date >= from_date,
+            )
+            .order_by(StockHistoricalCandle.trade_date.asc())
+            .all()
+        )
+        return [
+            {
+                "date": r.trade_date.strftime("%Y-%m-%d"),
+                "open": float(r.open),
+                "high": float(r.high),
+                "low": float(r.low),
+                "close": float(r.close),
+                "volume": int(r.volume),
+            }
+            for r in rows
+        ]
+
+    def _parse_range_days(self, range_str):
+        """Parse a window string into an integer day count.
+
+        Accepts:
+          * ``'7d'`` / ``'90d'`` / ``'365d'`` — days verbatim.
+          * ``'1y'`` / ``'2y'`` — multiplied by 365.
+          * None / malformed / unknown-suffix — default to
+            ``_CANDLES_DEFAULT_DAYS``.
+
+        Clamped to ``[_CANDLES_MIN_DAYS, _CANDLES_MAX_DAYS]``.
+        """
+        if not range_str or not isinstance(range_str, str):
+            return self._CANDLES_DEFAULT_DAYS
+        s = range_str.strip().lower()
+        if not s:
+            return self._CANDLES_DEFAULT_DAYS
+        # Split numeric prefix + suffix.
+        import re
+        m = re.fullmatch(r"(\d+)([dy])", s)
+        if not m:
+            return self._CANDLES_DEFAULT_DAYS
+        n = int(m.group(1))
+        unit = m.group(2)
+        days = n if unit == "d" else n * 365
+        return max(
+            self._CANDLES_MIN_DAYS,
+            min(self._CANDLES_MAX_DAYS, days),
+        )
+
     #: ak-h36s (2026-11-12): belt-and-braces normalization for the
     #: investment_type query param. Primary guard is the JSON-schema
     #: enum on the ``fetch_investment_snapshots`` tool (agent_tools.py),
