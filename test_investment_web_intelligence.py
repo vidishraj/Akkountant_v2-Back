@@ -738,24 +738,56 @@ def test_web_intel_prompt_treats_scraped_content_as_untrusted_data():
 
 
 def test_web_intel_prompt_forbids_PII_in_web_queries():
-    """Sentence 2: never put personal financial data into a
-    WebSearch query or WebFetch URL."""
+    """Sentence 2: never put PERSONAL identifiers into a WebSearch
+    query or WebFetch URL.
+
+    ak-z7lk (2026-11-22): reworded from the original ak-pb4n
+    'personal financial data' framing to the ak-p8ix MINOR-2
+    WealthDigest vocabulary ('PERSONAL identifiers'), because the
+    old wording listed 'scheme codes' in BOTH the forbidden list
+    AND the permitted list — contradictory, and specifically broke
+    the fetch_fund_factsheet cadence that ak-c2gl's new Analysis
+    Guide + catalogue depend on. The new wording forbids only
+    personal identifiers (PAN / Aadhaar / account numbers /
+    Firebase user id / email / receipt content / ₹ amounts /
+    purchase prices) and explicitly permits public market
+    identifiers (tickers / AMFI scheme codes / scheme names /
+    macro terms / company names). See test_investment_prompt_
+    refresh.py::TestWebIntelligencePiiWordingConsistency for the
+    tighter z7lk guards.
+    """
     src = _read_source("services/agent_tools.py")
-    # Distinguishing phrases. The exact wording per reviewer.
-    assert "personal financial data" in src, (
-        "Web Intelligence prompt must forbid personal-financial-data "
-        "in web queries — ak-pb4n MAJOR sentence 2 missing"
+    # Distinguishing phrases. ak-z7lk reworded wording:
+    # "Never send the user's PERSONAL identifiers (...) into a
+    # WebSearch query or WebFetch URL."
+    assert "PERSONAL identifiers" in src, (
+        "Web Intelligence prompt must forbid PERSONAL identifiers "
+        "in web queries — ak-z7lk wording missing (post-rework of "
+        "ak-pb4n MAJOR sentence 2)."
     )
     assert "WebSearch query" in src or "WebFetch URL" in src, (
         "Web Intelligence prompt must name the specific vectors "
         "(WebSearch query / WebFetch URL) — ak-pb4n MAJOR sentence 2 "
         "missing the actionable half"
     )
-    # And the public-identifiers-only positive framing.
-    assert "public market identifiers" in src or "public identifier" in src, (
+    # The public-identifiers-only positive framing (ak-p8ix MINOR-2
+    # affordance mirrored into INVESTMENT_SYSTEM_PROMPT by ak-z7lk).
+    assert "Public market identifiers are allowed" in src, (
         "Web Intelligence prompt must state what IS OK to send "
-        "(public market identifiers) — ak-pb4n MAJOR sentence 2 "
-        "missing the positive framing"
+        "('Public market identifiers are allowed') — ak-z7lk / "
+        "ak-p8ix MINOR-2 positive-framing clause missing."
+    )
+    # ak-z7lk REGRESSION GUARD: the old 'scheme codes'-forbidden
+    # wording must NOT come back. Grep for the specific pre-fix
+    # phrase; if it reappears it's a merge/rewrite accident.
+    assert (
+        "holdings,\n   amounts, scheme codes" not in src
+        and "scheme codes, account numbers" not in src
+    ), (
+        "ak-z7lk REGRESSION: the pre-fix wording that listed "
+        "'scheme codes' in the FORBIDDEN list is back. Scheme "
+        "codes are public AMFI identifiers and must stay on the "
+        "permitted side only (mirror of ak-p8ix MINOR-2)."
     )
 
 

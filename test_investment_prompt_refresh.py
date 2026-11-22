@@ -369,5 +369,118 @@ class TestPromptHousekeepingNotes(unittest.TestCase):
         )
 
 
+# ── (5) ak-z7lk PII-wording consistency guard ────────────────────────
+
+
+class TestWebIntelligencePiiWordingConsistency(unittest.TestCase):
+    """ak-z7lk follow-up on ak-c2gl reviewer MINOR: the Web
+    Intelligence rule 2 (preserved from ak-pb4n) previously listed
+    'scheme codes' in BOTH the forbidden list AND the permitted
+    list, contradicting itself. Fix mirrors the ak-p8ix MINOR-2
+    WealthDigest rewording: forbid only personal identifiers (PAN /
+    Aadhaar / account numbers / Firebase user id / email / receipt
+    content / ₹ amounts / purchase prices); explicitly permit public
+    market identifiers (tickers / AMFI scheme codes / scheme names
+    / macro terms / company names).
+
+    These tests pin down that resolution so a future rewrite of the
+    Web Intelligence section doesn't silently regress — especially
+    important because ak-c2gl's new Analysis Guide + decision tree +
+    fetch_fund_factsheet catalogue entry all actively depend on the
+    permitted reading.
+    """
+
+    def _web_rules_section(self):
+        """Extract the Web Intelligence § hard rules block so the
+        assertions below only look at the rule text, not the catalog
+        entries or the Analysis Guide which naturally mention
+        'scheme codes' as a permitted use."""
+        prompt = INVESTMENT_SYSTEM_PROMPT
+        # Anchor on the ak-pb4n section header; grab up to the next
+        # major section.
+        start = prompt.find("### Hard rules for web access")
+        if start < 0:
+            return ""
+        end = prompt.find("###", start + 3)
+        return prompt[start:end] if end > start else prompt[start:]
+
+    def test_web_rule_2_does_not_forbid_scheme_codes(self):
+        """ak-z7lk: 'scheme codes' MUST NOT appear in the forbidden
+        list — they're public AMFI identifiers and the mandated
+        fetch_fund_factsheet cadence needs them. The ak-c2gl
+        reviewer MINOR flagged the contradiction inside this exact
+        rule."""
+        section = self._web_rules_section()
+        self.assertTrue(section, (
+            "Web Intelligence hard-rules section not found — "
+            "has the heading been renamed?"
+        ))
+        # The forbidden clause anchors on "Never send" (ak-p8ix
+        # MINOR-2 wording) or "Never put" (pre-rework wording).
+        # Scan a window AROUND the forbidden clause.
+        import re
+        forbid_match = re.search(
+            r"(?:Never\s+(?:send|put).*?PERSONAL.*?URL\.)",
+            section, re.DOTALL | re.IGNORECASE,
+        )
+        self.assertIsNotNone(forbid_match, (
+            "ak-z7lk: Web rule 2 must still carry a 'Never send ...'"
+            " forbidden clause with the PERSONAL-identifiers wording"
+            " mirroring ak-p8ix MINOR-2."
+        ))
+        forbid_clause = forbid_match.group(0).lower()
+        self.assertNotIn(
+            "scheme code", forbid_clause,
+            "ak-z7lk REGRESSION: 'scheme codes' is back in the "
+            "forbidden list of Web Intelligence rule 2. They're "
+            "public AMFI identifiers — per ak-p8ix MINOR-2 "
+            "WealthDigest wording, only PERSONAL identifiers belong "
+            "in the forbidden list.",
+        )
+
+    def test_web_rule_2_explicitly_permits_scheme_codes(self):
+        """Mirror of the WealthDigest 'Public market identifiers are
+        allowed' affordance. Scheme codes must be named as a
+        permitted canonical-query token."""
+        section = self._web_rules_section()
+        self.assertIn(
+            "Public market identifiers are allowed", section,
+            "ak-z7lk: Web rule 2 must carry the 'Public market "
+            "identifiers are allowed' affordance verbatim (parity "
+            "with ak-p8ix MINOR-2 WealthDigest wording).",
+        )
+        # The permitted-list exemplars must name AMFI scheme codes
+        # explicitly — the 120503 ticker is the canonical example
+        # fetch_fund_factsheet uses.
+        self.assertIn(
+            "AMFI scheme codes", section,
+            "ak-z7lk: permitted list must name 'AMFI scheme codes' "
+            "explicitly to unblock fetch_fund_factsheet cadence.",
+        )
+
+    def test_web_rule_2_lists_the_personal_identifier_exemplars(self):
+        """The forbidden list must enumerate PAN / Aadhaar / account
+        numbers / Firebase user id / email / receipt content / ₹
+        amounts / purchase prices — the full ak-p8ix MINOR-2
+        vocabulary so the model has concrete anchors for what IS
+        forbidden."""
+        # Normalize whitespace (the prose is line-wrapped so a
+        # multi-word marker like "receipt content" can straddle a
+        # newline + indent — flatten before matching).
+        import re
+        section = re.sub(r"\s+", " ", self._web_rules_section())
+        for marker in (
+            "PAN", "Aadhaar", "account numbers", "Firebase user id",
+            "email addresses", "receipt content",
+            "portfolio amounts in ₹", "individual purchase prices",
+        ):
+            self.assertIn(
+                marker, section,
+                f"ak-z7lk: forbidden-list exemplar {marker!r} missing "
+                f"from Web Intelligence rule 2. The ak-p8ix MINOR-2 "
+                f"WealthDigest vocabulary must be mirrored verbatim.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
