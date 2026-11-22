@@ -1239,6 +1239,36 @@ class InvestmentService(BaseService):
         """
         return self.StockService.kite_service.get_orders(userId)
 
+    # ───── ak-l8a7 (2026-11-22): per-order drill-down passthroughs ─────
+    #
+    # Thin pass-throughs over KiteService.get_order_history /
+    # get_order_trades, wired to the Category B #9 FE order-history
+    # drill-down modal. Both READ-ONLY. §23 #2 CONSUME: Kite's
+    # native per-order shapes flow through the FE unchanged.
+
+    def fetchKiteOrderHistory(self, userId, order_id):
+        """ak-l8a7: status-transition timeline for a single order.
+
+        Returns Kite's native per-order history list (one entry
+        per state transition: placed → open → trigger_pending →
+        complete / cancelled / rejected). FE renders this as the
+        drill-down timeline panel.
+        """
+        return self.StockService.kite_service.get_order_history(
+            userId, order_id,
+        )
+
+    def fetchKiteOrderTrades(self, userId, order_id):
+        """ak-l8a7: per-fill trade breakdown for a single order.
+
+        Returns Kite's native trade-list shape, scoped to this
+        order_id. Useful for sliced fills — FE shows the fills
+        breakdown panel of the drill-down modal.
+        """
+        return self.StockService.kite_service.get_order_trades(
+            userId, order_id,
+        )
+
     #: ak-zai2: in-memory margins cache. Per-user, 5-minute TTL.
     #: Margins don't change sub-minute; batching this across the
     #: FE's periodic polling + agent queries saves one HTTP round-

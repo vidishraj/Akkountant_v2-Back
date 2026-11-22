@@ -654,6 +654,70 @@ class InvestmentController:
             self.logger.error(f"Error fetching Kite orders: {str(e)}")
             return jsonify({"error": "Failed to fetch orders"}), 500
 
+    # ───── ak-l8a7 (2026-11-22): per-order drill-down endpoints ─────
+    #
+    # Two thin READ-ONLY handlers wrapping KiteService.get_order_
+    # history + get_order_trades. Backs the Category B #9 FE
+    # drill-down modal from the Pending Orders surface — clicking
+    # an order row opens the modal with status-transition timeline
+    # + per-fill breakdown panels. Order_id is a Kite-issued
+    # identifier (string) supplied as a path parameter; same
+    # defensive validation as ak-dx98's alert_uuid handler:
+    # refuse empty / obviously-malformed input before hitting
+    # Kite so a missing param can't surface as a confusing
+    # upstream error. §23 #2 CONSUME: Kite's native shapes flow
+    # through the FE unchanged.
+
+    @Logger.standardLogger
+    def fetchKiteOrderHistory(self, order_id):
+        """ak-l8a7: GET /kite/orders/<order_id>/history — status-
+        transition timeline for a single order.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        if not order_id or not isinstance(order_id, str):
+            return jsonify({"error": "order_id is required"}), 400
+
+        try:
+            history = self.InvestmentService.fetchKiteOrderHistory(
+                user_id, order_id,
+            )
+            return jsonify({"history": history}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(
+                f"Error fetching Kite order history "
+                f"order_id={order_id}: {str(e)}"
+            )
+            return jsonify({"error": "Failed to fetch order history"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteOrderTrades(self, order_id):
+        """ak-l8a7: GET /kite/orders/<order_id>/trades — per-fill
+        trade breakdown for a single order.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+        if not order_id or not isinstance(order_id, str):
+            return jsonify({"error": "order_id is required"}), 400
+
+        try:
+            trades = self.InvestmentService.fetchKiteOrderTrades(
+                user_id, order_id,
+            )
+            return jsonify({"trades": trades}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(
+                f"Error fetching Kite order trades "
+                f"order_id={order_id}: {str(e)}"
+            )
+            return jsonify({"error": "Failed to fetch order trades"}), 500
+
     # ───── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces ─────
 
     @Logger.standardLogger

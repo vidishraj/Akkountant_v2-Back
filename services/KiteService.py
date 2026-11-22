@@ -534,6 +534,60 @@ class KiteService(BaseService):
         self.logger.info(f"Fetched {len(orders)} orders from Kite for user {user_id}")
         return orders
 
+    # ak-l8a7: per-order drill-down wrappers.
+    #
+    # Kite's ``order_history(order_id)`` returns the full status-
+    # transition timeline for a single order (every placed → open →
+    # trigger_pending → complete state change), and
+    # ``order_trades(order_id)`` returns the per-fill breakdown (one
+    # entry per execution; relevant when a large order is sliced
+    # across multiple fills). Both are READ-ONLY per-user wrappers.
+    # KiteTokenExpired / KiteAuthError surface via ``_call`` the same
+    # way every other wrapper does.
+    def get_order_history(self, user_id, order_id):
+        """Fetch status-transition history for a single order.
+
+        Returns Kite's native shape — a list of dicts, one per
+        status transition (``placed`` → ``open`` → ... →
+        ``complete`` / ``cancelled`` / ``rejected``), each
+        carrying order metadata + timestamp + status at that
+        instant.
+
+        ``order_id`` is the Kite-issued identifier returned in
+        ``get_orders``. We don't normalize it here (string vs int
+        depends on Kite's SDK version); callers pass through
+        whatever came off the orders list.
+        """
+        history = self._call(
+            user_id,
+            f"order_history ({order_id})",
+            lambda k: k.order_history(order_id=order_id),
+        )
+        self.logger.info(
+            f"Fetched {len(history)} order_history entries for "
+            f"order_id={order_id} user={user_id}"
+        )
+        return history
+
+    def get_order_trades(self, user_id, order_id):
+        """Fetch per-fill trade breakdown for a single order.
+
+        Useful for sliced orders — a 100-share order filled as
+        40+35+25 shows up as three separate trade rows here.
+        Returns Kite's native shape (list of trade dicts; same
+        shape ``get_trades`` returns at the top level).
+        """
+        trades = self._call(
+            user_id,
+            f"order_trades ({order_id})",
+            lambda k: k.order_trades(order_id=order_id),
+        )
+        self.logger.info(
+            f"Fetched {len(trades)} order_trades entries for "
+            f"order_id={order_id} user={user_id}"
+        )
+        return trades
+
     def get_margins(self, user_id):
         """Fetch user's fund/margin details from Kite"""
         margins = self._call(user_id, "margins", lambda k: k.margins())

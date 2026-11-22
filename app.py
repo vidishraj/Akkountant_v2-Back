@@ -452,6 +452,21 @@ class Akkountant(Flask):
             # order placed today across all statuses (OPEN / COMPLETE
             # / CANCELLED / REJECTED / TRIGGER_PENDING). READ-ONLY.
             ('/kite/orders', 'GET', self.investmentEP.fetchKiteOrders),
+            # ak-l8a7 (2026-11-22): per-order drill-down endpoints —
+            # Kite's order_history + order_trades wrapped as READ-ONLY
+            # endpoints behind the Category B #9 FE drill-down modal.
+            # /history returns the status-transition timeline for a
+            # single order; /trades returns the per-fill breakdown
+            # (useful when a sliced order fills across multiple
+            # executions).
+            (
+                '/kite/orders/<order_id>/history', 'GET',
+                self.investmentEP.fetchKiteOrderHistory,
+            ),
+            (
+                '/kite/orders/<order_id>/trades', 'GET',
+                self.investmentEP.fetchKiteOrderTrades,
+            ),
             # ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces —
             # active GTTs with LTP-distance overlay + price alerts +
             # per-alert trigger history drill-down.
