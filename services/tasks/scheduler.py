@@ -94,6 +94,35 @@ class TaskScheduler:
         self.threads_initialized = False
         self.thread_locks = threading.Lock()
 
+        # ak-l0u (2026-11-22): defensive guard against the exact
+        # ak-pib regression — a bare ``Flask(__name__)`` passed in
+        # place of the fully-configured Akkountant app crashes both
+        # scheduler threads at init with ``AttributeError: 'Flask'
+        # object has no attribute 'db'``. systemctl misleadingly
+        # reports active(running) because Flask :5000 stays up, so
+        # the fleet-down is silent until operator looks at the
+        # scheduler journal. This guard turns the exact class of
+        # mistake into an immediate actionable error with a
+        # greppable message pointing at the fix.
+        #
+        # Allows ``flask_app=None`` through (test harnesses,
+        # scheduler-less composition paths) — the downstream
+        # ``_run_*`` threads enter ``self.flask_app.app_context()``
+        # which itself fails loudly on None if anyone tries to
+        # ``start_scheduler()`` without setting flask_app first.
+        if flask_app is not None and not hasattr(flask_app, "db"):
+            raise RuntimeError(
+                "TaskScheduler received a Flask instance without "
+                ".db attached. Pass the fully-configured Akkountant "
+                "app (`from app import app`, which runs "
+                "_setup_database and attaches `.db = SQLAlchemy(...)`), "
+                "NOT a bare `Flask(__name__)`. See bead ak-pib for "
+                "the P0 fleet-down regression this guard prevents "
+                "(silent systemctl active(running) + both scheduler "
+                "threads dead at init). See bead ak-l0u for the "
+                "guard itself."
+            )
+
     def _update_overdue_jobs(self):
         session = self.Session()
         try:
@@ -233,6 +262,25 @@ class TaskScheduler:
 
     def _run_overdue_scheduler(self):
         with self.flask_app.app_context():
+            # ak-l0u (2026-11-22) belt-and-braces: assert the
+            # flask_app.db invariant at the thread boundary (ONCE
+            # per thread init, outside the while loop — zero
+            # per-tick cost). The __init__ guard catches the
+            # bare-Flask ak-pib regression at construction; this
+            # catches a post-init slip (e.g., someone clears
+            # flask_app.db between construction and thread start).
+            # The downstream g.db assignment would raise
+            # AttributeError too, but at that point the error is
+            # downstream of start_scheduler() and the trace is
+            # less actionable. Loud-at-boundary wins.
+            if not hasattr(self.flask_app, "db") or self.flask_app.db is None:
+                raise RuntimeError(
+                    "scheduler._run_overdue_scheduler: flask_app.db "
+                    "missing at thread entry. Invariant slipped "
+                    "post-__init__ — someone cleared or reassigned "
+                    "flask_app.db between TaskScheduler construction "
+                    "and start_scheduler(). See bead ak-l0u."
+                )
             # ak-ojd Path B defense-in-depth: set g.db explicitly at
             # the task-invocation boundary (mirrors reprocess_*.py
             # pattern). Redundant with the Base_Service.db
@@ -267,6 +315,17 @@ class TaskScheduler:
     def _run_job_processor(self):
         from utils.DateTimeUtil import is_within_allowed_window, seconds_until_allowed_window
         with self.flask_app.app_context():
+            # ak-l0u belt-and-braces: symmetric with
+            # _run_overdue_scheduler. See docstring there for the
+            # post-__init__-slip rationale.
+            if not hasattr(self.flask_app, "db") or self.flask_app.db is None:
+                raise RuntimeError(
+                    "scheduler._run_job_processor: flask_app.db "
+                    "missing at thread entry. Invariant slipped "
+                    "post-__init__ — someone cleared or reassigned "
+                    "flask_app.db between TaskScheduler construction "
+                    "and start_scheduler(). See bead ak-l0u."
+                )
             # ak-ojd Path B defense-in-depth: see _run_overdue_scheduler
             # comment above.
             from flask import g
