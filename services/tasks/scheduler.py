@@ -255,6 +255,26 @@ class TaskScheduler:
                 self.logger.info("Scheduler threads are already running.")
                 return
 
+            # ak-99gt (2026-11-22): one-shot runtime 301-WARN probe
+            # against utils.nse_patch._BASE_URL. Catches a FUTURE
+            # NSE host move at FIRST scheduler restart (vs the
+            # ak-3hkb CI drift guard which catches a stale-literal
+            # regression). Fail-soft by contract — any exception
+            # (requests missing / DNS / timeout) is caught inside
+            # probe() + logged at INFO; scheduler boot proceeds
+            # regardless.
+            from utils.nse_health import probe as _nse_health_probe
+            try:
+                _nse_health_probe(logger=self.logger)
+            except Exception as exc:
+                # Belt-and-braces — probe() swallows its own errors
+                # but if its import-time wiring ever breaks we must
+                # not block the scheduler. Diagnostic log only.
+                self.logger.info(
+                    f"scheduler: nse_health.probe raised through "
+                    f"its fail-soft; ignoring ({type(exc).__name__}: {exc})"
+                )
+
             self.logger.info("Starting scheduler threads...")
             threading.Thread(target=self._run_overdue_scheduler, daemon=True).start()
             threading.Thread(target=self._run_job_processor, daemon=True).start()
