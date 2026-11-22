@@ -1,6 +1,13 @@
 from services.jobEmailService import JobEmailService
 from utils.logger import Logger
-from flask import request, jsonify
+from flask import request, jsonify, g
+
+# ak-c8l (2026-11-22): every handler in this controller now reads
+# the verified uid from ``g.firebase_id`` (set by
+# ``app.before_request`` via ``firebase_admin.verify_id_token``).
+# Reading the raw ``X-Firebase-ID`` header directly here would
+# bypass JWT verification and reinstate the IDOR surface closed
+# by ak-c8l.
 
 
 class JobEmailController:
@@ -14,7 +21,7 @@ class JobEmailController:
         """Endpoint to scan emails for job applications"""
         try:
             data = request.get_json(force=True) if request.is_json else {}
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             # Handle date range from frontend - your format: {date_from: "2025-11-22", date_to: "2025-11-23"}
             date_from = data.get('date_from')
@@ -46,7 +53,7 @@ class JobEmailController:
     def get_job_emails(self):
         """Endpoint to get job emails with pagination and filtering"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
@@ -86,7 +93,7 @@ class JobEmailController:
     def get_job_email_details(self, email_id):
         """Endpoint to get specific job email details"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
@@ -109,7 +116,7 @@ class JobEmailController:
     def update_email_details(self, email_id):
         """Endpoint to update job email details"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             data = request.get_json(force=True)
             
             if not user_id:
@@ -133,7 +140,7 @@ class JobEmailController:
     def mark_email_as_read(self, email_id):
         """Endpoint to mark email as read"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
@@ -153,7 +160,7 @@ class JobEmailController:
     def delete_email(self, email_id):
         """Endpoint to delete job email"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
@@ -173,7 +180,7 @@ class JobEmailController:
     def get_email_stats(self):
         """Endpoint to get email statistics"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
@@ -193,7 +200,7 @@ class JobEmailController:
     def get_gmail_status(self):
         """Endpoint to get Gmail integration status"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400
@@ -213,7 +220,7 @@ class JobEmailController:
     def refresh_gmail_token(self):
         """Endpoint to refresh Gmail token"""
         try:
-            user_id = request.headers.get('X-Firebase-ID')
+            user_id = g.get('firebase_id')
             
             if not user_id:
                 return jsonify({"error": "X-Firebase-ID header required"}), 400

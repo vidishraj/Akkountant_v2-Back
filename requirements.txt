@@ -26,3 +26,9 @@ PyPDF2
 claude_agent_sdk
 Pillow
 anyio
+# ak-c8l (2026-11-22): Firebase JWT verification in before_request
+# middleware. Replaces raw X-Firebase-ID header trust (IDOR surface)
+# with firebase_admin.auth.verify_id_token(). Pinned ~=6.5 — current
+# stable at bead ship; python-jwt crypto path unchanged across minor
+# bumps.
+firebase-admin~=6.5.0

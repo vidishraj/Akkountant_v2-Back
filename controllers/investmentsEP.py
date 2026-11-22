@@ -336,9 +336,12 @@ class InvestmentController:
 
     @Logger.standardLogger
     def setJobs(self):
-        # Get user ID from context
+        # Get user ID from context.
+        # ak-c8l: verified uid from g — NOT the raw header (that
+        # read bypassed JWT verify and reinstated the IDOR
+        # surface this bead closes).
         jobId = request.args.get('jobId')
-        userId = request.headers.get("X-Firebase-ID")
+        userId = g.get("firebase_id")
         if jobId is None:
             return jsonify({"Error": "JobID is missing"}), 406
         return self.InvestmentService.setJobsTable(jobId, userId)

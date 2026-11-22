@@ -103,7 +103,11 @@ class TransactionController:
     @Logger.standardLogger
     def triggerEmailCheck(self):
         """Trigger async email scan — returns scan_id immediately."""
-        userId = request.headers.get("X-Firebase-ID")
+        # ak-c8l: read verified uid from g — before_request sets it
+        # via firebase_admin.verify_id_token. Reading the raw
+        # X-Firebase-ID header here would bypass JWT verification
+        # and reinstate the IDOR surface.
+        userId = g.get("firebase_id")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         processing_mode = request.args.get('processing_mode', 'image')
@@ -271,7 +275,11 @@ class TransactionController:
 
         # v2 MINOR 2: scoping. If the scan belongs to a different
         # user, return 404 to avoid leaking existence.
-        expected_user_id = g.get('firebase_id') or request.headers.get("X-Firebase-ID")
+        # ak-c8l (2026-11-22): dropped the raw-header fallback —
+        # before_request now sets g.firebase_id to the VERIFIED uid
+        # on every authed request, so the fallback would just
+        # reinstate the IDOR surface we're closing.
+        expected_user_id = g.get('firebase_id')
         if not scope_scan_to_user(progress, expected_user_id):
             self.logger.warning(
                 f"ak-uvy v2 scoping: scan_id={scan_id!r} probed by "
@@ -308,7 +316,8 @@ class TransactionController:
     @Logger.standardLogger
     def triggerStatementCheck(self):
         """Legacy endpoint — now redirects to unified mail processing pipeline."""
-        userId = request.headers.get("X-Firebase-ID")
+        # ak-c8l: verified uid from g, not the raw header.
+        userId = g.get("firebase_id")
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         processing_mode = request.args.get('processing_mode', 'image')
@@ -501,7 +510,8 @@ class TransactionController:
     def setOptedBanks(self):
         try:
             data = request.json
-            userId = request.headers.get("X-Firebase-ID")
+            # ak-c8l: verified uid from g, not the raw header.
+            userId = g.get("firebase_id")
             banks = data.get('banks')
             validBanks = list(banks.keys())
             # Validate input

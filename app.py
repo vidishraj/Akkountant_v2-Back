@@ -606,15 +606,37 @@ class Akkountant(Flask):
 
         @self.before_request
         def _request_interceptor():
-            """Intercept incoming requests."""
+            """Intercept incoming requests.
+
+            ak-c8l (2026-11-22): replaced raw X-Firebase-ID header
+            trust with firebase_admin JWT verification. See
+            utils/firebase_auth.py for the full rollout-mode
+            matrix. ``g.firebase_id`` now holds the VERIFIED uid
+            (or, under rollout-cycle ``verify_with_raw_uid_
+            fallback`` mode, the raw UID with a WARN log). All
+            downstream code must read ``g.firebase_id`` — the raw
+            header must NEVER be trusted outside this middleware.
+            """
             if request.method == "OPTIONS":
                 self.logger.info("OPTIONS preflight request received.")
                 return
-            firebase_id = request.headers.get("X-Firebase-ID")
-            if not firebase_id:
-                self.logger.warning("Request missing Firebase ID.")
-                return jsonify({"error": "Unauthorized - Firebase ID is required"}), 401
-            g.firebase_id = firebase_id
+            from utils.firebase_auth import (
+                authenticate_request, FirebaseAuthError,
+            )
+            header_value = request.headers.get("X-Firebase-ID")
+            try:
+                verified_uid, auth_mode = authenticate_request(
+                    header_value,
+                )
+            except FirebaseAuthError as exc:
+                self.logger.warning(
+                    f"Firebase auth rejected request: {exc.reason}"
+                )
+                return jsonify({
+                    "error": f"Unauthorized - {exc.reason}",
+                }), 401
+            g.firebase_id = verified_uid
+            g.firebase_auth_mode = auth_mode
 
         # @self.teardown_appcontext
         # def _teardown_db():
