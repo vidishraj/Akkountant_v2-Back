@@ -75,7 +75,25 @@ def _service_stub(*, msn_summaries=None, epg_fetches=None,
                   fo_summary=None, user_securities=None,
                   portfolio_history=None):
     """Build a MagicMock-shaped service covering the subset
-    ``portfolio_analytics`` reads."""
+    ``portfolio_analytics`` reads.
+
+    ak-p8ix REWORK CRITICAL: ``user_securities`` stub now returns
+    the REAL contract — a **LIST** of row dicts (keyed by
+    ``buyCode``, with ``buyQuant`` / ``buyPrice`` / ``info.lastPrice``
+    + optional ``current_value`` for Kite-enriched Stocks), OR
+    ``{"error": "..."}`` on empty. The pre-rework stub returned
+    ``{"data": [...]}`` which encoded the fictional contract the
+    bug reader asserted + hid the real bug (per ak-ucta precedent
+    the reviewer called out: clone anti-pattern — stub encoded
+    author's assumption, not the system's actual contract).
+
+    ``user_securities`` dict shape:
+      {
+        "Stocks": [row, row, ...],          # or {"error": ...}
+        "Mutual_Funds": [row, ...],
+        "NPS": [row, ...],
+      }
+    """
     svc = types.SimpleNamespace()
 
     _ms = msn_summaries or {}
@@ -86,14 +104,14 @@ def _service_stub(*, msn_summaries=None, epg_fetches=None,
         return _ms.get(asset, {"currentValue": 0.0})
 
     def fetchActiveSecurities(epg_enum, user_id):
-        # epg_enum is an EPGEnum member; use its .name as the key.
         return _epg.get(getattr(epg_enum, "name", str(epg_enum)), {"net": 0.0})
 
     def fetchFOSummary(user_id):
         return fo_summary or {}
 
     def fetchUserSecurities(service_type_value, user_id):
-        return _us.get(service_type_value, {"data": []})
+        """Real contract: list on success, {"error": ...} on empty."""
+        return _us.get(service_type_value, {"error": "No active securities"})
 
     def getPortfolioHistory(user_id, days=None):
         return portfolio_history or []
@@ -104,6 +122,60 @@ def _service_stub(*, msn_summaries=None, epg_fetches=None,
     svc.fetchUserSecurities = fetchUserSecurities
     svc.getPortfolioHistory = getPortfolioHistory
     return svc
+
+
+def _stock_row(buy_code, *, qty=None, last_price=None,
+               current_value=None):
+    """Build a Stocks-style enriched row matching the real
+    InvestmentService.fetchUserSecurities shape.
+
+    Mirror of the InvestmentService.fetchUserSecurities enrichment
+    loop (L248-275): row has ``buyCode``, ``buyQuant``, ``buyPrice``,
+    ``info.{symbol, lastPrice, change, pChange, previousClose}``,
+    and (for Kite-enriched rows) a top-level ``current_value``.
+    """
+    row = {
+        "buyCode": buy_code,
+        "buyQuant": _dec(qty) if qty is not None else _dec("0"),
+        "buyPrice": _dec("0"),
+        "info": {
+            "symbol": buy_code,
+            "lastPrice": _dec(last_price) if last_price is not None else _dec("0"),
+            "change": _dec("0"),
+            "pChange": _dec("0"),
+            "previousClose": _dec("0"),
+        },
+    }
+    if current_value is not None:
+        row["current_value"] = _dec(current_value)
+    return row
+
+
+def _mf_row(buy_code, *, qty=None, last_price=None):
+    """MF row: no current_value (Kite-fold is Stocks-only) — value
+    derives from ``buyQuant × info.lastPrice``."""
+    return {
+        "buyCode": buy_code,
+        "buyQuant": _dec(qty) if qty is not None else _dec("0"),
+        "buyPrice": _dec("0"),
+        "info": {
+            "lastPrice": _dec(last_price) if last_price is not None else _dec("0"),
+            "scheme_id": buy_code,
+            "fundHouse": "TEST",
+            "schemeType": "TEST",
+            "companyName": "TEST",
+        },
+    }
+
+
+def _dec(v):
+    """Decimal coercion for test fixtures. Mirrors
+    portfolio_analytics._to_decimal; duplicated here to keep this
+    test file independent of its module-internal helper."""
+    from decimal import Decimal
+    if v is None:
+        return Decimal("0")
+    return Decimal(str(v))
 
 
 # ── 1. portfolio_allocation ──────────────────────────────────────────
@@ -155,20 +227,31 @@ class TestPortfolioAllocation(unittest.TestCase):
         values = [b["value"] for b in result["by_asset_type"]]
         self.assertEqual(values, sorted(values, reverse=True))
 
-    def test_fo_pnl_included_when_present(self):
+    def test_fo_pnl_excluded_from_allocation_but_surfaced_separately(self):
+        """ak-p8ix REWORK MAJOR 1: FO P&L is NOT part of the allocation
+        total or by_asset_type (it's a P&L figure, not a position
+        value). Must appear as a separate top-level ``fo_pnl``
+        field instead. Pre-rework test erroneously asserted FO as
+        a slice."""
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 1000.0}},
             fo_summary={"totalPnl": 500.0},
         )
         result = portfolio_allocation(svc, "user1")
+        # Separate top-level line — Decimal/money-rounded.
         self.assertEqual(result["fo_pnl"], 500.0)
-        by_type = {b["type"]: b["value"] for b in result["by_asset_type"]}
-        self.assertEqual(by_type["FO"], 500.0)
-        # Total = Stocks(1000) + FO(500) = 1500.
-        self.assertEqual(result["total"], 1500.0)
+        # NOT in by_asset_type.
+        types_seen = [b["type"] for b in result["by_asset_type"]]
+        self.assertNotIn("FO", types_seen)
+        # NOT in the allocation total — total = Stocks(1000) only.
+        self.assertEqual(result["total"], 1000.0)
+        # Stocks slice is 100% of allocation (no FO distortion).
+        by_type = {b["type"]: b for b in result["by_asset_type"]}
+        self.assertAlmostEqual(by_type["Stocks"]["pct"], 100.0, places=2)
 
     def test_fo_pnl_absent_when_empty(self):
-        """fetchFOSummary returning {} (no FO account) → no FO slice."""
+        """fetchFOSummary returning {} (no FO account) → ``fo_pnl``
+        is null (vs. 0, which could be a legitimate flat P&L)."""
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 1000.0}},
             fo_summary={},
@@ -177,6 +260,21 @@ class TestPortfolioAllocation(unittest.TestCase):
         self.assertIsNone(result["fo_pnl"])
         types_seen = [b["type"] for b in result["by_asset_type"]]
         self.assertNotIn("FO", types_seen)
+
+    def test_fo_negative_pnl_does_not_distort_allocation(self):
+        """ak-p8ix REWORK MAJOR 1: a FO loss (negative pnl) would
+        pre-rework have been added to total — making the allocation
+        percentages misleading for every asset slice. Now excluded,
+        so allocation is unaffected."""
+        svc = _service_stub(
+            msn_summaries={"Stocks": {"currentValue": 10000.0}},
+            fo_summary={"totalPnl": -3000.0},   # realized loss
+        )
+        result = portfolio_allocation(svc, "user1")
+        self.assertEqual(result["fo_pnl"], -3000.0)
+        self.assertEqual(result["total"], 10000.0)  # Stocks only, no FO drag
+        by_type = {b["type"]: b for b in result["by_asset_type"]}
+        self.assertAlmostEqual(by_type["Stocks"]["pct"], 100.0, places=2)
 
     def test_total_zero_does_not_divide_by_zero(self):
         """New user with no investments → all pct=0, no crash."""
@@ -214,7 +312,11 @@ class TestPortfolioAllocation(unittest.TestCase):
 
 class TestBenchmarkCompare(unittest.TestCase):
 
-    def test_computes_portfolio_return_over_window(self):
+    def test_computes_equity_basket_return_over_window(self):
+        """ak-p8ix REWORK MAJOR 2: field name is
+        ``equity_basket_return_pct`` (NOT ``portfolio_return_pct``)
+        because the return projects today's EQUITY quantities onto
+        past dates — MF/NPS/EPG aren't included."""
         from datetime import date, timedelta
         today = date.today()
         from_date = (today - timedelta(days=5)).isoformat()
@@ -227,8 +329,40 @@ class TestBenchmarkCompare(unittest.TestCase):
         self.assertEqual(result["tool"], "benchmark_compare")
         self.assertEqual(result["from_value"], 100000.0)
         self.assertEqual(result["to_value"], 110000.0)
+        # NEW name (equity_basket_return_pct) present…
         self.assertAlmostEqual(
-            result["portfolio_return_pct"], 10.0, places=2,
+            result["equity_basket_return_pct"], 10.0, places=2,
+        )
+        # …old name (portfolio_return_pct) GONE. A future refactor
+        # that accidentally restores the old name trips here
+        # before misleading any user.
+        self.assertNotIn("portfolio_return_pct", result)
+
+    def test_scope_and_caveat_fields_present(self):
+        """ak-p8ix REWORK MAJOR 2: the return dict must carry both
+        a ``scope`` tag + a ``caveat`` narrative so the agent can't
+        accidentally present the number as whole-portfolio."""
+        from datetime import date, timedelta
+        today = date.today()
+        from_date = (today - timedelta(days=5)).isoformat()
+        svc = _service_stub(portfolio_history=[
+            {"date": from_date, "total_value": 100.0},
+            {"date": today.isoformat(), "total_value": 110.0},
+        ])
+        result = benchmark_compare(
+            svc, "user1", from_date, today.isoformat(),
+        )
+        self.assertEqual(result["scope"], "stocks_only_current_basket")
+        self.assertIn("caveat", result)
+        caveat = result["caveat"]
+        # Must name MF/NPS/EPG explicitly so the agent knows the
+        # exclusions when passing on the warning.
+        self.assertIn("MF", caveat)
+        self.assertIn("NPS", caveat)
+        # And must explicitly say the return is NOT whole-portfolio.
+        self.assertTrue(
+            "whole-portfolio" in caveat or "not included" in caveat,
+            f"caveat must disclose non-equity exclusion; got: {caveat!r}",
         )
 
     def test_benchmark_defaults_to_nifty_50(self):
@@ -284,17 +418,29 @@ class TestBenchmarkCompare(unittest.TestCase):
 
 
 # ── 3. position_sizing ───────────────────────────────────────────────
+#
+# ak-p8ix REWORK CRITICAL: these tests now exercise the REAL
+# fetchUserSecurities contract — a LIST of enriched row dicts
+# keyed by ``buyCode``, with ``current_value`` (Kite-enriched
+# Stocks) or ``buyQuant × info.lastPrice`` (fallback). Built via
+# ``_stock_row()`` / ``_mf_row()`` fixtures. Pre-rework tests
+# built ``{"data": [...]}`` with a fictional ``currentValue``
+# camelCase key — a clone of the author's assumption, not the
+# real contract, which is why 50/50 passed against broken code.
 
 
 class TestPositionSizing(unittest.TestCase):
 
     def test_buy_direction_when_under_target(self):
+        """Kite-enriched Stocks row with current_value=5000 vs
+        target=10% of 100000 total → buy ₹5000 more."""
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "RELIANCE", "currentValue": 5000.0},
-                ]},
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=5, last_price=1000,
+                               current_value=5000),
+                ],
             },
         )
         result = position_sizing(
@@ -303,16 +449,16 @@ class TestPositionSizing(unittest.TestCase):
         )
         self.assertEqual(result["tool"], "position_sizing")
         self.assertEqual(result["direction"], "buy")
-        # target = 10% × 100000 = 10000; current = 5000; delta = +5000.
         self.assertAlmostEqual(result["delta_rupees"], 5000.0, places=2)
 
     def test_trim_direction_when_over_target(self):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "RELIANCE", "currentValue": 20000.0},
-                ]},
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=20, last_price=1000,
+                               current_value=20000),
+                ],
             },
         )
         result = position_sizing(
@@ -327,9 +473,10 @@ class TestPositionSizing(unittest.TestCase):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "RELIANCE", "currentValue": 10000.5},
-                ]},
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=10, last_price=1000.05,
+                               current_value=10000.5),
+                ],
             },
         )
         result = position_sizing(
@@ -338,12 +485,50 @@ class TestPositionSizing(unittest.TestCase):
         )
         self.assertEqual(result["direction"], "hold")
 
+    def test_uses_buyQuant_times_lastPrice_fallback_without_current_value(self):
+        """ak-p8ix REWORK CRITICAL: non-Kite rows (MF / pre-sync
+        Stocks) have no ``current_value`` key. Value must derive
+        from ``buyQuant × info.lastPrice`` fallback."""
+        svc = _service_stub(
+            msn_summaries={"Mutual_Funds": {"currentValue": 100000.0}},
+            user_securities={
+                "Mutual_Funds": [
+                    _mf_row("120503", qty=100, last_price=50),  # = 5000
+                ],
+            },
+        )
+        result = position_sizing(
+            svc, "user1", symbol="120503",
+            target_allocation_pct=10.0,
+        )
+        self.assertNotIn("error_class", result)
+        # current = 100 × 50 = 5000; target = 10% × 100000 = 10000.
+        self.assertAlmostEqual(result["current_value"], 5000.0, places=2)
+        self.assertAlmostEqual(result["delta_rupees"], 5000.0, places=2)
+
     def test_symbol_not_found_returns_structured_error(self):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
         )
         result = position_sizing(
             svc, "user1", symbol="MADEUP", target_allocation_pct=10.0,
+        )
+        self.assertEqual(result["error_class"], "symbol_not_found")
+
+    def test_symbol_not_found_when_fetchUserSecurities_returns_error_dict(self):
+        """ak-p8ix REWORK CRITICAL regression guard:
+        fetchUserSecurities' real empty-case returns
+        ``{"error": "No active securities"}`` (NOT an empty list,
+        NOT ``{"data": []}``). Helper must skip the error-dict
+        case cleanly — a search in that case returns not-found
+        without crashing."""
+        svc = _service_stub(
+            msn_summaries={"Stocks": {"currentValue": 100000.0}},
+            # No user_securities entry → stub returns the real
+            # {"error": ...} shape per _service_stub.
+        )
+        result = position_sizing(
+            svc, "user1", symbol="RELIANCE", target_allocation_pct=10.0,
         )
         self.assertEqual(result["error_class"], "symbol_not_found")
 
@@ -372,17 +557,41 @@ class TestPositionSizing(unittest.TestCase):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "RELIANCE", "currentValue": 5000.0},
-                ]},
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=5, last_price=1000,
+                               current_value=5000),
+                ],
             },
         )
         result = position_sizing(
             svc, "user1", symbol="reliance", target_allocation_pct=10.0,
         )
         self.assertEqual(result.get("symbol"), "reliance")
-        # Should have matched RELIANCE row (non-error return).
         self.assertNotIn("error_class", result)
+
+    def test_denominator_excludes_fo_pnl(self):
+        """ak-p8ix REWORK MAJOR 1 propagation: position_sizing's
+        denominator (total_portfolio) must NOT include FO P&L.
+        Pre-rework, FO=+10000 would inflate the denominator and
+        under-size the target."""
+        svc = _service_stub(
+            msn_summaries={"Stocks": {"currentValue": 100000.0}},
+            fo_summary={"totalPnl": 10000.0},
+            user_securities={
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=5, last_price=1000,
+                               current_value=5000),
+                ],
+            },
+        )
+        result = position_sizing(
+            svc, "user1", symbol="RELIANCE",
+            target_allocation_pct=10.0,
+        )
+        # total_portfolio = 100000 (NOT 110000)
+        self.assertEqual(result["total_portfolio"], 100000.0)
+        # target = 10% × 100000 = 10000; current = 5000 → buy 5000.
+        self.assertAlmostEqual(result["delta_rupees"], 5000.0, places=2)
 
 
 # ── 4. concentration_risk ────────────────────────────────────────────
@@ -394,10 +603,12 @@ class TestConcentrationRisk(unittest.TestCase):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "RELIANCE", "currentValue": 15000.0},
-                    {"securityCode": "TCS", "currentValue": 5000.0},
-                ]},
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=15, last_price=1000,
+                               current_value=15000),
+                    _stock_row("TCS", qty=5, last_price=1000,
+                               current_value=5000),
+                ],
             },
         )
         result = concentration_risk(svc, "user1", threshold_pct=10)
@@ -405,14 +616,35 @@ class TestConcentrationRisk(unittest.TestCase):
         self.assertIn("RELIANCE", flagged_syms)
         self.assertNotIn("TCS", flagged_syms)
 
+    def test_flags_mf_without_current_value_via_buyQuant_fallback(self):
+        """ak-p8ix REWORK CRITICAL: an MF row (no current_value key)
+        with buyQuant × info.lastPrice over threshold MUST flag."""
+        svc = _service_stub(
+            msn_summaries={"Mutual_Funds": {"currentValue": 100000.0}},
+            user_securities={
+                "Mutual_Funds": [
+                    _mf_row("120503", qty=300, last_price=50),  # = 15000
+                    _mf_row("999999", qty=10, last_price=100),  # = 1000
+                ],
+            },
+        )
+        result = concentration_risk(svc, "user1", threshold_pct=10)
+        flagged_syms = [f["security"] for f in result["flagged"]]
+        # 15000 of 100000 = 15% > 10%, flagged.
+        self.assertIn("120503", flagged_syms)
+        # 1000 of 100000 = 1% < 10%, NOT flagged.
+        self.assertNotIn("999999", flagged_syms)
+
     def test_no_positions_over_threshold_returns_empty_flagged(self):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "RELIANCE", "currentValue": 5000.0},
-                    {"securityCode": "TCS", "currentValue": 5000.0},
-                ]},
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=5, last_price=1000,
+                               current_value=5000),
+                    _stock_row("TCS", qty=5, last_price=1000,
+                               current_value=5000),
+                ],
             },
         )
         result = concentration_risk(svc, "user1", threshold_pct=10)
@@ -437,11 +669,14 @@ class TestConcentrationRisk(unittest.TestCase):
         svc = _service_stub(
             msn_summaries={"Stocks": {"currentValue": 100000.0}},
             user_securities={
-                "Stocks": {"data": [
-                    {"securityCode": "A", "currentValue": 15000.0},
-                    {"securityCode": "B", "currentValue": 25000.0},
-                    {"securityCode": "C", "currentValue": 11000.0},
-                ]},
+                "Stocks": [
+                    _stock_row("A", qty=15, last_price=1000,
+                               current_value=15000),
+                    _stock_row("B", qty=25, last_price=1000,
+                               current_value=25000),
+                    _stock_row("C", qty=11, last_price=1000,
+                               current_value=11000),
+                ],
             },
         )
         result = concentration_risk(svc, "user1", threshold_pct=10)
@@ -466,6 +701,46 @@ class TestConcentrationRisk(unittest.TestCase):
         agg = [f for f in result["flagged"] if f["asset_type"] == "Gold"]
         self.assertEqual(len(agg), 1)
         self.assertAlmostEqual(agg[0]["pct"], 50.0, places=1)
+
+    def test_fetchUserSecurities_error_dict_handled_cleanly(self):
+        """ak-p8ix REWORK CRITICAL regression guard:
+        fetchUserSecurities returning ``{"error": "No active securities"}``
+        must NOT crash concentration_risk + must NOT flag anything
+        from that empty asset. Mirrors the position_sizing error-dict
+        test."""
+        svc = _service_stub(
+            msn_summaries={"Stocks": {"currentValue": 1000.0}},
+            # No user_securities entry → stub returns error-dict per
+            # the real contract.
+        )
+        result = concentration_risk(svc, "user1", threshold_pct=10)
+        # Empty-holdings path: no per-stock flags (nothing iterated),
+        # no crash.
+        self.assertEqual(
+            [f for f in result["flagged"] if f["asset_type"] == "Stocks"],
+            [],
+        )
+
+    def test_denominator_excludes_fo_pnl(self):
+        """ak-p8ix REWORK MAJOR 1 propagation: concentration_risk's
+        denominator (total) must NOT include FO P&L. Pre-rework, a
+        FO loss would deflate the denominator + falsely flag
+        otherwise-diversified positions."""
+        svc = _service_stub(
+            msn_summaries={"Stocks": {"currentValue": 100000.0}},
+            fo_summary={"totalPnl": -50000.0},  # -50% of stocks
+            user_securities={
+                "Stocks": [
+                    _stock_row("RELIANCE", qty=9, last_price=1000,
+                               current_value=9000),
+                ],
+            },
+        )
+        result = concentration_risk(svc, "user1", threshold_pct=10)
+        # 9000/100000 = 9% < 10%, must NOT flag.
+        # Pre-rework: 9000/(100000-50000) = 18% WOULD have flagged.
+        flagged_syms = [f["security"] for f in result["flagged"]]
+        self.assertNotIn("RELIANCE", flagged_syms)
 
 
 # ── 5. Agent-tools registration + executor dispatch ──────────────────
@@ -589,9 +864,31 @@ class TestWealthDigestGrounding(unittest.TestCase):
     def test_digest_prompt_has_pii_discipline(self):
         """Public-identifiers-only rule (same shape as ak-pb4n
         chat agent) must appear in the digest prompt too — same
-        attack class, same mitigation."""
-        self.assertIn("NEVER put the user's personal financial data",
+        attack class, same mitigation.
+
+        ak-p8ix REWORK MINOR 2: reworded so scheme codes + tickers
+        are explicitly PUBLIC identifiers (AMFI/BSE publish them
+        openly) + the ``fetch_fund_factsheet(scheme_code)`` /
+        ``fetch_stock_news(ticker)`` cadence doesn't contradict
+        the rule. Pre-rework the prompt listed 'scheme codes' as
+        PII-forbidden, which would make the agent balk at its own
+        wrappers' canonical queries."""
+        # Positive: the new personal-identifier rule.
+        self.assertIn("NEVER send the user's PERSONAL identifiers",
                       self.src)
+        # Positive: public-market-identifier affordance so the
+        # agent knows tickers / scheme codes are OK to send.
+        self.assertIn("Public market identifiers are allowed",
+                      self.src)
+        # Negative: pre-rework contradictory listing of
+        # "scheme codes" as PII-forbidden must be gone — would
+        # prevent the agent from using its own wrappers.
+        self.assertNotIn(
+            "scheme codes, account numbers", self.src,
+            "pre-ak-p8ix-REWORK PII clause listing scheme codes "
+            "as forbidden still present — would prevent "
+            "fetch_fund_factsheet(scheme_code) from firing",
+        )
 
 
 # ── 7. _format_conversation sliding window ──────────────────────────
