@@ -449,9 +449,11 @@ def benchmark_compare(investment_service, user_id,
                 "Call WebSearch with 'canonical_query', extract the "
                 "start + end index values per 'extraction', and "
                 "compute simple return. Compare to "
-                "'portfolio_return_pct' above — outperformance = "
-                "portfolio − benchmark. Cite the source for every "
-                "number."
+                "'equity_basket_return_pct' above — outperformance = "
+                "equity_basket − benchmark. The equity-basket return "
+                "is scope-limited (see 'scope' + 'caveat' fields); "
+                "disclose that scope when quoting outperformance. "
+                "Cite the source for every number."
             ),
         },
     }
@@ -603,21 +605,54 @@ def _iter_user_security_rows(investment_service, user_id):
 
 def _row_value(row) -> Decimal:
     """Per-row rupee value. Prefers Kite-enriched ``current_value``
-    (snake_case), falls back to ``buyQuant × info.lastPrice``.
+    (snake_case), falls back to ``buyQuant × per-unit price``.
 
-    Returns Decimal('0') if neither source yields a value — the
-    row is still iterable in concentration_risk but won't flag.
+    Per-unit price lookup is asset-type-aware because
+    ``InvestmentService.fetchUserSecurities`` enriches ``info``
+    with different keys per type (verified at
+    InvestmentService.py:298-307 for NPS and :352-361 for MF):
+      * Stocks (Kite-enriched): ``current_value`` (handled above)
+      * MF: ``info.lastPrice`` (NAV copied under lastPrice key)
+      * NPS: ``info.nav`` (NAV left under the native key)
+      * Stocks (pre-Kite-sync): ``info.lastPrice``
+
+    Precedence: ``lastPrice`` first (covers MF + pre-sync Stocks),
+    ``nav`` fallback (covers NPS). Both are per-unit; multiplied
+    by buyQuant to yield rupee value. Returns ``Decimal('0')`` if
+    neither key yields a usable number — the row is still iterable
+    in concentration_risk / position_sizing but won't flag.
+
+    ak-p8ix re-review: prior single-key ``info.lastPrice`` lookup
+    silently returned ``0`` for every NPS row (NAV lives at
+    ``info.nav``), so position_sizing on an NPS scheme recommended
+    buying the ENTIRE target allocation even when the user held
+    the position, and concentration_risk never flagged NPS at any
+    level. Same bug-class as the original CRITICAL (clone of
+    the author's assumption about field names) scoped to NPS.
     """
     # Kite-enriched row (Stocks only) carries current_value directly.
     cv = row.get("current_value")
     if cv is not None:
         return _to_decimal(cv)
-    # Fallback for non-Kite rows (MF / NPS / pre-sync Stocks):
-    # buyQuant × info.lastPrice.
+    # Fallback for non-Kite rows. Per-unit price key varies by
+    # asset type per InvestmentService.fetchUserSecurities:
+    #   lastPrice for MF (:353) + pre-sync Stocks
+    #   nav for NPS (:299)
+    # Precedence: lastPrice OR nav. Whichever is truthy wins; both
+    # falsy → 0 (no value signal, row still iterable).
     qty = _to_decimal(row.get("buyQuant"))
     info = row.get("info") or {}
-    last_price = _to_decimal(info.get("lastPrice"))
-    return qty * last_price
+    last_price_raw = info.get("lastPrice")
+    nav_raw = info.get("nav")
+    # Use the first truthy source. _to_decimal coerces None → 0,
+    # so compare the raw value to pick source, then coerce.
+    if last_price_raw:
+        price = _to_decimal(last_price_raw)
+    elif nav_raw:
+        price = _to_decimal(nav_raw)
+    else:
+        price = Decimal("0")
+    return qty * price
 
 
 def _row_identifier(row) -> Optional[str]:

@@ -168,6 +168,36 @@ def _mf_row(buy_code, *, qty=None, last_price=None):
     }
 
 
+def _nps_row(buy_code, *, qty=None, nav=None):
+    """NPS row matching the real enriched shape from
+    InvestmentService.fetchUserSecurities L298-307.
+
+    Critical difference vs MF: NPS keeps NAV under ``info.nav``
+    (NOT ``info.lastPrice``). The enrichment loop copies the
+    NPS rate's ``nav`` field verbatim without renaming. So the
+    value derivation path is ``buyQuant × info.nav`` — the
+    ``lastPrice``-only fallback silently returned 0 for every
+    NPS row before ak-p8ix re-review surfaced the gap.
+
+    No ``current_value`` key — Kite fold-up is Stocks-only.
+    """
+    return {
+        "buyCode": buy_code,
+        "buyQuant": _dec(qty) if qty is not None else _dec("0"),
+        "buyPrice": _dec("0"),
+        "info": {
+            "nav": _dec(nav) if nav is not None else _dec("0"),
+            "name": buy_code,
+            "scheme_id": buy_code,
+            "date": None,
+            "yesterday": _dec("0"),
+            "lastWeek": _dec("0"),
+            "sixMonthsAgo": _dec("0"),
+            "pfm_name": "TEST",
+        },
+    }
+
+
 def _dec(v):
     """Decimal coercion for test fixtures. Mirrors
     portfolio_analytics._to_decimal; duplicated here to keep this
@@ -593,6 +623,42 @@ class TestPositionSizing(unittest.TestCase):
         # target = 10% × 100000 = 10000; current = 5000 → buy 5000.
         self.assertAlmostEqual(result["delta_rupees"], 5000.0, places=2)
 
+    def test_nps_value_derives_from_info_nav_not_lastPrice(self):
+        """ak-p8ix re-review MAJOR: NPS rows carry per-unit NAV at
+        ``info.nav`` (NOT ``info.lastPrice``) per
+        InvestmentService.py:298-307. Pre-fix, _row_value would
+        multiply ``buyQuant × None → 0`` for every NPS row and
+        position_sizing would recommend buying the FULL target
+        amount even when the user already held the position.
+
+        Here: user holds 100 units of an NPS scheme at NAV ₹50 =
+        ₹5000. Portfolio total is ₹100k, target is 10% (₹10k).
+        Correct behaviour: current_value=5000, buy ₹5000 more.
+        Broken behaviour: current_value=0 (NAV misread), buy the
+        FULL ₹10k target. The delta_rupees assertion locks this
+        correctness — a bug that makes current_value=0 would also
+        make delta_rupees=10000.
+        """
+        svc = _service_stub(
+            msn_summaries={"NPS": {"currentValue": 100000.0}},
+            user_securities={
+                "NPS": [
+                    _nps_row("SM001001", qty=100, nav=50),  # = 5000
+                ],
+            },
+        )
+        result = position_sizing(
+            svc, "user1", symbol="SM001001",
+            target_allocation_pct=10.0,
+        )
+        self.assertNotIn("error_class", result)
+        # Correctness guard: current_value must be 5000, NOT 0.
+        self.assertAlmostEqual(result["current_value"], 5000.0, places=2)
+        # Downstream correctness: if current were misread as 0, the
+        # agent would quote the user buying ₹10k; actual ask is ₹5k.
+        self.assertAlmostEqual(result["delta_rupees"], 5000.0, places=2)
+        self.assertEqual(result["direction"], "buy")
+
 
 # ── 4. concentration_risk ────────────────────────────────────────────
 
@@ -741,6 +807,66 @@ class TestConcentrationRisk(unittest.TestCase):
         # Pre-rework: 9000/(100000-50000) = 18% WOULD have flagged.
         flagged_syms = [f["security"] for f in result["flagged"]]
         self.assertNotIn("RELIANCE", flagged_syms)
+
+    def test_flags_nps_over_threshold_via_info_nav_fallback(self):
+        """ak-p8ix re-review MAJOR: NPS rows store per-unit NAV at
+        ``info.nav`` (NOT ``info.lastPrice``).  _row_value must
+        pick it up via the nav-fallback, otherwise a user with 50%+
+        of their portfolio in a single NPS scheme would NEVER see a
+        concentration flag. Pre-fix, this test fails: NPS row
+        valued at 0 → no flag.
+        """
+        svc = _service_stub(
+            msn_summaries={"NPS": {"currentValue": 100000.0}},
+            user_securities={
+                "NPS": [
+                    _nps_row("SM001001", qty=1500, nav=50),  # = 75000
+                    _nps_row("SM002001", qty=100, nav=50),   # = 5000
+                ],
+            },
+        )
+        result = concentration_risk(svc, "user1", threshold_pct=10)
+        flagged_syms = [f["security"] for f in result["flagged"]]
+        # 75000 of 100000 = 75% → MUST flag.
+        self.assertIn("SM001001", flagged_syms)
+        # 5000 of 100000 = 5% < 10% → MUST NOT flag.
+        self.assertNotIn("SM002001", flagged_syms)
+        # Correctness guard: the flagged entry's pct must reflect
+        # the real value (not 0 from the misread-NAV path).
+        flagged_sm001001 = next(
+            f for f in result["flagged"] if f["security"] == "SM001001"
+        )
+        self.assertAlmostEqual(flagged_sm001001["pct"], 75.0, places=1)
+
+    def test_nps_holding_does_not_report_zero_value(self):
+        """ak-p8ix re-review MAJOR regression guard: the flagged-item
+        ``value`` field for an NPS position must reflect
+        ``buyQuant × info.nav`` — NEVER 0. A silent-zero here is
+        exactly the class of bug the fix targets: the row is
+        technically iterated but valued at 0, so downstream code
+        (agent-quoted figures, concentration ranking) sees the
+        position as non-existent.
+        """
+        svc = _service_stub(
+            msn_summaries={"NPS": {"currentValue": 20000.0}},
+            user_securities={
+                "NPS": [
+                    _nps_row("SM001001", qty=200, nav=100),  # = 20000
+                ],
+            },
+        )
+        # threshold low enough to force flag so we can inspect value
+        result = concentration_risk(svc, "user1", threshold_pct=10)
+        nps_flags = [
+            f for f in result["flagged"] if f["security"] == "SM001001"
+        ]
+        self.assertEqual(len(nps_flags), 1, (
+            "NPS position must be flagged at 100% concentration — "
+            "a zero-valued row would be silently missing"
+        ))
+        # Correctness guard: value must be 20000 (not 0).
+        self.assertAlmostEqual(nps_flags[0]["value"], 20000.0, places=2)
+        self.assertAlmostEqual(nps_flags[0]["pct"], 100.0, places=1)
 
 
 # ── 5. Agent-tools registration + executor dispatch ──────────────────
