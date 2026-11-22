@@ -40,6 +40,10 @@ from models.reconciliationIssue import ReconciliationIssue
 from models.mfHistoricalNav import MFHistoricalNav
 from models.npsHistoricalNav import NPSHistoricalNav
 from models.goldHistoricalRate import GoldHistoricalRate
+# ak-v55t (2026-11-22): daily-refreshed Kite instrument master cache
+# backing the /kite/instruments/search autocomplete surface. Imported
+# BEFORE db.create_all() so the fresh table materializes on next boot.
+from models.kiteInstrument import KiteInstrument
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PendingPaymentClaim
 from .customer_emails import CustomerEmail

@@ -321,6 +321,149 @@ class KiteService(BaseService):
         self.logger.info(f"Fetched {len(instruments)} instruments from Kite for user {user_id}")
         return instruments
 
+    # ak-v55t: DB-backed instrument search. Does NOT call Kite —
+    # the live Kite ``instruments()`` endpoint returns ~200k rows;
+    # the daily ``InstrumentsCacheTask`` caches them into
+    # ``kite_instruments`` so this search can serve from LIKE
+    # queries without touching the broker.
+    #
+    # Lives on KiteService because the data is Kite-domain even
+    # though the implementation is pure DB. Separate call-signature
+    # (no ``user_id`` arg) makes the no-broker-call intent obvious
+    # at call-sites.
+    def search_instruments(self, query, exchange=None, limit=20):
+        """Case-insensitive search across cached Kite instruments.
+
+        Matches ``tradingsymbol`` (prefix-biased) OR ``name``
+        (substring). Prefix matches on ``tradingsymbol`` rank above
+        substring matches. Optional ``exchange`` filter narrows the
+        result universe (NSE / BSE / NFO / BFO / MCX / CDS); None
+        / empty = no filter.
+
+        ak-v55t contract:
+          * ``query`` is REQUIRED non-empty — a bare search without
+            input would return the full 200k row universe, which
+            would blow the FE autocomplete.
+          * ``limit`` is clamped to [1, 100] — same floor/ceiling
+            discipline as the agent-tool catalog's search_securities.
+          * Returns ``[]`` on empty query / empty cache / whitespace-
+            only query (soft-fail; caller renders empty state).
+
+        Returns a list of lightweight dicts:
+          ``[{instrument_token, tradingsymbol, name, exchange,
+              segment, instrument_type, lot_size, tick_size,
+              last_price, expiry, strike}, ...]``
+
+        Not user_id-scoped — instrument master is market-wide, same
+        pattern as stockHistoricalCandles / mfHistoricalNavs.
+        """
+        from models.kiteInstrument import KiteInstrument
+        if not query or not isinstance(query, str) or not query.strip():
+            return []
+        q = query.strip()
+        # Clamp limit to a sane range.
+        try:
+            lim = int(limit)
+        except (TypeError, ValueError):
+            lim = 20
+        if lim < 1:
+            lim = 1
+        elif lim > 100:
+            lim = 100
+
+        # Rank query: prefix-match on tradingsymbol first (most
+        # relevant for autocomplete), then substring match on either
+        # tradingsymbol or name. One UNION-ALL in SQL would be more
+        # efficient; application-side dedupe keeps the query simple
+        # and avoids dialect-specific syntax.
+        prefix_pattern = f"{q}%"
+        substring_pattern = f"%{q}%"
+
+        base = self.db.session.query(KiteInstrument)
+        if exchange:
+            ex = str(exchange).strip().upper()
+            if ex:
+                base = base.filter(KiteInstrument.exchange == ex)
+
+        # Prefix-on-tradingsymbol pass first (highest relevance).
+        prefix_rows = (
+            base.filter(
+                KiteInstrument.tradingsymbol.ilike(prefix_pattern)
+            )
+            .order_by(KiteInstrument.tradingsymbol.asc())
+            .limit(lim)
+            .all()
+        )
+
+        results = {r.instrument_token: r for r in prefix_rows}
+
+        # If we still have room, do the substring pass for both
+        # tradingsymbol and name — but skip tokens already in
+        # results.
+        remaining = lim - len(results)
+        if remaining > 0:
+            from sqlalchemy import or_
+            substring_rows = (
+                base.filter(
+                    or_(
+                        KiteInstrument.tradingsymbol.ilike(
+                            substring_pattern,
+                        ),
+                        KiteInstrument.name.ilike(substring_pattern),
+                    )
+                )
+                .order_by(KiteInstrument.tradingsymbol.asc())
+                # Pull a few extra to cover the dedupe miss.
+                .limit(lim * 2)
+                .all()
+            )
+            for r in substring_rows:
+                if r.instrument_token in results:
+                    continue
+                results[r.instrument_token] = r
+                if len(results) >= lim:
+                    break
+
+        return [self._serialize_instrument(r) for r in results.values()]
+
+    @staticmethod
+    def _serialize_instrument(row):
+        """Shape a KiteInstrument row for the API response.
+
+        Decimal + Date fields coerced for JSON serialization.
+        None values pass through so the FE renders empty-field
+        cards for equity rows that don't carry F&O metadata.
+        """
+        return {
+            "instrument_token": int(row.instrument_token),
+            "exchange_token": (
+                int(row.exchange_token) if row.exchange_token is not None
+                else None
+            ),
+            "tradingsymbol": row.tradingsymbol,
+            "name": row.name,
+            "exchange": row.exchange,
+            "segment": row.segment,
+            "instrument_type": row.instrument_type,
+            "lot_size": (
+                int(row.lot_size) if row.lot_size is not None else None
+            ),
+            "tick_size": (
+                float(row.tick_size) if row.tick_size is not None
+                else None
+            ),
+            "last_price": (
+                float(row.last_price) if row.last_price is not None
+                else None
+            ),
+            "expiry": (
+                row.expiry.isoformat() if row.expiry is not None else None
+            ),
+            "strike": (
+                float(row.strike) if row.strike is not None else None
+            ),
+        }
+
     def get_trades(self, user_id):
         """Fetch today's executed trades from Kite"""
         trades = self._call(user_id, "trades", lambda k: k.trades())

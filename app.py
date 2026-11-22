@@ -401,6 +401,14 @@ class Akkountant(Flask):
             ('/kite/holdings', 'GET', self.investmentEP.fetchKiteHoldings),
             ('/kite/positions', 'GET', self.investmentEP.fetchKitePositions),
             ('/kite/sync-holdings', 'GET', self.investmentEP.syncKiteHoldings),
+            # ak-v55t (2026-11-22): Kite instrument-master autocomplete
+            # search. Serves DB-backed LIKE queries from the daily-
+            # refreshed kite_instruments cache; no Kite broker call
+            # per request. Prereq for watchlist + alert-creation.
+            (
+                '/kite/instruments/search', 'GET',
+                self.investmentEP.searchKiteInstruments,
+            ),
             # ak-zai2 Kite Bundle 2 (2026-11-12): available-funds
             # dashboard tile + today's-trades FE surface + daily
             # reconciliation cross-check (via ReconcileTradesTask).

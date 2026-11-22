@@ -634,6 +634,60 @@ class InvestmentController:
             self.logger.error(f"Error getting Kite login URL: {str(e)}")
             return jsonify({"error": "Failed to get login URL"}), 500
 
+    # ak-v55t: Kite instrument-master autocomplete search.
+    #
+    # Public market data (per bead §4 PII pass — N/A); still goes
+    # through the before_request auth middleware so an unauth
+    # client can't enumerate the master. Lightweight filter:
+    # LIKE on tradingsymbol + name, optional exchange chip, limit
+    # clamped to [1, 100]. Serves from the daily-refreshed
+    # kite_instruments cache — NO Kite broker call per request.
+    @Logger.standardLogger
+    def searchKiteInstruments(self):
+        """GET /kite/instruments/search?q=<query>&exchange=<EX>&limit=<N>.
+
+        Response: ``{"results": [...], "count": N, "query": ...}``.
+        Empty / whitespace query → 400 (prevent full-master
+        enumeration). Unknown exchange returns an empty result
+        list rather than 400 — matches the behaviour of an unknown
+        search term.
+        """
+        q = (request.args.get("q") or "").strip()
+        if not q:
+            return jsonify({
+                "error": (
+                    "'q' query param is required and must be "
+                    "non-empty — bare search would return the "
+                    "full instrument universe"
+                ),
+            }), 400
+        exchange = (request.args.get("exchange") or "").strip() or None
+        limit_raw = request.args.get("limit", "20")
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            return jsonify({
+                "error": f"'limit' must be an integer; got {limit_raw!r}",
+            }), 400
+
+        try:
+            results = self.InvestmentService.search_kite_instruments(
+                q, exchange=exchange, limit=limit,
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"Instrument search failed q={q!r} exchange={exchange!r}:"
+                f" {exc}",
+            )
+            return jsonify({"error": "Instrument search failed"}), 500
+
+        return jsonify({
+            "results": results,
+            "count": len(results),
+            "query": q,
+            "exchange": exchange,
+        }), 200
+
     @Logger.standardLogger
     def generateKiteSession(self):
         """Generate Kite session using request token from frontend"""

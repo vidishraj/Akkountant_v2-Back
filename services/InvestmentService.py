@@ -1007,6 +1007,18 @@ class InvestmentService(BaseService):
         """Get Kite Connect login URL"""
         return self.StockService.kite_service.get_login_url()
 
+    def search_kite_instruments(self, query, exchange=None, limit=20):
+        """ak-v55t: DB-backed autocomplete search for Kite instruments.
+
+        Proxies ``KiteService.search_instruments`` (does NOT hit the
+        broker — serves from the daily-refreshed ``kite_instruments``
+        cache). Returns a list of lightweight dicts suitable for the
+        FE autocomplete dropdown.
+        """
+        return self.StockService.kite_service.search_instruments(
+            query, exchange=exchange, limit=limit,
+        )
+
     def getKiteTokenStatus(self, userId):
         """Kite connection state plus the URL needed to re-authenticate.
 

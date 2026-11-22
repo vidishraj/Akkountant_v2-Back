@@ -33,6 +33,9 @@ from services.tasks.ReconcileTradesTask import ReconcileTradesTask
 from services.tasks.BackfillAMFIHistoricalNAVsTask import (
     BackfillAMFIHistoricalNAVsTask,
 )
+# ak-v55t (2026-11-22): daily Kite instrument-master cache refresh.
+# Backs /kite/instruments/search (autocomplete).
+from services.tasks.InstrumentsCacheTask import InstrumentsCacheTask
 from utils.logger import Logger
 
 
@@ -87,6 +90,11 @@ TASK_MAPPING = {
     # Phase 2B synthesis script can reconstruct past-date portfolio
     # values for the trend chart. See task docstring + bead ak-v8z1.
     "BackfillAMFIHistoricalNAVs": BackfillAMFIHistoricalNAVsTask,
+    # ak-v55t (2026-11-22): daily Kite instrument-master cache
+    # refresh. 24h cadence. Populates kite_instruments so the
+    # /kite/instruments/search autocomplete surface serves DB-backed
+    # LIKE queries without hitting Kite on every keystroke.
+    "InstrumentsCache": InstrumentsCacheTask,
 }
 
 
