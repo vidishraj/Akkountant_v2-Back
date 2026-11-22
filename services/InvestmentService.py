@@ -1059,6 +1059,43 @@ class InvestmentService(BaseService):
         """
         return self.StockService.kite_service.get_trades(userId)
 
+    # ───── ak-h1mq (2026-11-22): MF passthroughs for the Kite MF page ─────
+    #
+    # Thin pass-throughs to KiteService.get_mf_* (BE methods existed
+    # since the initial Kite integration but had no controller
+    # endpoints until ak-h1mq — Category B #10/#11/#12 of the Kite
+    # capability roadmap). READ-ONLY; no destructive paths wired.
+
+    def fetchKiteMFHoldings(self, userId):
+        """ak-h1mq: MF holdings from Kite (Coin).
+
+        Returns Kite's native MF-holdings shape — one dict per
+        scheme with fund identifier, folio, units, average buy
+        price, last NAV, PnL. CONSUME per §23 #2 — do not reshape
+        in BE; FE renders Kite's shape directly.
+        """
+        return self.StockService.kite_service.get_mf_holdings(userId)
+
+    def fetchKiteMFOrders(self, userId):
+        """ak-h1mq: MF orders (last 7 days) from Kite.
+
+        Kite's mf_orders() returns a bounded window; the per-bead
+        FE 'Orders history' tab shows this window. If the Overseer
+        later wants longer history, a per-order persistence table
+        + background fetch would be the follow-up (out of scope).
+        """
+        return self.StockService.kite_service.get_mf_orders(userId)
+
+    def fetchKiteMFSips(self, userId):
+        """ak-h1mq: active + completed MF SIPs from Kite.
+
+        READ-ONLY. SIP pause / edit / cancel actions are explicitly
+        deferred to a separate SIP-management bead (per bead FE
+        scope: "'Pause' / 'Edit' actions (defer actions to separate
+        SIP-management bead — this is READ-only)").
+        """
+        return self.StockService.kite_service.get_mf_sips(userId)
+
     #: ak-zai2: in-memory margins cache. Per-user, 5-minute TTL.
     #: Margins don't change sub-minute; batching this across the
     #: FE's periodic polling + agent queries saves one HTTP round-

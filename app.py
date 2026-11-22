@@ -414,6 +414,13 @@ class Akkountant(Flask):
             # reconciliation cross-check (via ReconcileTradesTask).
             ('/kite/margins', 'GET', self.investmentEP.fetchKiteMargins),
             ('/kite/trades', 'GET', self.investmentEP.fetchKiteTrades),
+            # ak-h1mq (2026-11-22): Mutual Funds detail-page endpoints
+            # — 3 thin READ-ONLY wrappers over KiteService.get_mf_*.
+            # Backs the FE MF-page holdings / orders / SIPs tabs
+            # (Category B #10/#11/#12 of the Kite capability roadmap).
+            ('/kite/mf/holdings', 'GET', self.investmentEP.fetchKiteMFHoldings),
+            ('/kite/mf/orders', 'GET', self.investmentEP.fetchKiteMFOrders),
+            ('/kite/mf/sips', 'GET', self.investmentEP.fetchKiteMFSips),
             # ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces —
             # active GTTs with LTP-distance overlay + price alerts +
             # per-alert trigger history drill-down.

@@ -511,6 +511,75 @@ class InvestmentController:
             self.logger.error(f"Error fetching Kite trades: {str(e)}")
             return jsonify({"error": "Failed to fetch trades"}), 500
 
+    # ───── ak-h1mq (2026-11-22): Kite MF page endpoints ─────
+    #
+    # Three thin controller wrappers over KiteService.get_mf_*
+    # (methods existed; endpoints didn't until this bead). Backs
+    # the Category B #10/#11/#12 FE Mutual Funds detail page.
+    # READ-ONLY — no destructive / mutation paths. §23 CONSUME:
+    # Kite's native shapes flow through unchanged for the FE.
+    # KiteTokenExpired / KiteAuthError surface as reconnect-
+    # required so the FE can prompt the user to re-auth without
+    # a stale cache getting in the way.
+
+    @Logger.standardLogger
+    def fetchKiteMFHoldings(self):
+        """ak-h1mq: GET /kite/mf/holdings — current MF holdings
+        from Kite (Coin). One row per scheme with folio / units /
+        avg buy price / last NAV / PnL.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            holdings = self.InvestmentService.fetchKiteMFHoldings(user_id)
+            return jsonify({"holdings": holdings}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite MF holdings: {str(e)}")
+            return jsonify({"error": "Failed to fetch MF holdings"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteMFOrders(self):
+        """ak-h1mq: GET /kite/mf/orders — MF buy/sell orders (last
+        7 days per Kite's mf_orders() window). Powers the FE
+        'Orders history' tab.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            orders = self.InvestmentService.fetchKiteMFOrders(user_id)
+            return jsonify({"orders": orders}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite MF orders: {str(e)}")
+            return jsonify({"error": "Failed to fetch MF orders"}), 500
+
+    @Logger.standardLogger
+    def fetchKiteMFSips(self):
+        """ak-h1mq: GET /kite/mf/sips — active + completed MF SIPs
+        from Kite. READ-ONLY per bead; SIP pause/edit/cancel
+        actions are explicitly deferred to a separate SIP-
+        management bead.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            sips = self.InvestmentService.fetchKiteMFSips(user_id)
+            return jsonify({"sips": sips}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite MF SIPs: {str(e)}")
+            return jsonify({"error": "Failed to fetch MF SIPs"}), 500
+
     # ───── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces ─────
 
     @Logger.standardLogger
