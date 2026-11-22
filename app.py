@@ -30,6 +30,7 @@ from controllers.portfolioVisitorEP import PortfolioVisitorController
 from controllers.wealthDigestEP import WealthDigestController  # ak-5vg
 from controllers.userFilesEP import UserFilesController  # ak-9dz
 from controllers.reconciliationEP import ReconciliationController  # ak-cipj
+from controllers.watchlistEP import WatchlistController  # ak-05af
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -53,6 +54,7 @@ from services.cronAgent import CronAgent
 from services.portfolioVisitorService import PortfolioVisitorService
 from services.mailProcessorService import MailProcessorService
 from services.reconciliationService import ReconciliationService
+from services.watchlistService import WatchlistService  # ak-05af
 from services.tasks.checkMailUnifiedTask import CheckMailUnifiedTask
 from utils.logger import Logger
 import models
@@ -246,6 +248,20 @@ class Akkountant(Flask):
         # ReconciliationService above (L194); no duplicate instance.
         self.reconciliationEP = ReconciliationController(
             self.reconciliationService,
+        )
+        # ak-05af: persistent watchlist CRUD + LTP-batch surface.
+        # Category C #16 of the Kite capability roadmap. Wires
+        # the WatchlistService with KiteService (via StocksService)
+        # for the LTP batch — ``/watchlist/ltp`` hits Kite on behalf
+        # of the user; CRUD endpoints are pure DB. Reuses the
+        # existing InvestmentService singleton for the Kite login
+        # URL on auth-error reconnect payload.
+        self.watchlistService = WatchlistService(
+            kite_service=self.investmentService.StockService.kite_service,
+        )
+        self.watchlistEP = WatchlistController(
+            self.watchlistService,
+            investment_service=self.investmentService,
         )
 
     def _setup_schedulers(self):
@@ -449,6 +465,30 @@ class Akkountant(Flask):
         ]
 
         for rule, method, view_func in investmentRoutes:
+            self.add_url_rule(rule, methods=[method], view_func=view_func)
+
+        # ak-05af (2026-11-22): Watchlist CRUD + LTP batch endpoints.
+        # First Kite-roadmap bead with INTENTIONAL mutations (POST /
+        # DELETE / PUT) — single-user, non-destructive own-data
+        # shape per bead §23; single-delete gate NOT required
+        # (would be for bulk-delete). ``/watchlist/ltp`` polls
+        # Kite every 30s from the FE until the WebSocket bead
+        # (ak-vue6) lands; KiteAuthError on /ltp maps to the
+        # standard reconnect-required 401 payload.
+        watchlistRoutes = [
+            ('/watchlist', 'GET', self.watchlistEP.listItems),
+            ('/watchlist', 'POST', self.watchlistEP.addItem),
+            (
+                '/watchlist/<item_id>', 'DELETE',
+                self.watchlistEP.removeItem,
+            ),
+            (
+                '/watchlist/<item_id>/note', 'PUT',
+                self.watchlistEP.updateNote,
+            ),
+            ('/watchlist/ltp', 'GET', self.watchlistEP.fetchLtp),
+        ]
+        for rule, method, view_func in watchlistRoutes:
             self.add_url_rule(rule, methods=[method], view_func=view_func)
 
         # Freelance Management API Routes

@@ -44,6 +44,11 @@ from models.goldHistoricalRate import GoldHistoricalRate
 # backing the /kite/instruments/search autocomplete surface. Imported
 # BEFORE db.create_all() so the fresh table materializes on next boot.
 from models.kiteInstrument import KiteInstrument
+# ak-05af (2026-11-22): persistent watchlist of symbols the Overseer
+# wants to monitor without holding. Imported BEFORE db.create_all()
+# so the fresh table materializes on next boot. Category C #16 of
+# the Kite capability roadmap.
+from models.watchlistItem import WatchlistItem
 from models.Base import Base
 from .freelance_management import Customer, InvoiceTemplate, Invoice, InvoiceItem, Signature, InvoiceSignature, InvoicePayment, InvoiceCustomField, CurrencyEnum, InvoiceStatusEnum, PendingPaymentClaim
 from .customer_emails import CustomerEmail
