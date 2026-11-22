@@ -1096,6 +1096,23 @@ class InvestmentService(BaseService):
         """
         return self.StockService.kite_service.get_mf_sips(userId)
 
+    def fetchKiteOrders(self, userId):
+        """ak-zi54 (2026-11-22): today's full order book from Kite.
+
+        Thin pass-through to KiteService.get_orders. Unlike
+        ``fetchKiteTrades`` which returns only FILLED orders,
+        ``get_orders`` returns EVERY order placed today across
+        every status: OPEN / COMPLETE / CANCELLED / REJECTED /
+        TRIGGER_PENDING. Powers the FE 'Today's Orders' surface
+        that complements the existing 'Today's Trades' tile.
+
+        READ-ONLY per bead — placing / modifying / cancelling
+        orders is explicitly deferred to a separate bead. §23 #2
+        CONSUME: Kite's native order dict shape flows through
+        unchanged for the FE.
+        """
+        return self.StockService.kite_service.get_orders(userId)
+
     #: ak-zai2: in-memory margins cache. Per-user, 5-minute TTL.
     #: Margins don't change sub-minute; batching this across the
     #: FE's periodic polling + agent queries saves one HTTP round-

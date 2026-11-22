@@ -580,6 +580,33 @@ class InvestmentController:
             self.logger.error(f"Error fetching Kite MF SIPs: {str(e)}")
             return jsonify({"error": "Failed to fetch MF SIPs"}), 500
 
+    @Logger.standardLogger
+    def fetchKiteOrders(self):
+        """ak-zi54 (2026-11-22): today's full order book from Kite.
+
+        Returns every order placed today across all statuses
+        (OPEN / COMPLETE / CANCELLED / REJECTED / TRIGGER_PENDING)
+        — differs from /kite/trades which only returns FILLED
+        orders. Powers the FE 'Today's Orders' complement to the
+        existing 'Today's Trades' surface.
+
+        READ-ONLY per bead — placing / modifying / cancelling
+        orders is deferred to a separate bead. §23 #2 CONSUME:
+        Kite's native order shape flows through unchanged.
+        """
+        user_id = g.get('firebase_id')
+        if not user_id:
+            return jsonify({"error": "User ID not found"}), 400
+
+        try:
+            orders = self.InvestmentService.fetchKiteOrders(user_id)
+            return jsonify({"orders": orders}), 200
+        except KiteAuthError as e:
+            return self._kiteReconnectResponse(e)
+        except Exception as e:
+            self.logger.error(f"Error fetching Kite orders: {str(e)}")
+            return jsonify({"error": "Failed to fetch orders"}), 500
+
     # ───── ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces ─────
 
     @Logger.standardLogger

@@ -421,6 +421,11 @@ class Akkountant(Flask):
             ('/kite/mf/holdings', 'GET', self.investmentEP.fetchKiteMFHoldings),
             ('/kite/mf/orders', 'GET', self.investmentEP.fetchKiteMFOrders),
             ('/kite/mf/sips', 'GET', self.investmentEP.fetchKiteMFSips),
+            # ak-zi54 (2026-11-22): today's full order book from Kite
+            # — complements /kite/trades (filled only) with every
+            # order placed today across all statuses (OPEN / COMPLETE
+            # / CANCELLED / REJECTED / TRIGGER_PENDING). READ-ONLY.
+            ('/kite/orders', 'GET', self.investmentEP.fetchKiteOrders),
             # ak-dx98 Kite Bundle 3 (2026-11-12): monitoring surfaces —
             # active GTTs with LTP-distance overlay + price alerts +
             # per-alert trigger history drill-down.
