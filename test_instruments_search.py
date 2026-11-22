@@ -100,13 +100,31 @@ def _ast_lift_search_method():
         src = fh.read()
     tree = ast.parse(src)
     kept = []
-    want = {"search_instruments", "_serialize_instrument"}
+    want_methods = {"search_instruments", "_serialize_instrument"}
+    # ak-kp3u (2026-11-22): also pull the module-level
+    # _escape_like_wildcards helper + its constants that
+    # search_instruments now depends on. Without these the lifted
+    # method raises NameError on every call.
+    want_module_fns = {"_escape_like_wildcards"}
+    want_module_consts = {"_LIKE_ESCAPE_CHAR", "_LIKE_SPECIAL_CHARS"}
     for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            t = node.targets[0]
+            if isinstance(t, ast.Name) and t.id in want_module_consts:
+                kept.append(node)
+                continue
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in want_module_fns
+        ):
+            node.decorator_list = []
+            kept.append(node)
+            continue
         if isinstance(node, ast.ClassDef) and node.name == "KiteService":
             for child in node.body:
                 if isinstance(
                     child, (ast.FunctionDef, ast.AsyncFunctionDef)
-                ) and child.name in want:
+                ) and child.name in want_methods:
                     child.decorator_list = []
                     kept.append(child)
     lift = ast.Module(body=kept, type_ignores=[])

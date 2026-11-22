@@ -56,6 +56,45 @@ def next_kite_token_expiry(issued_at=None):
     return int(boundary.timestamp())
 
 
+# ak-kp3u (2026-11-22): pre-escape user-supplied LIKE query so the
+# three special chars ``%`` / ``_`` / ``\\`` match literally rather
+# than as SQL-LIKE wildcards. Used by
+# ``KiteService.search_instruments``; factored out as a module-
+# level helper so unit tests can exercise it without instantiating
+# the service (which pulls Base_Service / Flask / Google chain).
+#
+# Escape order matters: ``\\`` must be first so later insertions
+# don't get themselves escaped. The returned string is intended to
+# be passed to SQLAlchemy ``ilike(pattern, escape='\\')`` so the
+# DB emits ``LIKE 'pattern' ESCAPE '\\'``.
+_LIKE_ESCAPE_CHAR = "\\"
+_LIKE_SPECIAL_CHARS = ("\\", "%", "_")
+
+
+def _escape_like_wildcards(text):
+    """Escape SQL LIKE wildcards for literal matching.
+
+    Prepends a backslash to every occurrence of ``\\``, ``%``,
+    ``_`` in ``text``. Order of escaping matters — the backslash
+    itself must be escaped FIRST so later-inserted escapes don't
+    themselves get prefixed.
+
+    Caller must pass ``escape='\\'`` to SQLAlchemy ``ilike`` /
+    ``like`` so the dialect emits the ``ESCAPE '\\'`` clause;
+    otherwise the backslash prefix is interpreted as-is (as a
+    literal backslash in the pattern) and the escape doesn't work.
+
+    Returns the escaped string; empty / non-str input passes
+    through unchanged so the caller's own empty-check path stays
+    authoritative.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    for ch in _LIKE_SPECIAL_CHARS:
+        text = text.replace(ch, _LIKE_ESCAPE_CHAR + ch)
+    return text
+
+
 class KiteService(BaseService):
 
     def __init__(self):
@@ -371,13 +410,28 @@ class KiteService(BaseService):
         elif lim > 100:
             lim = 100
 
-        # Rank query: prefix-match on tradingsymbol first (most
-        # relevant for autocomplete), then substring match on either
-        # tradingsymbol or name. One UNION-ALL in SQL would be more
-        # efficient; application-side dedupe keeps the query simple
-        # and avoids dialect-specific syntax.
-        prefix_pattern = f"{q}%"
-        substring_pattern = f"%{q}%"
+        # ak-kp3u (2026-11-22): escape LIKE wildcards BEFORE
+        # concatenating them into the pattern. SQL's LIKE/ILIKE
+        # treats ``%`` (any-string) and ``_`` (any-char) as special.
+        # Pre-fix, a user query like ``"50%"`` would match any
+        # tradingsymbol starting with "50" through anything (the
+        # trailing ``%`` becomes the real wildcard the user
+        # didn't ask for); a literal underscore in a scheme name
+        # (e.g. ``"TAMO_IV"``) would match any single char at
+        # that position. Public-data surface + 100-row clamp
+        # limits the blast radius, but the semantic is wrong:
+        # the user types ``%`` expecting a literal percent sign,
+        # not a wildcard.
+        #
+        # Fix: escape ``%`` / ``_`` / ``\\`` by inserting a
+        # backslash before each, then pass ``escape='\\'`` to
+        # ``ilike`` so SQLAlchemy emits ``LIKE 'pattern' ESCAPE
+        # '\\'``. The escape char must itself be escaped so a
+        # user-typed backslash doesn't accidentally escape the
+        # next char.
+        q_escaped = _escape_like_wildcards(q)
+        prefix_pattern = f"{q_escaped}%"
+        substring_pattern = f"%{q_escaped}%"
 
         base = self.db.session.query(KiteInstrument)
         if exchange:
@@ -388,7 +442,9 @@ class KiteService(BaseService):
         # Prefix-on-tradingsymbol pass first (highest relevance).
         prefix_rows = (
             base.filter(
-                KiteInstrument.tradingsymbol.ilike(prefix_pattern)
+                KiteInstrument.tradingsymbol.ilike(
+                    prefix_pattern, escape="\\",
+                )
             )
             .order_by(KiteInstrument.tradingsymbol.asc())
             .limit(lim)
@@ -407,9 +463,11 @@ class KiteService(BaseService):
                 base.filter(
                     or_(
                         KiteInstrument.tradingsymbol.ilike(
-                            substring_pattern,
+                            substring_pattern, escape="\\",
                         ),
-                        KiteInstrument.name.ilike(substring_pattern),
+                        KiteInstrument.name.ilike(
+                            substring_pattern, escape="\\",
+                        ),
                     )
                 )
                 .order_by(KiteInstrument.tradingsymbol.asc())

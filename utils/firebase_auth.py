@@ -39,10 +39,38 @@ Credentials file path:
   * ``FIREBASE_CREDENTIALS_PATH=/path/to/service-account.json``
   * File permissions enforced by operator (0o600 recommended, per
     the rest of the Google / Kite credential pattern).
-  * If unset AND mode is not ``raw_uid_only``, init logs a loud
-    WARN and falls back to ``raw_uid_only`` behaviour for this
-    process. This prevents a broken deploy from locking every
-    user out; the WARN is greppable so the operator sees it.
+  * If unset / missing / malformed, ``init_firebase_admin`` logs
+    a loud WARN and returns False. The WARN is greppable so the
+    operator sees the deploy issue.
+
+Init-failure behaviour (fail-closed, mode-dependent — ak-zttr
+2026-11-22 docstring fix: pre-fix wording claimed this "prevents
+a broken deploy from locking every user out", which was wrong
+on two of the three modes):
+
+  * ``verify_only`` + JWT-shaped header + init returned False:
+    ``authenticate_request`` raises ``FirebaseAuthError`` →
+    401. EVERY JWT-sending client is locked out until creds
+    are plumbed. This is the CORRECT fail-closed behaviour for
+    the final-prod-state mode — a broken-credentials deploy
+    MUST NOT silently fall back to raw-UID trust (that would
+    reinstate the IDOR surface).
+  * ``verify_with_raw_uid_fallback`` + JWT-shaped header + init
+    returned False: same ``FirebaseAuthError`` → 401. We do
+    NOT silently fall back to treating the JWT-shaped string
+    as a raw UID. Rollout-cycle mode is only generous about
+    the bare-UID input shape — never about a verify failure.
+  * ``verify_with_raw_uid_fallback`` + bare-UID header + init
+    returned False: accepted with WARN log. This is the only
+    path where init-failure doesn't lock the client out —
+    pre-ak-c8l clients keep working during rollout.
+  * ``raw_uid_only``: ``init_firebase_admin`` is never called,
+    so init-failure is irrelevant. LOCAL / test fast-path.
+
+Summary: init-failure is fail-closed for the JWT path across
+both prod modes, which is the security-correct choice — and
+the pre-fix docstring's "prevents lockout" claim was false
+except in the narrow rollout-cycle bare-UID case.
 
 ## Single-user invariant
 
@@ -295,13 +323,21 @@ def authenticate_request(
             from firebase_admin import auth as fb_auth
             decoded = fb_auth.verify_id_token(header_value)
         except Exception as exc:
-            # Surface a short reason — never include the raw token
-            # in the response or log. Log the exception class name
-            # at WARN so operators can see verify failures without
-            # leaking token content.
+            # ak-zttr (2026-11-22) MINOR 1 fix: log the exception
+            # CLASS NAME only — not ``str(exc)``. The firebase_admin
+            # SDK composes exception messages from internal fields
+            # that MAY include token fragments (e.g.
+            # ``InvalidIdTokenError`` has historically surfaced
+            # token-decode intermediate state in its str). The
+            # exception CLASS name is sufficient for operator
+            # triage (ExpiredIdTokenError / InvalidIdTokenError /
+            # RevokedIdTokenError / etc. all discriminate the
+            # failure mode without echoing bytes). Dropping
+            # ``str(exc)`` closes the token-fragment-leak surface
+            # even if a future SDK version regresses.
             logger.warning(
-                f"Firebase auth: verify_id_token failed "
-                f"({type(exc).__name__}): {str(exc)[:200]}"
+                "Firebase auth: verify_id_token failed "
+                f"({type(exc).__name__})"
             )
             raise FirebaseAuthError(
                 "Firebase ID token verification failed"
