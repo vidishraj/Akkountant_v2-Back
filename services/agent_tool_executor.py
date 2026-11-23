@@ -810,6 +810,12 @@ def _execute_transaction_tool(tool_name, tool_input, user_id, service, mail_proc
             "count": result.get("count", 0),
             "credit_sum": result.get("credit_sum", 0),
             "debit_sum": result.get("debit_sum", 0),
+            # ak-p3id: positive-magnitude ledger fields so the
+            # agent can answer "what's my net inflow?" without
+            # wrestling with the stored-sign convention.
+            "in_sum": result.get("in_sum", 0),
+            "out_sum": result.get("out_sum", 0),
+            "net": result.get("net", 0),
             "page": result.get("page", page),
             "results": formatted_results
         }

@@ -46,8 +46,16 @@ class TransactionController:
         response = {
             "total_count": transactions["count"],
             "page": page,
+            # Legacy signed sums (kept for backward compat per
+            # ak-p3id — FE should migrate to in_sum/out_sum/net).
             "credit_sum": transactions["credit_sum"],
             "debit_sum": transactions["debit_sum"],
+            # ak-p3id: unambiguous positive-magnitude ledger
+            # fields + correct net. Home ledger tile + Transactions
+            # summary should bind these.
+            "in_sum": transactions["in_sum"],
+            "out_sum": transactions["out_sum"],
+            "net": transactions["net"],
             "page_size": len(results),
             "results": results,
         }

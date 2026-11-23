@@ -37,9 +37,40 @@ class DashboardService(BaseService):
             now = datetime.now()
             current_month_start = datetime(now.year, now.month, 1).date()
 
-            # ak-lvu A.3 + A.5: canonical earnings function used for every
-            # money aggregate. No `int()` truncation; Decimal throughout.
-            # Casts to float at the very end for JSON serialization only.
+            # ak-p3id (2026-11-23): §2 ACCOUNTING-CORRECTNESS fix.
+            # Pre-ak-p3id the Home "Freelance paid · this FY" tile
+            # bound to `totalEarnings` (all-time) + mislabelled it
+            # as "this FY" — showing 88.15L on Home but 51.79L on
+            # the Freelance dashboard for the same user at the
+            # same moment (70% divergence).
+            #
+            # Root cause: no canonical FY field existed on the
+            # dashboard response, so Home used the wrong field.
+            # Fix: add `fyEarnings` + `fyStart` + `fyEnd` so both
+            # pages bind the same source.
+            #
+            # Indian FY definition: April 1 → March 31. If today
+            # is >= April 1, FY starts this year's April 1; else
+            # it started previous year's April 1.
+            #
+            # Convention — matches `get_earnings_by_date_range`
+            # (which the Freelance dashboard already uses): filter
+            # by Invoice.issue_date within FY, sum Σ payments in
+            # INR of paid+partially_paid invoices. Semantic
+            # question of "paid this FY" = "invoiced this FY" vs
+            # "payment-date this FY" is a separate accounting-
+            # policy decision (filed as follow-up if Overseer
+            # wants payment-date semantics instead).
+            fy_start_month = 4  # April
+            if now.month >= fy_start_month:
+                fy_start_year = now.year
+            else:
+                fy_start_year = now.year - 1
+            fy_start_date = datetime(fy_start_year, fy_start_month, 1).date()
+            # FY end is today-inclusive — we sum what's actually
+            # happened so far in the FY (not March 31 of next year
+            # which would include zero future rows anyway).
+            fy_end_date = now.date()
 
             # Total earnings: Σ payments (INR) of PAID + PARTIALLY_PAID invoices, all-time.
             total_earnings = get_earnings_in_inr(session, user_id)
@@ -48,6 +79,14 @@ class DashboardService(BaseService):
             monthly_earnings = get_earnings_in_inr(
                 session, user_id,
                 start_date=current_month_start, end_date=now.date(),
+            )
+
+            # ak-p3id: FY earnings — same canonical function as
+            # get_earnings_by_date_range, scoped to Indian FY.
+            # Home + Freelance dashboard now bind the SAME field.
+            fy_earnings = get_earnings_in_inr(
+                session, user_id,
+                start_date=fy_start_date, end_date=fy_end_date,
             )
 
             # Earnings by month (last 12, in INR).
@@ -174,6 +213,12 @@ class DashboardService(BaseService):
             return {
                 "totalEarnings": float(total_earnings),
                 "monthlyEarnings": float(monthly_earnings),
+                # ak-p3id: FY earnings + FY bounds for FE binding.
+                # Home "Freelance paid · this FY" tile + Freelance
+                # dashboard "PAID THIS FY" tile both bind fyEarnings.
+                "fyEarnings": float(fy_earnings),
+                "fyStart": fy_start_date.strftime('%Y-%m-%d'),
+                "fyEnd": fy_end_date.strftime('%Y-%m-%d'),
                 "completedProjects": completed_projects,
                 "activeClients": active_clients,
                 "earningsByMonth": earnings_by_month,

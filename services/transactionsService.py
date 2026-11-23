@@ -138,6 +138,36 @@ class TransactionService(BaseService):
 
         credit_sum, debit_sum = sum_query.first() or (0, 0)
 
+        # ak-p3id (2026-11-23): §2 ACCOUNTING-CORRECTNESS fix.
+        # Stored convention in Transactions.amount:
+        #   * amount < 0 → credit (money IN); stored as NEGATIVE
+        #   * amount > 0 → debit  (money OUT); stored as POSITIVE
+        # Pre-ak-p3id the service returned credit_sum / debit_sum in
+        # raw stored form (credit_sum negative, debit_sum positive)
+        # and let the FE do the sign bookkeeping. Two FE call sites
+        # (Home ledger tile + Transactions summary) then disagreed:
+        #   * Home rendered credit_sum directly → "In = −3.11Cr" (sign-wrong)
+        #   * Transactions computed `net = credit_sum - debit_sum` →
+        #     net = (−3.05) − (+3.00) = −6.05Cr (sign-wrong; off by
+        #     2× magnitude vs truth)
+        # The correct ledger math is "In − Out" with both sides in
+        # POSITIVE-MAGNITUDE convention. We add three new fields with
+        # an unambiguous positive-magnitude shape so FE can bind
+        # them directly, no sign juggling. Existing credit_sum /
+        # debit_sum fields stay unchanged for backward compat.
+        #
+        # Contract:
+        #   in_sum  : Decimal/float ≥ 0 — magnitude of money IN
+        #   out_sum : Decimal/float ≥ 0 — magnitude of money OUT
+        #   net     : signed — in_sum - out_sum
+        #             (POSITIVE = net received, NEGATIVE = net spent)
+        #
+        # Regression-test (test_ledger_net_signfix.py) pins the
+        # arithmetic against hand-computed fixtures.
+        in_sum = float(-(credit_sum or 0))
+        out_sum = float(debit_sum or 0)
+        net = in_sum - out_sum
+
         # Apply sorting if `sorted` is provided
         if sorted := filters.get('sorted'):
             column, order = sorted.get('column'), sorted.get('order', 'asc')
@@ -157,8 +187,16 @@ class TransactionService(BaseService):
         return {
             "count": total_count,
             "results": paginated_results,
+            # Backward-compat raw-stored-sign fields (see docstring
+            # above for stored-convention + why these are kept).
             "credit_sum": credit_sum,
             "debit_sum": debit_sum,
+            # ak-p3id: canonical positive-magnitude ledger fields.
+            # FE Home ledger tile + Transactions summary should
+            # bind these instead of the raw credit_sum/debit_sum.
+            "in_sum": in_sum,
+            "out_sum": out_sum,
+            "net": net,
             "page": page
         }
 
