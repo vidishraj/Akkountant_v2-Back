@@ -66,6 +66,10 @@ class User(Base):
     transaction_relationship = relationship('SecurityTransactions', back_populates='user_relationship')
     investment_history = relationship('InvestmentHistory', back_populates='user_relationship')
     investment_snapshots = relationship('InvestmentSnapshot', back_populates='user_relationship')
+    # ak-7y6o (ak-8kp4 Phase 3a): per-trade historical records
+    # from the weekly-securities-statement PDF backfill. Distinct
+    # table from investment_snapshots (per-period aggregate).
+    investment_trades = relationship('InvestmentTrade', back_populates='user_relationship')
     fo_trades = relationship('FOTrade', back_populates='user_relationship')
     processed_emails = relationship('ProcessedEmails', back_populates='user_relationship')
     statement_periods = relationship('StatementPeriod', back_populates='user_relationship')

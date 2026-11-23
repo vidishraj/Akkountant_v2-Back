@@ -22,6 +22,12 @@ from models.processedEmails import ProcessedEmails
 from models.statementPeriods import StatementPeriod
 from models.transferLinks import TransferLink
 from models.investmentSnapshot import InvestmentSnapshot
+# ak-7y6o (ak-8kp4 Phase 3a, 2026-11-23): per-trade historical
+# records reconstructed from the weekly-securities-statement
+# PDFs. Distinct table from investmentSnapshots (per-period
+# aggregate). Imported BEFORE db.create_all() so the fresh
+# table is created on next boot; no manual ALTER required.
+from models.investmentTrade import InvestmentTrade
 # ak-4o41 Bundle 1: historical EOD candles cache (per-instrument per-day
 # OHLCV), populated by BackfillHistoricalCandlesTask and consumed by the
 # /investment-snapshot/history endpoint. Imported BEFORE db.create_all()
