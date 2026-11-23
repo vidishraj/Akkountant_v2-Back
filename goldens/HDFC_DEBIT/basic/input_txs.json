@@ -1,0 +1,50 @@
+{
+  "_comment": "ak-qpkm golden: HDFC_DEBIT basic fixture. Synthesized tx dicts matching the shape the LLM extractor emits via _handle_insert_batch_transactions. No real user data; all names/refs are fictitious.",
+  "bank": "HDFC_DEBIT",
+  "file_id": "golden_hdfc_basic_v1",
+  "user_id": "golden_user",
+  "transactions": [
+    {
+      "date": "01/11/2026",
+      "description": "UPI-AMAZON PAY INDIA-UPI-1234567890",
+      "amount": 1250.00,
+      "bank_reference_id": "1234567890",
+      "line_position": 12
+    },
+    {
+      "date": "03/11/2026",
+      "description": "SALARY CREDIT - OCTOBER",
+      "amount": -150000.00,
+      "bank_reference_id": "SAL-OCT-2026",
+      "line_position": 15
+    },
+    {
+      "date": "05/11/2026",
+      "description": "UPI-SWIGGY LIMITED-UPI-9876543210",
+      "amount": 450.00,
+      "bank_reference_id": "9876543210",
+      "line_position": 18
+    },
+    {
+      "date": "10/11/2026",
+      "description": "IMPS PAYMENT TO JOHN DOE",
+      "amount": 5000.00,
+      "bank_reference_id": "IMPS-ABC123",
+      "line_position": 22
+    },
+    {
+      "date": "15/11/2026",
+      "description": "SMS ALERT FEE",
+      "amount": 25.00,
+      "bank_reference_id": null,
+      "line_position": 28
+    },
+    {
+      "date": "20/11/2026",
+      "description": "INTEREST CREDITED",
+      "amount": -312.50,
+      "bank_reference_id": null,
+      "line_position": 35
+    }
+  ]
+}

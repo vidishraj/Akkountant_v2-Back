@@ -1,0 +1,22 @@
+{
+  "_comment": "ak-qpkm golden: expected post-pipeline DB state for HDFC_DEBIT basic fixture. Hand-computed (NOT snapshot). Covers row count + sums + hash shape per tx.",
+  "row_count": 6,
+  "primary_hash_count": 4,
+  "fallback_hash_count": 2,
+  "in_sum": 150312.50,
+  "out_sum": 6725.00,
+  "net": 143587.50,
+  "ref_id_shapes": {
+    "_comment": "Per-tx hash-tier pins. Catches a regression where a tx silently swaps tiers (bank_reference_id present but hash uses fallback, or vice-versa).",
+    "0": {"tier": "primary", "amount": 1250.00},
+    "1": {"tier": "primary", "amount": -150000.00},
+    "2": {"tier": "primary", "amount": 450.00},
+    "3": {"tier": "primary", "amount": 5000.00},
+    "4": {"tier": "fallback", "amount": 25.00},
+    "5": {"tier": "fallback", "amount": -312.50}
+  },
+  "date_range": {
+    "first": "01/11/2026",
+    "last": "20/11/2026"
+  }
+}
