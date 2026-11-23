@@ -219,10 +219,21 @@ For MY job applications: extract company, job_title, status (applied/interview/o
         """Call Claude API using claude_agent_sdk"""
         try:
             # Configure Claude options for batch job email analysis
+            # ak-vhc2 (2026-11-23) SECURITY C-1: allowed_tools=[]
+            # explicitly denies every SDK built-in (Bash / Read /
+            # Write / Edit / WebFetch / WebSearch). Job classifier
+            # is max_turns=1 JSON output; no legit tool need. A
+            # prompt-injected job email (same vulnerability class
+            # as ak-csng mail classifier) can no longer shell out.
+            # Related: ak-v3mf m1 (same file, orthogonal fix —
+            # prompt-injection sentinel for the job-email prompt
+            # body). Repo-wide drift guard in
+            # test_ak_vhc2_claude_agent_options_allowed_tools.
             options = ClaudeAgentOptions(
                 model="haiku",
                 max_turns=1,
                 permission_mode="bypassPermissions",
+                allowed_tools=[],
                 system_prompt="""You are a precise email classifier that ONLY identifies emails about job applications I have personally submitted.
 
 STRICT CRITERIA - Mark as job-related ONLY if:

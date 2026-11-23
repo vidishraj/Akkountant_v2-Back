@@ -827,6 +827,18 @@ class AgentService(BaseService):
             # names are listed explicitly (defensive: SDK's "MCP tools always
             # available" contract is not relied on).
             #
+            # ak-vhc2 (2026-11-23) SECURITY C-1: `allowed_tools` is
+            # REQUIRED (empty list ok) on every ClaudeAgentOptions
+            # construction. The pre-ak-vhc2 ambiguity — "silently
+            # unavailable per SDK observations" vs "all built-ins
+            # callable per other LLM frameworks" — is defense-in-
+            # depth gated by the repo-wide drift guard
+            # `test_all_claude_agent_options_have_allowed_tools`
+            # (test_ak_vhc2_claude_agent_options_allowed_tools.py).
+            # Any future ClaudeAgentOptions that forgets
+            # allowed_tools reds that test; the explicit shape is
+            # also a copy-paste prophylactic.
+            #
             # WebSearch + WebFetch were previously listed defensively after the
             # April outage, but the three chat personas operate exclusively on
             # the Overseer's own data via MCP — they have no web-data need. The

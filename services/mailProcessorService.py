@@ -639,6 +639,17 @@ class MailProcessorService:
         # Dangerous bypassPermissions sites (:747, :3191) are
         # handled in Phase 2 (ak-n0cg) with a proper permission
         # handler.
+        #
+        # ak-vhc2 (2026-11-23) SECURITY C-1: `allowed_tools=[]`
+        # explicitly denies every SDK built-in (Bash / Read /
+        # Write / Edit / WebFetch / WebSearch) + every MCP tool.
+        # Classification is a pure JSON-output task; no legit
+        # tool need. A prompt-injected classifier (via :811 if
+        # the sentinels were ever bypassed) can no longer shell
+        # out. Repo-wide drift guard
+        # `test_all_claude_agent_options_have_allowed_tools`
+        # (test_ak_vhc2_*) enforces the invariant on every new
+        # ClaudeAgentOptions construction.
         options = ClaudeAgentOptions(
             model="opus",
             system_prompt=_wrap_sysprompt_with_injection_guard(
@@ -646,6 +657,7 @@ class MailProcessorService:
             ),
             max_turns=1,
             permission_mode="default",
+            allowed_tools=[],
         )
 
         prompt_text = (
@@ -2047,6 +2059,13 @@ class MailProcessorService:
             # any behavior change. Dangerous bypassPermissions sites
             # (:TEXT_EMAIL extract + PDF image mode) are handled in
             # Phase 2 bead ak-n0cg.
+            # ak-vhc2 (2026-11-23) SECURITY C-1: allowed_tools=[]
+            # explicitly denies every SDK built-in. PDF text mode
+            # is structured-output only (JSON schema) with no MCP
+            # tools wired; the LLM has no legit tool need. A
+            # prompt-injected PDF extract (via crafted statement
+            # content) can no longer shell out to Bash / read
+            # arbitrary files / WebFetch to attacker URLs.
             text_mode_options = ClaudeAgentOptions(
                 model="sonnet",
                 system_prompt=PDF_SYSTEM_PROMPT,
@@ -2056,6 +2075,7 @@ class MailProcessorService:
                     "type": "json_schema",
                     "schema": self._TXN_OUTPUT_SCHEMA,
                 },
+                allowed_tools=[],
             )
             self.logger.info("Text-mode: will use query() with structured output per chunk")
 
