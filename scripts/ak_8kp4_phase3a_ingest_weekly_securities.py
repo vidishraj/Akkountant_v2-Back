@@ -8,13 +8,17 @@ statement PDFs into `InvestmentTrade`.
 Operator ingest script — NOT a scheduler task. Overseer invokes
 once after a dry-run review:
 
-    # Dry-run (DEFAULT): parses + logs insert plan, zero DB writes.
-    python3 -I scripts/ak_8kp4_phase3a_ingest_weekly_securities.py \\
+Run from the repo root (the Flask app reads config relative to
+cwd). The script puts the repo root on sys.path itself, so plain
+`python3` and `python3 -I` both work (ak-4t7f):
+
+    # Dry-run (DEFAULT): parses + logs aggregates, zero DB writes.
+    venv/bin/python scripts/ak_8kp4_phase3a_ingest_weekly_securities.py \\
         --user-id <firebase_user_id>
 
     # Live: actually INSERT. Requires --commit AND --assume-yes
     # (mirrors ak-rcg1 convention — a single-typo guard).
-    python3 -I scripts/ak_8kp4_phase3a_ingest_weekly_securities.py \\
+    venv/bin/python scripts/ak_8kp4_phase3a_ingest_weekly_securities.py \\
         --user-id <firebase_user_id> \\
         --statements-dir /home/opc/Akkountant_v2-Back/claude_statements/<uid>/brokerage_statement \\
         --commit --assume-yes
@@ -24,9 +28,16 @@ once after a dry-run review:
 The `InvestmentTrade` table carries a composite UniqueConstraint
 on `(user_id, isin, trade_date, settlement_no, transaction_type)`.
 A second run on the same set of PDFs INSERTS zero new rows —
-the DB rejects duplicates via the constraint; this script
-catches the `IntegrityError` per row, counts it as a dedup
-collision (not a failure), and continues.
+the DB rejects duplicates via the constraint. Each row is
+inserted under its own SAVEPOINT; a violation of
+`uq_trade_idempotent` is counted as a dedup collision, while any
+OTHER IntegrityError or exception counts as a failure (ak-4t7f).
+
+## Exit codes
+
+0 ok | 2 no PDFs found | 3 --commit without --assume-yes |
+4 PyMuPDF not importable | 5 --user-id not in users (live) |
+6 some rows failed to insert (live; the rest were committed)
 
 ## Price = NULL
 
@@ -34,12 +45,15 @@ All rows land with `price=None` + `price_source=None`. Phase 3b
 (ak-TBD) UPDATE from Kite Console tradebook CSV. Phase 3c
 (ak-TBD) aggregates into per-period `investmentSnapshots`.
 
-## Report
+## Report (aggregates only — never per-row / per-scrip data)
 
 After the pass, emits:
   * total rows inserted / deduped / rejected (parser-side)
-  * per-FY (Apr→Mar Indian financial year) insert count
-  * top 10 scrips by insert count
+  * BUY / SELL counts, distinct-ISIN count, trade-date range
+  * per-FY (Apr→Mar Indian financial year) row count
+  * ISIN reconciliation: ISINs in PDF text == rows + rejections
+    + pending-skipped + unaccounted (ak-4t7f); files with
+    unaccounted ISINs are counted and WARNed
   * elapsed time
 
 §23 preserved: #2 (verbatim PDF tuple dedup, no normalization),
@@ -55,6 +69,12 @@ import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal
+
+# ak-4t7f: `python3 -I` drops the script's repo root from sys.path
+# (ModuleNotFoundError: utils). Put it back explicitly.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
 # ── argparse up front so --help / --dry-run previews work
@@ -141,85 +161,120 @@ def _find_pdfs(statements_dir: str) -> list:
 
 
 def _parse_all_pdfs(pdf_paths: list, logger) -> tuple:
-    """Call the parser on each PDF, flatten into one row list +
-    accumulate rejection counters. Per-PDF failures are logged
-    but don't abort the batch.
+    """Call the parser on each PDF; flatten rows and sum the
+    rejection + stats counters. Per-PDF failures are logged (file
+    basename + exception type only) and counted; they don't abort
+    the batch.
 
-    ak-7y6o reviewer CRITICAL (2026-11-23): parser now returns
-    (rows, rejections); sum rejections across all files so the
-    report surfaces "N trades rejected for missing
-    settlement_no" to the operator.
+    Returns (rows, rejections, stats). `stats` sums the parser's
+    per-file stats plus:
+      * parse_failures: files whose parse raised
+      * files_unaccounted: files with ISINs in the text that did not
+        reach a row, rejection or pending skip (ak-4t7f fail-loud)
     """
     from services.statement_parsers.zerodha_weekly_securities import (
         parse_weekly_securities_pdf,
     )
     all_rows = []
-    all_rejections = {
-        "qty_ambiguous": 0,
-        "label_mismatch": 0,
-        "missing_settlement": 0,
-    }
+    all_rejections = Counter()
+    stats = Counter()
     for p in pdf_paths:
         try:
-            rows, rejections = parse_weekly_securities_pdf(p)
+            rows, rejections, st = parse_weekly_securities_pdf(p)
         except Exception as exc:
             logger.warning(
-                "[ak-7y6o] parse failure on %s: %s — continuing",
+                "[ak-4t7f] parse failure on %s: %s — continuing",
                 os.path.basename(p), type(exc).__name__,
             )
+            stats["parse_failures"] += 1
             continue
-        logger.debug(
-            "[ak-7y6o] parsed %d rows from %s (rejections: %s)",
-            len(rows), os.path.basename(p), rejections,
-        )
         all_rows.extend(rows)
-        for k, v in rejections.items():
-            all_rejections[k] = all_rejections.get(k, 0) + v
-    return all_rows, all_rejections
+        all_rejections.update(rejections)
+        stats.update(st)
+        if st.get("unaccounted_isins"):
+            stats["files_unaccounted"] += 1
+    for k in ("qty_ambiguous", "label_mismatch", "missing_settlement",
+              "malformed"):
+        all_rejections.setdefault(k, 0)
+    return all_rows, dict(all_rejections), dict(stats)
 
 
 def _build_report(
-    inserted: int, deduped: int, rejections: dict,
-    inserted_rows: list, elapsed_s: float, logger,
+    inserted: int, deduped: int, rejections: dict, stats: dict,
+    rows: list, elapsed_s: float, logger,
 ) -> None:
-    """Emit the post-pass report: totals + per-FY + top-10
-    scrips + per-reason rejection counters.
+    """Emit the post-pass report. AGGREGATES ONLY: the rig secrecy
+    invariant forbids logging per-row or per-scrip financial data
+    (ak-4t7f removed the old per-row dump of the first candidate
+    rows and the per-scrip row-count table).
 
-    ak-7y6o reviewer CRITICAL: rejections now surfaces per-
-    reason counts (missing_settlement is the critical one —
-    Overseer sees these in dry-run output + decides whether
-    the underlying PDFs are anomalous).
+    `rows` = the rows the counts describe (dry-run: candidates;
+    live: actually inserted).
     """
     per_fy = defaultdict(int)
-    per_scrip = Counter()
-    for row in inserted_rows:
+    for row in rows:
         per_fy[_fy_label(row["trade_date"])] += 1
-        per_scrip[row["symbol"]] += 1
+    buys = sum(1 for r in rows if r["transaction_type"] == "BUY")
+    sells = sum(1 for r in rows if r["transaction_type"] == "SELL")
+    dates = [r["trade_date"] for r in rows]
 
     total_rejected = sum(rejections.values())
-    logger.info("── ak-7y6o Phase 3a INGEST REPORT ──")
+    logger.info("── ak-8kp4 Phase 3a INGEST REPORT ──")
     logger.info(
         "elapsed: %.1fs | inserted: %d | deduped: %d | "
-        "parser-rejected: %d",
+        "parser-rejected: %d | parse failures: %d",
         elapsed_s, inserted, deduped, total_rejected,
+        stats.get("parse_failures", 0),
     )
-    if total_rejected > 0:
-        logger.info(
-            "  Rejections by reason: missing_settlement=%d "
-            "(ak-7y6o CRITICAL — dedup + Phase 3b require "
-            "non-NULL settlement), qty_ambiguous=%d, "
-            "label_mismatch=%d — see WARN logs above for "
-            "per-row detail",
-            rejections.get("missing_settlement", 0),
-            rejections.get("qty_ambiguous", 0),
-            rejections.get("label_mismatch", 0),
+    logger.info(
+        "  Rejections by reason: missing_settlement=%d "
+        "(dedup + Phase 3b require non-NULL settlement), "
+        "qty_ambiguous=%d, label_mismatch=%d, malformed=%d",
+        rejections.get("missing_settlement", 0),
+        rejections.get("qty_ambiguous", 0),
+        rejections.get("label_mismatch", 0),
+        rejections.get("malformed", 0),
+    )
+    logger.info(
+        "  rows: %d (BUY=%d SELL=%d) | distinct ISINs: %d | "
+        "trade_date range: %s .. %s",
+        len(rows), buys, sells, len({r["isin"] for r in rows}),
+        min(dates) if dates else "n/a", max(dates) if dates else "n/a",
+    )
+    candidates = stats.get("candidate_rows", len(rows))
+    accounted = (
+        candidates + total_rejected + stats.get("pending_skipped", 0)
+        + stats.get("unaccounted_isins", 0)
+    )
+    logger.info(
+        "  ISIN reconciliation: ISINs in PDF text=%d == candidate "
+        "rows %d + rejected %d + pending-skipped %d + unaccounted "
+        "%d (=%d) -> %s",
+        stats.get("text_isins", 0), candidates, total_rejected,
+        stats.get("pending_skipped", 0),
+        stats.get("unaccounted_isins", 0), accounted,
+        (
+            "INCOMPLETE (parse failures)" if stats.get("parse_failures")
+            else "OK" if accounted == stats.get("text_isins", 0)
+            else "MISMATCH"
+        ),
+    )
+    if stats.get("files_unaccounted", 0):
+        logger.warning(
+            "  %d file(s) contain ISINs that reached no row / "
+            "rejection / pending skip (%d ISINs total). See the "
+            "per-file WARNs above; the layout may have changed.",
+            stats["files_unaccounted"], stats.get("unaccounted_isins", 0),
         )
+    logger.info(
+        "  tables: %d | zero-activity rows: %d | pending rows "
+        "skipped (settle in a later statement): %d",
+        stats.get("tables", 0), stats.get("zero_activity", 0),
+        stats.get("pending_skipped", 0),
+    )
     logger.info("Per-FY breakdown:")
     for fy in sorted(per_fy.keys()):
         logger.info("  %s: %d", fy, per_fy[fy])
-    logger.info("Top 10 scrips by row count:")
-    for scrip, count in per_scrip.most_common(10):
-        logger.info("  %-20s %d", scrip, count)
     logger.info("── END REPORT ──")
 
 
@@ -255,30 +310,35 @@ def main() -> int:
         len(pdf_paths), statements_dir,
     )
 
+    try:
+        import fitz  # noqa: F401  (PyMuPDF)
+    except ImportError:
+        logger.error(
+            "ak-4t7f: PyMuPDF (fitz) is not importable in this "
+            "interpreter. Run with the app venv's python.",
+        )
+        return 4
+
     t0 = datetime.utcnow()
-    rows, rejections = _parse_all_pdfs(pdf_paths, logger)
+    rows, rejections, stats = _parse_all_pdfs(pdf_paths, logger)
+    stats["candidate_rows"] = len(rows)
     logger.info(
-        "[ak-7y6o] parsed %d candidate rows total (rejected: "
-        "missing_settlement=%d, qty_ambiguous=%d, "
-        "label_mismatch=%d)",
-        len(rows),
-        rejections.get("missing_settlement", 0),
-        rejections.get("qty_ambiguous", 0),
-        rejections.get("label_mismatch", 0),
+        "[ak-4t7f] parsed %d candidate rows total (rejected: %d)",
+        len(rows), sum(rejections.values()),
     )
 
     if not args.commit:
         logger.info(
-            "[ak-7y6o] DRY-RUN — would INSERT %d rows. First 5:",
+            "[ak-7y6o] DRY-RUN — would INSERT up to %d rows "
+            "(minus DB dedup collisions).",
             len(rows),
         )
-        for row in rows[:5]:
-            logger.info("  %s", row)
         _build_report(
             inserted=0,
             deduped=0,
             rejections=rejections,
-            inserted_rows=rows,  # for FY/scrip breakdown
+            stats=stats,
+            rows=rows,
             elapsed_s=(datetime.utcnow() - t0).total_seconds(),
             logger=logger,
         )
@@ -300,17 +360,86 @@ def main() -> int:
     # paths don't pull the full boot chain.
     from app import app
     from models import InvestmentTrade
-    from sqlalchemy.exc import IntegrityError
-
-    inserted = 0
-    deduped = 0
-    inserted_rows: list = []
+    from models.users import User
 
     with app.app_context():
         session = app.db.session
-        for row in rows:
-            try:
-                trade = InvestmentTrade(
+        # ak-4t7f: verify the FK target up front so a wrong
+        # --user-id fails once, loudly, instead of N row failures.
+        if session.get(User, user_id) is None:
+            logger.error(
+                "ak-4t7f: --user-id not found in users table; "
+                "nothing inserted",
+            )
+            return 5
+        inserted, deduped, failed, inserted_rows = insert_rows(
+            session, InvestmentTrade, user_id, rows, logger,
+        )
+        session.commit()
+
+    stats["insert_failures"] = failed
+    _build_report(
+        inserted=inserted,
+        deduped=deduped,
+        rejections=rejections,
+        stats=stats,
+        rows=inserted_rows,
+        elapsed_s=(datetime.utcnow() - t0).total_seconds(),
+        logger=logger,
+    )
+    if failed:
+        logger.error(
+            "ak-4t7f: %d row(s) failed to insert (NOT dedup); the "
+            "other rows were committed. Investigate before relying "
+            "on totals.", failed,
+        )
+        return 6
+    logger.info(
+        "[ak-7y6o] LIVE ingest complete. Phase 3b (ak-TBD) "
+        "can now UPDATE price fields from Kite Console CSV.",
+    )
+    return 0
+
+
+_UQ_NAME = "uq_trade_idempotent"
+_UQ_SQLITE = (
+    "UNIQUE constraint failed: investmentTrades.user_id, "
+    "investmentTrades.isin, investmentTrades.trade_date, "
+    "investmentTrades.settlement_no, investmentTrades.transaction_type"
+)
+
+
+def is_idempotency_duplicate(exc) -> bool:
+    """True only for a violation of the uq_trade_idempotent key:
+    MySQL errno 1062 naming that key, or SQLite's UNIQUE failure
+    on exactly its columns. Any other IntegrityError (FK, NOT NULL,
+    another key) is a real failure, not a dedup."""
+    orig = getattr(exc, "orig", exc)
+    msg = str(orig)
+    errno = getattr(orig, "errno", None)
+    if errno is None and getattr(orig, "args", None):
+        errno = orig.args[0] if isinstance(orig.args[0], int) else None
+    if errno == 1062:
+        return _UQ_NAME in msg
+    return _UQ_SQLITE in msg
+
+
+def insert_rows(session, model, user_id, rows, logger) -> tuple:
+    """Insert candidate rows, one SAVEPOINT per row, so a duplicate
+    never rolls back earlier inserts in the batch. Caller commits.
+
+    Returns (inserted, deduped, failed, inserted_rows). Only a
+    uq_trade_idempotent violation counts as deduped; every other
+    exception counts as failed (logged with row index + exception
+    type only, never row values)."""
+    from sqlalchemy.exc import IntegrityError
+
+    inserted = deduped = failed = 0
+    inserted_rows: list = []
+    for idx, row in enumerate(rows, start=1):
+        try:
+            with session.begin_nested():
+                session.add(model(
                     user_id=user_id,
                     trade_date=row["trade_date"],
                     settlement_date=row["settlement_date"],
@@ -324,38 +453,25 @@ def main() -> int:
                     price_source=row["price_source"],
                     source=row["source"],
                     source_file=row["source_file"],
-                )
-                session.add(trade)
-                session.flush()
-                inserted += 1
-                inserted_rows.append(row)
-            except IntegrityError:
-                session.rollback()
+                ))
+            inserted += 1
+            inserted_rows.append(row)
+        except IntegrityError as exc:
+            if is_idempotency_duplicate(exc):
                 deduped += 1
-            except Exception as exc:
-                session.rollback()
+            else:
+                failed += 1
                 logger.warning(
-                    "ak-7y6o: unexpected insert failure for row "
-                    "ISIN=%s date=%s type=%s — %s",
-                    row.get("isin"), row.get("trade_date"),
-                    row.get("transaction_type"),
-                    type(exc).__name__,
+                    "ak-4t7f: integrity failure (not a dedup) for "
+                    "candidate row #%d", idx,
                 )
-        session.commit()
-
-    _build_report(
-        inserted=inserted,
-        deduped=deduped,
-        rejections=rejections,
-        inserted_rows=inserted_rows,
-        elapsed_s=(datetime.utcnow() - t0).total_seconds(),
-        logger=logger,
-    )
-    logger.info(
-        "[ak-7y6o] LIVE ingest complete. Phase 3b (ak-TBD) "
-        "can now UPDATE price fields from Kite Console CSV.",
-    )
-    return 0
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "ak-4t7f: unexpected insert failure for candidate "
+                "row #%d — %s", idx, type(exc).__name__,
+            )
+    return inserted, deduped, failed, inserted_rows
 
 
 if __name__ == "__main__":

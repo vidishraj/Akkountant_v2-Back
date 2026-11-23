@@ -12,7 +12,7 @@ beautifulsoup4~=4.12.3
 flask_sqlalchemy
 flask_cors
 tabula-py
-PyMuPDF
+PyMuPDF~=1.26.5
 google-auth-httplib2
 google-auth-oauthlib
 google-api-python-client

@@ -1,11 +1,23 @@
-"""ak-7y6o (ak-8kp4 Phase 3a, 2026-11-23) — per-trade historical
-record for equity trades reconstructed from the weekly-
-securities-statement PDFs published by the broker.
+"""ak-7y6o (ak-8kp4 Phase 3a, 2026-11-23) — historical record of
+equity DEMAT DELIVERIES reconstructed from the weekly-securities-
+statement PDFs published by the broker.
+
+**Grain (ak-4t7f, measured on the real PDFs):** one row per
+SETTLED demat delivery, i.e. one row per (ISIN, settlement
+number, direction) movement in or out of the demat account. It
+is NOT one row per executed exchange trade: a single delivery
+can net several trades in the same settlement. `trade_date`
+holds the PDF's "Transaction Date", which on settled rows is the
+DEMAT-MOVEMENT date (T+1 or later), not the exchange execution
+date. Whether to change this grain or source a true trade date
+(e.g. from the Phase 3b tradebook) is an open Overseer
+data-model decision; the schema is unchanged here.
 
 **NOT the same table as `investmentSnapshots`.** That table is
 PER-PERIOD portfolio aggregate (one row per
 `(date, user, investment_type)` with totals). This one is PER-
-TRADE (one row per executed buy or sell). The two coexist:
+DELIVERY (one row per settled demat movement, see Grain). The
+two coexist:
 Phase 3c (future bead) will aggregate from THIS table into the
 per-period snapshot.
 
@@ -75,10 +87,13 @@ class InvestmentTrade(Base):
         nullable=False,
     )
 
-    # Execution date (when the trade actually printed on the
-    # exchange). `settlement_date` is the broker's T+N clearing
-    # date — kept distinct because some analytical slices care
-    # (holding period, tax-year classification).
+    # ak-4t7f: `trade_date` = the PDF "Transaction Date", which
+    # for these settled rows is the DEMAT-MOVEMENT date (T+1 or
+    # later), NOT the exchange execution date. `settlement_date`
+    # = the PDF "Execution Date" (identical to trade_date on
+    # every settled row measured). True exchange trade dates
+    # are pending the Overseer's data-model decision (see the
+    # module docstring's Grain section).
     trade_date = Column(Date, nullable=False)
     settlement_date = Column(Date, nullable=True)
 
@@ -93,7 +108,8 @@ class InvestmentTrade(Base):
     # `transaction_type` disambiguates buy/sell. This matches
     # the PDF's Qty Delivered (sell) / Qty Received (buy)
     # fields: the parser infers transaction_type from which
-    # qty column is non-zero.
+    # qty column is non-zero. It is the DELIVERED quantity for
+    # the settlement, which may net several exchange trades.
     quantity = Column(Numeric(14, 4), nullable=False)
     transaction_type = Column(String(10), nullable=False)
     # 'BUY' | 'SELL'

@@ -1,65 +1,33 @@
-"""ak-7y6o (ak-8kp4 Phase 3a, 2026-11-23): regression tests for
-the weekly-securities-statement PDF parser + the new
-`InvestmentTrade` model + the operator ingest script's shape.
+"""ak-7y6o / ak-4t7f (ak-8kp4 Phase 3a): regression tests for the
+weekly-securities-statement PDF parser, the `InvestmentTrade` model,
+and the operator ingest script's shape.
 
-Scope:
-    * Parser `extract_rows_from_text` — exercise against
-      SYNTHETIC text fixtures that mirror the broker's column
-      layout. Real PDF fixtures will be dropped by infra under
-      `tests/fixtures/zerodha_weekly/` in a follow-up; those
-      drive the pdfplumber/fitz-based integration test (NOT in
-      this bead; fixture-blocked).
-    * Model `InvestmentTrade` — in-memory SQLite exercise of
-      the UniqueConstraint + NULL-price acceptance.
-    * Script source-grep — dry-run default, --commit +
-      --assume-yes guard, bead references.
+ak-4t7f: the original tests fed synthetic ONE-LINE rows, a layout
+the real PDFs never produce (fitz emits them one cell per line), so
+the parser shipped yielding 0 rows on all prod PDFs. The fixtures
+below mirror the REAL extraction shape, measured over the Overseer's
+statements:
 
-Pin-downs:
+  * `Table.extract()` matrices: 21 physical columns, the broker's
+    exact header labels, demat columns split over two sub-columns
+    (one empty), '\\n' inside wrapped cells, YYYY-MM-DD dates,
+    "10.000"-style quantities, all-"NA" zero-activity rows, and a
+    SETTLED table followed by a PENDING-obligations table.
+  * a PDF generated at test time with the same ruled two-table
+    layout, run through the real `parse_weekly_securities_pdf`
+    (`page.find_tables()`). Skipped if PyMuPDF isn't installed.
 
-Parser (unit, synthetic text):
-    (1) Zero-activity week — no rows parsed.
-    (2) Single BUY row — correct inference from Qty Received.
-    (3) Single SELL row — correct inference from Qty Delivered.
-    (4) Header lines — skipped (not treated as data).
-    (5) Ambiguous Qty columns (both non-zero) → row rejected.
-    (6) Txn-type label disagrees with inference → row rejected.
-    (7) Multi-row (BUY + SELL) parse — both captured.
-    (8) ISIN pattern match (IN + 10 alnums).
-    (9) Date formats — DD-MM-YYYY primary, YYYY-MM-DD / DD/MM
-        tolerated.
-    (10) Segment defaulting to 'EQ' when absent.
-    (11) price = None / price_source = None on every emitted row.
-    (12) source = 'zerodha_weekly_securities_pdf' on every row.
-    (13) source_file = basename of input (not full path).
-
-Model (in-memory SQLite):
-    (14) InvestmentTrade accepts NULL price + price_source.
-    (15) UniqueConstraint on
-         (user_id, isin, trade_date, settlement_no,
-         transaction_type) rejects duplicates.
-    (16) Different transaction_type allows multiple rows for
-         the same (user, isin, trade_date, settlement_no)
-         (round-trip buy + sell on same day).
-
-Script source-grep:
-    (17) --dry-run default (requires --commit to write).
-    (18) --commit requires --assume-yes (double-flag guard).
-    (19) IntegrityError caught + counted as 'deduped' (NOT
-         treated as a failure).
-    (20) Report section emits per-FY + top-10 scrips.
-
-Fixture gap:
-    (21) Real-PDF integration test is EXPLICITLY deferred to
-         a follow-up that lands after infra drops sample PDFs
-         to tests/fixtures/zerodha_weekly/. This test file is
-         BE-complete without them; the integration slice is
-         fixture-blocked.
+All values are SYNTHETIC: dummy PAN / name / demat numbers, and
+ISINs with valid check digits that are not issued securities
+(INE000T0101x). No real holdings live in this repo.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
+import tempfile
 import unittest
 from datetime import date
 from decimal import Decimal
@@ -74,245 +42,427 @@ def _read_source(rel_path):
         return f.read()
 
 
-# ─── Parser: synthetic-text unit tests ───────────────────────
+# ─── Real-shaped synthetic fixtures ──────────────────────────
+
+ISIN_A = "INE000T01012"
+ISIN_B = "INE000T01020"
+ISIN_C = "INE000T01038"
+FAKE_PAN = "ABCDE1234F"
+FAKE_DEMAT = "1234567890123456"
+FAKE_CP_DEMAT = "6543210987654321"
+
+# Exactly what Table.extract() yields for the header row: 21
+# physical columns; the two demat headers each span 2 sub-columns,
+# so their second cell is None. Some labels wrap ('\n').
+HEADER = [
+    "Transaction\nDate", "Execution\nDate",
+    "Clearing\nCorporation/Clearing\nMember", "Segment\nType",
+    "Unique\nClient\nCode\n(UCC)", "Back\nOffice\nClient\nCode",
+    "Client Name", "Client PAN", "Member\nDemat\nAccount\nNo.", None,
+    "Counterparty Demat Account No.", None, "Settlement No.",
+    "ISIN\nCode", "Scrip Name", "Quantity Delivered (Qty.)",
+    "Quantity\nReceived\n(Qty.)", "Balance\n(Qty.)", "Trf. Ref.\nNo.",
+    "Transaction Type", "Purpose",
+]
+# The DP-ID / Client-ID sub-header row under the demat columns.
+SUBHEADER = [""] * 8 + ["DP", "ID", "DP", "ID"] + [""] * 9
+NA_ROW = ["NA"] * 21
 
 
-# Representative single-row synthetic text. Tab-separated matches
-# fitz's default `get_text("text")` output on wide tables; the
-# parser also handles multi-space split for broader PDF shapes.
-
-_HEADER = (
-    "Transaction Date\tExecution Date\tClearing Corp\tSegment\t"
-    "UCC\tClient PAN\tMember Demat Acct\tCounterparty Demat Acct\t"
-    "Settlement No.\tISIN Code\tScrip Name\t"
-    "Quantity Delivered\tQuantity Received\tBalance\t"
-    "Transaction Type\tPurpose"
-)
-
-
-def _buy_row(settlement="2024001"):
-    # 50 shares of RELIANCE bought (Qty Received populated).
-    return (
-        f"15-02-2024\t17-02-2024\tNSCCL\tEQ\t"
-        f"ABCD1234\tAAAPZ1234A\t1234567890\t0987654321\t"
-        f"{settlement}\tINE002A01018\tRELIANCE\t"
-        f"NA\t50\t50\tBuy\tPurchase"
-    )
+def settled_row(
+    isin=ISIN_A, scrip="SYNTH CO LTD-EQ\n10/-", delivered="0.000",
+    received="5.000", balance="5.000", settlement="2024001",
+    txn_date="2024-02-16", exec_date="2024-02-16",
+    txn_type="Transactions\nwithin DP", purpose="payout",
+):
+    """A SETTLED-section data row, real cell shapes. Defaults are
+    a BUY (Qty Received > 0, purpose payout)."""
+    return [
+        txn_date, exec_date, "NSE Clearing\n/ Synth Broker\nLtd", "EQ",
+        "XX0000", "XX0000", "TEST USER", FAKE_PAN,
+        "", FAKE_DEMAT, FAKE_CP_DEMAT, "", settlement,
+        isin, scrip, delivered, received, balance, "1234567",
+        txn_type, purpose,
+    ]
 
 
-def _sell_row(settlement="2024002"):
-    # 10 shares of TCS sold (Qty Delivered populated).
-    return (
-        "20-02-2024\t22-02-2024\tNSCCL\tEQ\t"
-        "ABCD1234\tAAAPZ1234A\t1234567890\t0987654321\t"
-        f"{settlement}\tINE467B01029\tTCS\t"
-        "10\tNA\t90\tSell\tSale"
-    )
+def sell_row(**kw):
+    kw.setdefault("delivered", "3.000")
+    kw.setdefault("received", "0.000")
+    kw.setdefault("balance", "2.000")
+    kw.setdefault("txn_type", "Early Pay-\nin")
+    kw.setdefault("purpose", "payin")
+    kw.setdefault("settlement", "2024002")
+    kw.setdefault("isin", ISIN_B)
+    return settled_row(**kw)
 
 
-def _zero_activity_row():
-    return (
-        "15-02-2024\t17-02-2024\tNSCCL\tEQ\t"
-        "ABCD1234\tAAAPZ1234A\t1234567890\t0987654321\t"
-        "NA\tINE002A01018\tRELIANCE\t"
-        "NA\tNA\t50\tNA\tNA"
-    )
+def pending_row(isin=ISIN_C, settlement="2024003"):
+    """PENDING-section row. Broker-side convention: a client BUY
+    shows as purpose=payin with Qty Delivered > 0 and a negative
+    balance; Execution Date / Ref / Type are NA."""
+    return [
+        "2024-02-15", "NA", "NSE Clearing\n/ Synth Broker\nLtd", "EQ",
+        "XX0000", "XX0000", "TEST USER", FAKE_PAN,
+        FAKE_DEMAT, "", "", FAKE_CP_DEMAT, settlement,
+        isin, "SYNTH TWO LTD", "4.000", "0", "-4.000", "NA", "NA",
+        "payin",
+    ]
 
 
-def _ambiguous_row():
-    # BOTH qty columns non-zero — invalid shape, parser rejects.
-    return (
-        "15-02-2024\t17-02-2024\tNSCCL\tEQ\t"
-        "ABCD1234\tAAAPZ1234A\t1234567890\t0987654321\t"
-        "2024999\tINE002A01018\tRELIANCE\t"
-        "50\t50\t50\tBuy\tPurchase"
-    )
+def doc(settled_rows, pending_rows=None):
+    """One page with the two tables, as parse_weekly_securities_pdf
+    hands them to extract_rows_from_tables."""
+    return [
+        {"section": "settled", "page": 0,
+         "rows": [HEADER, SUBHEADER] + list(settled_rows)},
+        {"section": "pending", "page": 0,
+         "rows": [HEADER, SUBHEADER] + list(pending_rows or [NA_ROW])},
+    ]
 
 
-def _label_mismatch_row():
-    # Qty-column says SELL (delivered>0) but label says Buy —
-    # parser rejects.
-    return (
-        "15-02-2024\t17-02-2024\tNSCCL\tEQ\t"
-        "ABCD1234\tAAAPZ1234A\t1234567890\t0987654321\t"
-        "2024998\tINE002A01018\tRELIANCE\t"
-        "10\tNA\t40\tBuy\tPurchase"
-    )
+class TestParserRealShapedTables(unittest.TestCase):
+
+    def setUp(self):
+        from services.statement_parsers import zerodha_weekly_securities as m
+        self.m = m
+
+    def parse(self, tables, src="/x/2024-02-16_weekly.pdf"):
+        return self.m.extract_rows_from_tables(tables, src)
+
+    def test_zero_activity_week(self):
+        rows, rej, st = self.parse(doc([NA_ROW]))
+        self.assertEqual(rows, [])
+        self.assertEqual(sum(rej.values()), 0)
+        self.assertEqual(st["zero_activity"], 2)  # one per table
+        self.assertEqual(st["isin_rows"], 0)
+
+    def test_buy_row_fields(self):
+        rows, rej, _ = self.parse(doc([settled_row()]))
+        self.assertEqual(len(rows), 1, rej)
+        r = rows[0]
+        self.assertEqual(r["transaction_type"], "BUY")
+        self.assertEqual(r["quantity"], Decimal("5.000"))
+        self.assertEqual(r["isin"], ISIN_A)
+        self.assertEqual(r["symbol"], "SYNTH CO LTD-EQ 10/-")  # wrap joined
+        self.assertEqual(r["trade_date"], date(2024, 2, 16))
+        self.assertEqual(r["settlement_date"], date(2024, 2, 16))
+        self.assertEqual(r["settlement_no"], "2024001")
+        self.assertEqual(r["segment"], "EQ")
+        self.assertIsNone(r["price"])
+        self.assertIsNone(r["price_source"])
+        self.assertEqual(r["source"], "zerodha_weekly_securities_pdf")
+        self.assertEqual(r["source_file"], "2024-02-16_weekly.pdf")
+
+    def test_sell_row(self):
+        rows, rej, _ = self.parse(doc([sell_row()]))
+        self.assertEqual(len(rows), 1, rej)
+        self.assertEqual(rows[0]["transaction_type"], "SELL")
+        self.assertEqual(rows[0]["quantity"], Decimal("3.000"))
+
+    def test_scrip_name_ending_in_number_not_taken_as_qty(self):
+        # Real scrip names end in e.g. "RS 1"; column mapping by
+        # header label must keep that out of the qty columns.
+        rows, _, _ = self.parse(doc([settled_row(scrip="SYNTH-EQ RS 1")]))
+        self.assertEqual(rows[0]["symbol"], "SYNTH-EQ RS 1")
+        self.assertEqual(rows[0]["quantity"], Decimal("5.000"))
+
+    def test_pending_rows_skipped_and_counted(self):
+        # Pending obligations settle in a later statement's SETTLED
+        # table; ingesting them would double-count. Their reversed
+        # payin/delivered convention must not be read as a SELL.
+        rows, rej, st = self.parse(doc([settled_row()], [pending_row()]))
+        self.assertEqual([r["isin"] for r in rows], [ISIN_A])
+        self.assertEqual(st["pending_skipped"], 1)
+        self.assertEqual(st["isin_rows"], 2)
+        self.assertEqual(sum(rej.values()), 0)
+
+    def test_columns_mapped_by_header_not_position(self):
+        # Swap the two qty columns in header AND data: a positional
+        # parser would flip BUY↔SELL; a label-mapped one must not.
+        hdr = list(HEADER)
+        hdr[15], hdr[16] = hdr[16], hdr[15]
+        row = settled_row()
+        row[15], row[16] = row[16], row[15]
+        tables = [{"section": "settled", "page": 0, "rows": [hdr, row]}]
+        rows, rej, _ = self.parse(tables)
+        self.assertEqual(rows[0]["transaction_type"], "BUY", rej)
+
+    def test_multi_row_mixed(self):
+        rows, _, _ = self.parse(doc([settled_row(), sell_row()]))
+        self.assertEqual(
+            sorted(r["transaction_type"] for r in rows), ["BUY", "SELL"],
+        )
+
+    def test_dd_mm_yyyy_tolerated(self):
+        rows, _, _ = self.parse(doc([settled_row(txn_date="16-02-2024")]))
+        self.assertEqual(rows[0]["trade_date"], date(2024, 2, 16))
+
+    # ── multi-page ──
+
+    def test_continuation_page_without_header_inherits_map(self):
+        tables = [
+            {"section": "settled", "page": 0,
+             "rows": [HEADER, SUBHEADER, settled_row()]},
+            # page 2: no title above, no header row
+            {"section": None, "page": 1, "rows": [sell_row()]},
+            {"section": "pending", "page": 1,
+             "rows": [HEADER, SUBHEADER, NA_ROW]},
+        ]
+        rows, rej, _ = self.parse(tables)
+        self.assertEqual(len(rows), 2, rej)
+
+    def test_row_split_across_page_break_is_merged(self):
+        whole = settled_row(scrip="SYNTH CO LTD-EQ", txn_type="Transactions")
+        top = list(whole)
+        tail = [""] * 21
+        tail[14] = "10/-"          # scrip name tail
+        tail[19] = "within DP"     # txn-type tail
+        tables = [
+            {"section": "settled", "page": 0,
+             "rows": [HEADER, SUBHEADER, top]},
+            {"section": None, "page": 1, "rows": [tail, sell_row()]},
+        ]
+        rows, rej, _ = self.parse(tables)
+        self.assertEqual(len(rows), 2, rej)
+        self.assertEqual(rows[0]["symbol"], "SYNTH CO LTD-EQ 10/-")
+
+    def test_headed_table_without_section_fails_closed(self):
+        # A table with its OWN header row but no section title is
+        # not a continuation: reject, don't inherit "settled".
+        tables = [
+            {"section": "settled", "page": 0,
+             "rows": [HEADER, SUBHEADER, settled_row()]},
+            {"section": None, "page": 1,
+             "rows": [HEADER, SUBHEADER, sell_row()]},
+        ]
+        rows, rej, _ = self.parse(tables)
+        self.assertEqual([r["isin"] for r in rows], [ISIN_A])
+        self.assertEqual(rej["malformed"], 1)
+
+    def test_short_continuation_row_does_not_crash(self):
+        tables = [
+            {"section": "settled", "page": 0,
+             "rows": [HEADER, SUBHEADER, settled_row()]},
+            {"section": None, "page": 1, "rows": [["stray"]]},
+        ]
+        rows, rej, _ = self.parse(tables)
+        self.assertEqual(len(rows), 1, rej)
+
+    def test_unmapped_table_rows_rejected_not_dropped(self):
+        tables = [{"section": "settled", "page": 0, "rows": [settled_row()]}]
+        rows, rej, _ = self.parse(tables)
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 1)
+
+    # ── rejections ──
+
+    def test_ambiguous_qty_rejected(self):
+        for d_, r_ in (("5.000", "5.000"), ("0.000", "0.000")):
+            rows, rej, _ = self.parse(doc([settled_row(delivered=d_, received=r_)]))
+            self.assertEqual(rows, [])
+            self.assertEqual(rej["qty_ambiguous"], 1)
+
+    def test_label_mismatch_rejected(self):
+        # Qty says BUY, purpose says payin (SELL).
+        rows, rej, _ = self.parse(doc([settled_row(purpose="payin")]))
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["label_mismatch"], 1)
+
+    def test_missing_settlement_rejected(self):
+        # NULL settlement defeats UNIQUE dedup (NULL ≠ NULL) and the
+        # Phase 3b price-fill join — hard reject.
+        for bad in ("", "NA", FAKE_PAN):
+            rows, rej, _ = self.parse(doc([settled_row(settlement=bad)]))
+            self.assertEqual(rows, [], bad)
+            self.assertEqual(rej["missing_settlement"], 1, bad)
+
+    def test_bad_isin_checksum_rejected(self):
+        rows, rej, st = self.parse(doc([settled_row(isin="INE000T01013")]))
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 1)
+        self.assertEqual(st["isin_rows"], 0)
+
+    def test_unparseable_qty_rejected_not_zeroed(self):
+        rows, rej, _ = self.parse(doc([settled_row(received="5,O00")]))
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 1)
+
+    def test_over_length_symbol_rejected(self):
+        rows, rej, _ = self.parse(doc([settled_row(scrip="X" * 51)]))
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 1)
+
+    def test_rejections_counter_shape(self):
+        rows, rej, st = self.parse([])
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            set(rej),
+            {"qty_ambiguous", "label_mismatch", "missing_settlement",
+             "malformed"},
+        )
+        self.assertFalse(any(rej.values()))
+        self.assertFalse(any(st.values()))
+
+    # ── secrecy ──
+
+    def test_reject_logs_carry_no_financial_values(self):
+        bad = [
+            settled_row(delivered="5.000"),             # qty_ambiguous
+            settled_row(purpose="payin", settlement="2024009"),  # label
+            settled_row(settlement="NA"),               # missing_settlement
+        ]
+        with self.assertLogs(self.m._LOG, level="WARNING") as cm:
+            self.parse(doc(bad), src="/x/statement.pdf")
+        blob = "\n".join(cm.output)
+        self.assertEqual(len(cm.output), 3)
+        for secret in (ISIN_A, "SYNTH", "5.000", "2024-02-16",
+                       "2024009", FAKE_PAN, FAKE_DEMAT, "TEST USER"):
+            self.assertNotIn(secret, blob)
+
+    def test_isin_checksum_helper(self):
+        f = self.m.isin_checksum_ok
+        self.assertTrue(f(ISIN_A))
+        self.assertFalse(f("INE000T01013"))  # same stem, bad check digit
+        self.assertFalse(f("INZ0000316"))    # wrong length
+
+    def test_text_isin_count_excludes_broker_reg_no(self):
+        # The header's "SEBI Reg.No.: INZ…" passes the ISIN checksum
+        # by accident; the text-side count must not include it.
+        txt = f"SEBI Reg.No.: INZ000031633\n{ISIN_A}\n{ISIN_B}\nINE000T01013"
+        self.assertEqual(self.m.count_text_isins(txt), 2)
 
 
-class TestParserCoreCases(unittest.TestCase):
+# ─── Real-layout PDF through fitz find_tables ────────────────
+
+
+def _build_statement_pdf(path, settled_rows, pending_rows):
+    """Render a one-page statement with the broker's real layout:
+    title lines, then two ruled 21-column tables (header +
+    sub-header + data) on an A4-landscape page."""
+    import fitz
+    page_w, page_h = 842, 595
+    d = fitz.open()
+    page = d.new_page(width=page_w, height=page_h)
+    page.insert_text((7, 30), "Synth Broker Ltd", fontsize=7)
+    page.insert_text((7, 110), "SEBI Reg.No.: INZ000031633", fontsize=7)
+    # 21 columns; the scrip column is wider (as on the real PDF).
+    widths = [36] * 21
+    widths[14] = 80
+    xs = [8]
+    for w in widths:
+        xs.append(xs[-1] + w)
+
+    def table(y, rows):
+        heights = [34, 9] + [20] * len(rows)
+        all_rows = [HEADER, SUBHEADER] + rows
+        yy = y
+        for h, row in zip(heights, all_rows):
+            for c in range(21):
+                rect = fitz.Rect(xs[c], yy, xs[c + 1], yy + h)
+                page.draw_rect(rect, color=(0, 0, 0), width=0.5)
+                txt = row[c] or ""
+                if txt:
+                    page.insert_textbox(rect + (1, 1, -1, -1), txt,
+                                        fontsize=4.2, fontname="helv")
+            yy += h
+        return yy
+
+    page.insert_text(
+        (7, 183),
+        "Statement of Accounts of Securities/Commodities for the "
+        "period from 2024-02-12 to 2024-02-17 (Monday to Saturday):",
+        fontsize=7)
+    page.insert_text(
+        (7, 201),
+        "Statement of Account reflecting Clear Balance as on the "
+        "last date of statement:", fontsize=7)
+    y = table(212, settled_rows)
+    page.insert_text(
+        (7, y + 16),
+        "Pending Obligations as on 2024-02-17 (as on Saturday):",
+        fontsize=7)
+    table(y + 24, pending_rows)
+    d.save(path)
+    d.close()
+
+
+try:
+    import fitz as _fitz  # noqa: F401
+    _HAVE_FITZ = hasattr(_fitz.Page, "find_tables")
+except ImportError:  # pragma: no cover
+    _HAVE_FITZ = False
+
+
+@unittest.skipUnless(_HAVE_FITZ, "PyMuPDF >= 1.23 not installed")
+class TestParserRealLayoutPdf(unittest.TestCase):
+    """End-to-end over a PDF with the real ruled layout. This is
+    the test that would have caught the 0-rows-on-prod defect."""
 
     def setUp(self):
         from services.statement_parsers.zerodha_weekly_securities import (
-            extract_rows_from_text,
+            parse_weekly_securities_pdf,
         )
-        # ak-7y6o reviewer CRITICAL: parser now returns
-        # (rows, rejections). Wrap to keep test ergonomics
-        # tight — self._rows returns just the rows list, and
-        # self._full exposes the full tuple for the reject-
-        # counter tests below.
-        self._raw_fn = extract_rows_from_text
-        self._full = extract_rows_from_text
+        self.parse_pdf = parse_weekly_securities_pdf
+        self.tmp = tempfile.TemporaryDirectory()
 
-    def _rows(self, text, source):
-        rows, _rejections = self._raw_fn(text, source)
-        return rows
+    def tearDown(self):
+        self.tmp.cleanup()
 
-    def _rejections(self, text, source):
-        _rows, rejections = self._raw_fn(text, source)
-        return rejections
+    def _pdf(self, settled, pending):
+        p = os.path.join(self.tmp.name, "2024-02-17_weekly-securities-statement_HA6023.pdf")
+        _build_statement_pdf(p, settled, pending)
+        return p
 
-    # (1) Zero-activity week.
-    def test_zero_activity_no_rows(self):
-        text = _HEADER + "\n" + _zero_activity_row()
-        self.assertEqual(self._rows(text, "fake.pdf"), [])
+    def test_get_text_is_one_cell_per_line(self):
+        # Pin the property that broke the old line parser.
+        import fitz
+        p = self._pdf([settled_row()], [NA_ROW])
+        with fitz.open(p) as d:
+            text = d[0].get_text("text")
+        isin_line = next(l for l in text.splitlines() if ISIN_A in l)
+        self.assertEqual(isin_line.strip(), ISIN_A)
 
-    # (2) Single BUY row.
-    def test_single_buy_row(self):
-        text = _HEADER + "\n" + _buy_row()
-        rows = self._rows(text, "/path/to/my-statement.pdf")
-        self.assertEqual(len(rows), 1)
-        row = rows[0]
-        self.assertEqual(row["transaction_type"], "BUY")
-        self.assertEqual(row["isin"], "INE002A01018")
-        self.assertEqual(row["symbol"], "RELIANCE")
-        self.assertEqual(row["quantity"], Decimal("50"))
-        self.assertEqual(row["trade_date"], date(2024, 2, 15))
-        self.assertEqual(row["settlement_date"], date(2024, 2, 17))
-        self.assertEqual(row["segment"], "EQ")
-        self.assertEqual(row["settlement_no"], "2024001")
-
-    # (3) Single SELL row.
-    def test_single_sell_row(self):
-        text = _HEADER + "\n" + _sell_row()
-        rows = self._rows(text, "my-statement.pdf")
-        self.assertEqual(len(rows), 1)
-        row = rows[0]
-        self.assertEqual(row["transaction_type"], "SELL")
-        self.assertEqual(row["isin"], "INE467B01029")
-        self.assertEqual(row["symbol"], "TCS")
-        self.assertEqual(row["quantity"], Decimal("10"))
-
-    # (4) Header lines skipped.
-    def test_header_lines_skipped(self):
-        # Just the header, no data — zero rows.
-        self.assertEqual(self._rows(_HEADER, "x.pdf"), [])
-        # Header mid-stream (continuation page) — still skipped.
-        text = _buy_row() + "\n" + _HEADER + "\n" + _sell_row()
-        rows = self._rows(text, "x.pdf")
-        self.assertEqual(len(rows), 2)
-
-    # (5) Ambiguous qty — rejected.
-    def test_ambiguous_qty_rejected(self):
-        text = _HEADER + "\n" + _ambiguous_row()
-        self.assertEqual(self._rows(text, "x.pdf"), [])
-
-    # (5b) Ambiguous-qty reject increments the ak-7y6o reviewer-
-    # m1 counter (merged "both zero / both non-zero" message).
-    def test_ambiguous_qty_rejection_counted(self):
-        text = _HEADER + "\n" + _ambiguous_row()
-        rejections = self._rejections(text, "x.pdf")
-        self.assertEqual(rejections["qty_ambiguous"], 1)
-
-    # (6) Label disagrees with inference — rejected.
-    def test_label_mismatch_rejected(self):
-        text = _HEADER + "\n" + _label_mismatch_row()
-        self.assertEqual(self._rows(text, "x.pdf"), [])
-
-    def test_label_mismatch_rejection_counted(self):
-        text = _HEADER + "\n" + _label_mismatch_row()
-        rejections = self._rejections(text, "x.pdf")
-        self.assertEqual(rejections["label_mismatch"], 1)
-
-    # (7) Multi-row BUY + SELL.
-    def test_multi_row_mixed(self):
-        text = _HEADER + "\n" + _buy_row() + "\n" + _sell_row()
-        rows = self._rows(text, "x.pdf")
-        self.assertEqual(len(rows), 2)
-        types = {r["transaction_type"] for r in rows}
-        self.assertEqual(types, {"BUY", "SELL"})
-
-    # (11) price/price_source always None in Phase 3a.
-    def test_price_always_none(self):
-        text = (
-            _HEADER + "\n" + _buy_row() + "\n" + _sell_row()
-        )
-        rows = self._rows(text, "x.pdf")
-        for r in rows:
-            self.assertIsNone(r["price"])
-            self.assertIsNone(r["price_source"])
-
-    # (12) source tag is the Phase-3a brand.
-    def test_source_tag(self):
-        text = _HEADER + "\n" + _buy_row()
-        row = self._rows(text, "x.pdf")[0]
+    def test_rows_parsed_and_reconciled(self):
+        p = self._pdf([settled_row(), sell_row()], [pending_row()])
+        rows, rej, st = self.parse_pdf(p)
         self.assertEqual(
-            row["source"], "zerodha_weekly_securities_pdf",
+            sorted((r["isin"], r["transaction_type"], r["quantity"]) for r in rows),
+            [(ISIN_A, "BUY", Decimal("5.000")),
+             (ISIN_B, "SELL", Decimal("3.000"))],
+            (rej, st),
         )
-
-    # (13) source_file is BASENAME, not full path.
-    def test_source_file_basename(self):
-        text = _HEADER + "\n" + _buy_row()
-        row = self._rows(
-            text, "/home/opc/stuff/2024-02-23_my.pdf",
-        )[0]
-        self.assertEqual(row["source_file"], "2024-02-23_my.pdf")
-
-    # ─── ak-7y6o reviewer CRITICAL (2026-11-23) ──────────
-    #
-    # Rows missing a parseable settlement_no MUST be rejected
-    # (not emitted with settlement_no=None). Rationale in
-    # parser docstring: SQL UNIQUE treats NULL ≠ NULL on every
-    # major backend, so NULL-settlement rows would slip past
-    # dedup; also Phase 3b price-fill UPDATE never matches
-    # NULL. Both silent-correctness defects — hard-reject at
-    # parse time, surface in rejections["missing_settlement"].
-
-    def test_rejects_missing_settlement_no(self):
-        """A data row where settlement_no can't be found MUST
-        be rejected and counted in rejections. Fixture: hand-
-        craft a line that lacks the settlement_no column
-        (shorter column layout) but still has ISIN + qty."""
-        # Build a row WITHOUT a settlement_no column (replace
-        # the settlement token with a date-shaped placeholder
-        # the parser will NOT accept as settlement_no).
-        no_settlement_row = (
-            "15-02-2024\t17-02-2024\tNSCCL\tEQ\t"
-            "ABCD1234\tAAAPZ1234A\t1234567890\t0987654321\t"
-            # Settlement_no slot is a PAN-shape — parser's
-            # settlement-no scan rejects PAN pattern; no
-            # alternative token → settlement_no stays None.
-            "ZZZZZ9999Z\tINE002A01018\tRELIANCE\t"
-            "NA\t50\t50\tBuy\tPurchase"
-        )
-        text = _HEADER + "\n" + no_settlement_row
-        rows, rejections = self._full(text, "nosettle.pdf")
+        self.assertEqual(st["pending_skipped"], 1)
+        self.assertEqual(st["text_isins"], 3)
+        self.assertEqual(st["unaccounted_isins"], 0)
+        self.assertEqual(sum(rej.values()), 0)
         self.assertEqual(
-            rows, [],
-            "ak-7y6o reviewer CRITICAL: a row that can't yield "
-            "a settlement_no MUST NOT be emitted — the row "
-            "would corrupt dedup (NULL ≠ NULL in SQL UNIQUE) "
-            "+ silently miss Phase 3b price-fill",
-        )
-        self.assertEqual(
-            rejections["missing_settlement"], 1,
-            "ak-7y6o: missing-settlement rejects MUST be "
-            "surfaced via the rejections counter so the "
-            "operator sees them in the dry-run report + can "
-            "escalate if the count is non-trivial",
+            st["text_isins"],
+            len(rows) + sum(rej.values()) + st["pending_skipped"],
         )
 
-    def test_rejections_counter_shape(self):
-        """Rejections dict has the three expected keys, all
-        starting at 0, even on an empty-input parse."""
-        rows, rejections = self._full("", "empty.pdf")
+    def test_zero_activity_pdf(self):
+        rows, rej, st = self.parse_pdf(self._pdf([NA_ROW], [NA_ROW]))
         self.assertEqual(rows, [])
-        self.assertEqual(
-            set(rejections.keys()),
-            {"qty_ambiguous", "label_mismatch", "missing_settlement"},
-        )
-        for k in rejections:
-            self.assertEqual(rejections[k], 0)
+        self.assertEqual(st["text_isins"], 0)  # INZ reg-no excluded
+        self.assertEqual(st["zero_activity"], 2)
+
+    def test_isins_with_no_tables_warns_loudly(self):
+        import fitz
+        p = os.path.join(self.tmp.name, "flat.pdf")
+        d = fitz.open()
+        d.new_page().insert_text((50, 50), f"{ISIN_A} SYNTH 5.000")
+        d.save(p)
+        d.close()
+        with self.assertLogs(
+            "services.statement_parsers.zerodha_weekly_securities",
+            level="WARNING",
+        ) as cm:
+            rows, rej, st = self.parse_pdf(p)
+        self.assertEqual(rows, [])
+        self.assertEqual(st["unaccounted_isins"], 1)
+        self.assertIn("did not reach", "\n".join(cm.output))
+        self.assertNotIn(ISIN_A, "\n".join(cm.output))
 
 
 # ─── Model: in-memory SQLite exercise ────────────────────────
@@ -520,12 +670,25 @@ class TestIngestScriptShape(unittest.TestCase):
             "re-run), not as a failure",
         )
 
-    # (20) Report emits per-FY + top-10 scrips.
+    # (20) Report: per-FY aggregates; ak-4t7f secrecy — NO per-row
+    # dump and NO per-scrip table in logs.
     def test_report_shape(self):
         self.assertIn("Per-FY breakdown", self.src)
-        self.assertIn("Top 10 scrips", self.src)
-        # FY helper is Indian financial-year (Apr→Mar).
-        self.assertIn("month >= 4", self.src)
+        self.assertIn("month >= 4", self.src)  # Indian FY (Apr→Mar)
+        self.assertIn("ISIN reconciliation", self.src)
+
+    def test_report_logs_aggregates_only(self):
+        self.assertNotIn("Top 10 scrips", self.src)
+        self.assertNotIn("First 5", self.src)
+        self.assertNotIn("most_common", self.src)
+        # The live-path failure WARN used to log ISIN + date.
+        self.assertNotIn('row.get("isin")', self.src)
+        self.assertNotIn('row.get("trade_date")', self.src)
+
+    def test_isolated_mode_finds_repo_modules(self):
+        # ak-4t7f: `python3 -I` drops the repo root from sys.path.
+        self.assertIn("sys.path.insert(0, _REPO_ROOT)", self.src)
+        self.assertNotIn("python3 -I scripts/", self.src)
 
     # (21) Bead reference in docstring.
     def test_bead_reference_in_docstring(self):
@@ -567,21 +730,138 @@ class TestParserM1MessageRename(unittest.TestCase):
         )
 
 
-# ─── Deferred-slice marker ───────────────────────────────────
+# ─── Live insert path: behavioral (in-memory SQLite) ─────────
 
 
-class TestFixtureSliceDeferred(unittest.TestCase):
-    """ak-7y6o SELF-NOTE: real-PDF integration tests are
-    explicitly deferred to the follow-up fixture-drop by infra.
-    This class exists so a future grep for 'fixture' / 'PDF
-    integration' surfaces the deferred-scope boundary — and so
-    the handoff bead comment can point to it."""
+def _load_ingest_script():
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "ak_8kp4_phase3a_ingest",
+        os.path.join(here, "scripts",
+                     "ak_8kp4_phase3a_ingest_weekly_securities.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-    def test_deferred_marker(self):
-        # Self-pin: the Phase-3a integration test will land under
-        # tests/fixtures/zerodha_weekly/ (bead-specified path).
-        # This test is a no-op anchor until that fixture drop.
-        self.assertTrue(True)
+
+class TestLiveInsertRows(unittest.TestCase):
+    """ak-4t7f: the live path used to session.rollback() on any
+    IntegrityError, discarding earlier un-committed inserts while
+    still counting them, and it treated ANY IntegrityError as a
+    dedup. Exercise insert_rows against real SQLite SAVEPOINTs."""
+
+    def setUp(self):
+        from sqlalchemy import create_engine, event
+        from sqlalchemy.orm import sessionmaker
+        import models  # noqa: F401
+        from models import investmentHistory  # noqa: F401
+        from models.Base import Base
+        from models.investmentTrade import InvestmentTrade
+        from models.users import User
+
+        self.Trade = InvestmentTrade
+        self.engine = create_engine("sqlite:///:memory:")
+
+        # pysqlite SAVEPOINT recipe (SQLAlchemy docs): take
+        # transaction control away from the driver so
+        # begin_nested() emits a real SAVEPOINT.
+        @event.listens_for(self.engine, "connect")
+        def _connect(dbapi_conn, _rec):
+            dbapi_conn.isolation_level = None
+
+        @event.listens_for(self.engine, "begin")
+        def _begin(conn):
+            conn.exec_driver_sql("BEGIN")
+
+        Base.metadata.create_all(
+            self.engine, tables=[User.__table__, InvestmentTrade.__table__],
+        )
+        self.Session = sessionmaker(bind=self.engine)
+        with self.Session() as s:
+            s.add(User(userID="TEST_USER", email="t@x"))
+            s.commit()
+        self.script = _load_ingest_script()
+        self.log = logging.getLogger("test_ak_4t7f_insert")
+
+    def tearDown(self):
+        self.engine.dispose()
+
+    def _row(self, settlement, **kw):
+        r = {
+            "trade_date": date(2024, 2, 16), "settlement_date": None,
+            "isin": ISIN_A, "symbol": "SYNTH", "quantity": Decimal("5"),
+            "transaction_type": "BUY", "segment": "EQ",
+            "settlement_no": settlement, "price": None,
+            "price_source": None, "source": "zerodha_weekly_securities_pdf",
+            "source_file": "x.pdf",
+        }
+        r.update(kw)
+        return r
+
+    def _run(self, rows):
+        with self.Session() as s:
+            out = self.script.insert_rows(
+                s, self.Trade, "TEST_USER", rows, self.log,
+            )
+            s.commit()
+        with self.Session() as s:
+            persisted = sorted(t.settlement_no for t in s.query(self.Trade))
+        return out, persisted
+
+    def test_duplicate_mid_batch_keeps_earlier_rows(self):
+        rows = [self._row("2024001"), self._row("2024002"),
+                self._row("2024001"),  # dup of row 1, mid-batch
+                self._row("2024003")]
+        (ins, dedup, failed, ins_rows), persisted = self._run(rows)
+        self.assertEqual((ins, dedup, failed), (3, 1, 0))
+        self.assertEqual(len(ins_rows), 3)
+        self.assertEqual(persisted, ["2024001", "2024002", "2024003"])
+
+    def test_rerun_is_all_dedup(self):
+        rows = [self._row("2024001"), self._row("2024002")]
+        self._run(rows)
+        (ins, dedup, failed, _), persisted = self._run(rows)
+        self.assertEqual((ins, dedup, failed), (0, 2, 0))
+        self.assertEqual(len(persisted), 2)
+
+    def test_non_dedup_integrity_error_counts_as_failure(self):
+        # NOT NULL violation — an IntegrityError that is NOT the
+        # idempotency key; must be failed, not deduped.
+        rows = [self._row("2024001"), self._row("2024002", symbol=None),
+                self._row("2024003")]
+        with self.assertLogs(self.log, level="WARNING") as cm:
+            (ins, dedup, failed, _), persisted = self._run(rows)
+        self.assertEqual((ins, dedup, failed), (2, 0, 1))
+        self.assertEqual(persisted, ["2024001", "2024003"])
+        self.assertNotIn("2024002", "\n".join(cm.output))
+
+    def test_mysql_duplicate_classification(self):
+        class Orig(Exception):
+            def __init__(self, errno, msg):
+                super().__init__(msg)
+                self.errno = errno
+
+        class Exc(Exception):
+            def __init__(self, orig):
+                self.orig = orig
+
+        f = self.script.is_idempotency_duplicate
+        self.assertTrue(f(Exc(Orig(1062, "Duplicate entry 'x' for key "
+                                         "'investmentTrades.uq_trade_idempotent'"))))
+        self.assertFalse(f(Exc(Orig(1062, "Duplicate entry 'x' for key "
+                                          "'PRIMARY'"))))
+        self.assertFalse(f(Exc(Orig(1452, "Cannot add or update a child "
+                                          "row: a foreign key constraint "
+                                          "fails"))))
+
+    def test_script_exit_codes_wired(self):
+        src = _read_source(
+            "scripts/ak_8kp4_phase3a_ingest_weekly_securities.py")
+        self.assertRegex(src, r"session\.get\(User, user_id\) is None"
+                              r"[\s\S]{0,200}return 5")
+        self.assertRegex(src, r"if failed:[\s\S]{0,300}return 6")
 
 
 if __name__ == "__main__":  # pragma: no cover
