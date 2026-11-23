@@ -1095,6 +1095,65 @@ class MailProcessorService:
             return None
 
     # ── Link-based PDF extraction (HDFC Smart Statements, etc.) ──────
+    #
+    # ak-ptxq (2026-11-23) SECURITY C-8: allowlist for HDFC Smart
+    # Statement hosts. Any URL this subsystem will session.get() or
+    # session.post() to MUST be host-validated against this set.
+    #
+    # Rationale: pre-ak-ptxq the link selection used substring checks
+    # ("smartstatements.hdfcbank.com in href") or ANY <a> inside a
+    # #004b8d-colour <td> (brand-color heuristic). Both bypassable by
+    # an attacker who crafts a phishing email styled like HDFC — a
+    # link like `https://attacker.example/?q=smartstatements.hdfcbank.com`
+    # passed the substring check AND would be POST'd the Customer ID
+    # password via the login-form flow.
+    #
+    # Fix: host-anchored validation (urlparse().hostname exact-match,
+    # case-insensitive) applied at 3 points — strategy-1/2 link
+    # selection, link follow (session.get), form-action resolution
+    # (session.post). Any failure fails CLOSED (log + return None,
+    # never attempt the request).
+    #
+    # Note on log hygiene: the password MUST NOT appear in logs or
+    # exception messages. Existing log at _download_from_smart_
+    # statement_link logs `list(login_data.keys())` only — keys are
+    # safe, values are not; keep that shape.
+
+    _HDFC_SMART_STATEMENT_HOSTS = frozenset({
+        "smartstatements.hdfcbank.com",
+        "smartstatements.hdfc.bank.in",
+    })
+
+    @classmethod
+    def _is_hdfc_smart_statement_url(cls, url):
+        """Validate a URL resolves to an allowlisted HDFC Smart
+        Statement host.
+
+        ak-ptxq SECURITY C-8: this is the SOLE gate between
+        attacker-chosen URLs (from phishing emails) and our
+        session.get() / session.post() calls that carry the Customer
+        ID password. Any return of True authorizes a credentialed
+        request to that host; False fails-closed.
+
+        Returns False on:
+          * None / non-str input
+          * non-http(s) scheme (file://, gopher://, javascript:, ...)
+          * hostname not EXACTLY in _HDFC_SMART_STATEMENT_HOSTS
+            (case-insensitive; substring / suffix matches NOT
+            acceptable — `evil.com/?q=smartstatements.hdfcbank.com`
+            must return False)
+          * unparseable URL
+        """
+        if not isinstance(url, str) or not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        return host in cls._HDFC_SMART_STATEMENT_HOSTS
 
     def _try_download_link_based_pdf(self, email, gmail_api, gmail_id, user_id=None):
         """
@@ -1151,16 +1210,24 @@ class MailProcessorService:
                     soup = BeautifulSoup(decoded_data, "html.parser")
 
                     # Strategy 1: Find HDFC's styled download button (brand color #004b8d)
+                    # ak-ptxq: brand-colour heuristic is forgeable in a
+                    # phishing email; require the href ALSO pass the
+                    # host allowlist before returning.
                     td_tag = soup.find("td", style=lambda s: s and "004b8d" in s)
                     if td_tag:
                         a_tag = td_tag.find("a")
                         if a_tag and "href" in a_tag.attrs:
-                            return a_tag["href"]
+                            href = a_tag["href"]
+                            if self._is_hdfc_smart_statement_url(href):
+                                return href
 
                     # Strategy 2: Find any link to smartstatements portal
+                    # ak-ptxq: replace substring check with host-anchored
+                    # validation — `in href` passes attacker URLs like
+                    # `https://evil.com/?q=smartstatements.hdfcbank.com`.
                     for a_tag in soup.find_all("a", href=True):
                         href = a_tag["href"]
-                        if "smartstatements.hdfcbank.com" in href or "smartstatements.hdfc.bank.in" in href:
+                        if self._is_hdfc_smart_statement_url(href):
                             return href
 
                 # Recurse into nested parts
@@ -1177,9 +1244,11 @@ class MailProcessorService:
         if payload_data:
             decoded = base64.urlsafe_b64decode(payload_data).decode("utf-8")
             soup = BeautifulSoup(decoded, "html.parser")
+            # ak-ptxq: host-anchored validation (mirror of the MIME-
+            # parts branch above). Substring `in href` was bypassable.
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"]
-                if "smartstatements.hdfcbank.com" in href or "smartstatements.hdfc.bank.in" in href:
+                if self._is_hdfc_smart_statement_url(href):
                     return href
 
         # Search through all MIME parts
@@ -1187,9 +1256,30 @@ class MailProcessorService:
         return _search_parts(parts) if parts else None
 
     def _download_from_smart_statement_link(self, link, gmail_id, password=None):
-        """Download PDF from HDFC Smart Statement link."""
+        """Download PDF from HDFC Smart Statement link.
+
+        ak-ptxq SECURITY C-8 (2026-11-23): defense-in-depth host check
+        at entry. Callers already filter via _extract_smart_statement_
+        link's allowlist, but this path also exposes session.get() +
+        session.post() with the Customer ID password — any future
+        caller that reaches this function must go through the host
+        gate, so repeat the check here (belt-and-brace).
+        """
         import requests
         from bs4 import BeautifulSoup
+
+        # ak-ptxq: belt-and-brace host validation at entry. If a
+        # future caller hands us a non-allowlisted URL (bypass of
+        # _extract_smart_statement_link or a direct caller), fail
+        # closed BEFORE any network I/O or password lookup is used.
+        if not self._is_hdfc_smart_statement_url(link):
+            self.logger.warning(
+                f"ak-ptxq: refusing to follow non-allowlisted Smart "
+                f"Statement link for {gmail_id} "
+                f"(host={urlparse(link).hostname!r}); credential-"
+                f"leak + SSRF guard."
+            )
+            return None
 
         user_agent = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -1230,9 +1320,33 @@ class MailProcessorService:
             form = soup.find("form")
             if form:
                 action = form.get("action", "")
-                if action and not action.startswith("http"):
-                    action = f"{base_url}{action}" if action.startswith("/") else f"{base_url}/{action}"
-                elif not action:
+                # ak-ptxq: form-action resolution with allowlist
+                # enforcement on the final URL that session.post will
+                # be called against (which is the one carrying the
+                # Customer ID password). Three cases:
+                #   1. Absolute http(s) URL — MUST be allowlisted;
+                #      otherwise fail closed. This is the SSRF +
+                #      password-leak class.
+                #   2. Site-relative ("/..." or "x/y") — prepend
+                #      base_url (already host-validated at entry).
+                #   3. Empty — fallback to the HDFC REST endpoint
+                #      on base_url.
+                if action and action.startswith(("http://", "https://")):
+                    if not self._is_hdfc_smart_statement_url(action):
+                        self.logger.warning(
+                            f"ak-ptxq: refusing to POST Smart "
+                            f"Statement credentials to non-"
+                            f"allowlisted action "
+                            f"(host={urlparse(action).hostname!r}) "
+                            f"for {gmail_id}; credential-leak + "
+                            f"SSRF guard."
+                        )
+                        return None
+                elif action.startswith("/"):
+                    action = f"{base_url}{action}"
+                elif action:
+                    action = f"{base_url}/{action}"
+                else:
                     action = f"{base_url}/HDFCRestFulService/webresources/app/validateCustomerID"
 
                 # Collect all hidden form fields
@@ -1247,11 +1361,27 @@ class MailProcessorService:
                 field_name = custid_field.get("name", "custid") if custid_field else "custid"
                 login_data[field_name] = password
 
+                # ak-ptxq: log keys only, NEVER values — login_data
+                # contains the password at `field_name`.
                 self.logger.debug(f"Submitting login to {action} with fields: {list(login_data.keys())}")
             else:
                 # Fallback: try direct API call
                 action = f"{base_url}/HDFCRestFulService/webresources/app/validateCustomerID"
                 login_data = {"jobkey": job_key, "custid": password}
+
+            # ak-ptxq final belt-and-brace: validate action host
+            # immediately before the POST. For case 2/3 above the URL
+            # is derived from base_url (entry-validated), but a future
+            # refactor that changes base_url derivation would bypass
+            # the upstream check — gate here too.
+            if not self._is_hdfc_smart_statement_url(action):
+                self.logger.warning(
+                    f"ak-ptxq: refusing POST to action "
+                    f"{urlparse(action).hostname!r} for {gmail_id} "
+                    f"(final allowlist gate; should not reach here "
+                    f"if upstream gates are intact)."
+                )
+                return None
 
             login_response = session.post(action, data=login_data, timeout=30)
 
