@@ -235,14 +235,30 @@ def verify_confirm_token(
     if exp <= now:
         return False
 
-    # One-time-use: register the token-digest. Replay within TTL →
-    # subsequent verify returns False.
-    digest = hashlib.sha256(token.encode("ascii")).hexdigest()[:16]
+    # One-time-use: register the token's nonce (canonical, lives
+    # INSIDE the HMAC-protected payload).
+    #
+    # ak-dixt reviewer MAJOR (2026-11-23): keying this on
+    # sha256(token) was BYPASSABLE via base64url malleability —
+    # when the payload byte-length is not a multiple of 3, the
+    # trailing b64url character has unused bits, so multiple
+    # distinct token STRINGS decode to the SAME payload bytes +
+    # verify under the same HMAC sig. Attacker could issue →
+    # consume → re-encode trailing char → bypass the dedup set
+    # (digest differs because the token string differs). The
+    # nonce lives inside the HMAC-protected payload so it is
+    # CANONICAL: any malleable re-encoding of the token-string
+    # that still HMAC-verifies decodes to the same payload and
+    # therefore the same nonce. Dedup-key material unchanged
+    # across any legit attack-shape re-encoding.
+    nonce = payload.get("nonce")
+    if not isinstance(nonce, str) or not nonce:
+        return False
     with _consumed_lock:
         _prune_consumed_locked(now)
-        if digest in _consumed:
+        if nonce in _consumed:
             return False
-        _consumed[digest] = exp
+        _consumed[nonce] = exp
     return True
 
 

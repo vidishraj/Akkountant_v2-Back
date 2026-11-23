@@ -305,6 +305,121 @@ class TestVerifyConfirmToken(unittest.TestCase):
             "verify again within TTL (replay rejection)",
         )
 
+    # (15b) ak-dixt reviewer MAJOR (2026-11-23): base64url malle-
+    # ability replay regression. When payload byte-length is not a
+    # multiple of 3, the trailing b64url char has unused bits, so
+    # multiple distinct token STRINGS decode to the SAME payload
+    # bytes + HMAC-verify under the same signature.
+    #
+    # Pre-fix (sha256(token)-keyed dedup): the two distinct token
+    # strings hash to two DIFFERENT dedup keys, so the second
+    # verify bypasses one-time-use. Reviewer proved this e2e.
+    #
+    # Post-fix (payload["nonce"]-keyed dedup): both tokens decode
+    # to the same payload, same nonce, same dedup key → second
+    # verify fails as expected.
+    def test_replay_via_base64url_reencode_rejected(self):
+        from utils import confirm_tokens as ct
+        tok = ct.issue_confirm_token(
+            "delete_invoice", {"id": "A"}, "U-replay-reencode",
+        )
+        b64_payload, sig = tok.rsplit(".", 1)
+        original_bytes = ct._b64url_decode(b64_payload)
+        if len(original_bytes) % 3 == 0:
+            self.skipTest(
+                "payload lands on 3-byte boundary — no unused "
+                "bits in trailing b64 char to exploit on this "
+                "fixture; the invariant still holds, just no "
+                "attack to demonstrate"
+            )
+        # Find a last-char variant that is DIFFERENT but decodes
+        # to the SAME payload bytes (= same HMAC sig).
+        alphabet = (
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789-_"
+        )
+        last = b64_payload[-1]
+        mutated_tok = None
+        for c in alphabet:
+            if c == last:
+                continue
+            candidate_b64 = b64_payload[:-1] + c
+            try:
+                candidate_bytes = ct._b64url_decode(candidate_b64)
+            except Exception:
+                continue
+            if candidate_bytes == original_bytes:
+                mutated_tok = f"{candidate_b64}.{sig}"
+                break
+        self.assertIsNotNone(
+            mutated_tok,
+            "could not find a malleable b64url variant — the "
+            "payload-length / trailing-bit arithmetic changed",
+        )
+        self.assertNotEqual(
+            mutated_tok, tok,
+            "mutated token must be a distinct string from the "
+            "original — attack-shape precondition",
+        )
+        # First verify — consumes.
+        self.assertTrue(
+            ct.verify_confirm_token(
+                tok, "delete_invoice", {"id": "A"},
+                "U-replay-reencode",
+            ),
+            "legit token must verify + consume",
+        )
+        # Second verify on the re-encoded variant — MUST fail
+        # (nonce-keyed dedup catches the malleability).
+        self.assertFalse(
+            ct.verify_confirm_token(
+                mutated_tok, "delete_invoice", {"id": "A"},
+                "U-replay-reencode",
+            ),
+            "ak-dixt reviewer MAJOR: nonce-keyed dedup must catch "
+            "the base64url-malleability replay — a re-encoded "
+            "token string that decodes to the same payload bytes "
+            "MUST NOT bypass one-time-use. Pre-fix (sha256(token)-"
+            "keyed) this verified True; the fix moves the dedup "
+            "key into the HMAC-protected payload (nonce) so all "
+            "legit malleable variants collapse to the same key.",
+        )
+
+    # (15c) Pin the dedup-key SOURCE as `payload["nonce"]` via
+    # source-grep. If a future refactor flips back to sha256(token)
+    # or any other token-string-derived key, this test reds.
+    def test_dedup_key_sources_from_payload_nonce(self):
+        src = _read_source("utils/confirm_tokens.py")
+        # The dedup key assignment must reference payload["nonce"].
+        self.assertRegex(
+            src,
+            r"nonce\s*=\s*payload\.get\(\s*['\"]nonce['\"]\s*\)",
+            "ak-dixt reviewer MAJOR: dedup key must source from "
+            "payload['nonce'] (canonical, inside HMAC-protected "
+            "payload). sha256(token)-keyed dedup is bypassable "
+            "via base64url malleability — see test_replay_via_"
+            "base64url_reencode_rejected",
+        )
+        # And the consumed-set add must use that nonce as the key.
+        self.assertRegex(
+            src,
+            r"_consumed\[\s*nonce\s*\]\s*=",
+            "ak-dixt reviewer MAJOR: consumed-set must be keyed "
+            "on the nonce variable (sourced from payload), not on "
+            "a hash of the token string",
+        )
+        # And the sha256(token) shape must be fully removed from
+        # the dedup path. (Source-grep: no `sha256(token` anywhere
+        # in utils/confirm_tokens.py.)
+        self.assertNotRegex(
+            src,
+            r"hashlib\.sha256\(\s*token\.encode",
+            "ak-dixt reviewer MAJOR: sha256(token.encode(...)) "
+            "pattern must NOT survive — the b64url-malleable "
+            "dedup key class is closed",
+        )
+
     # (16) Constant-time compare: a short-sig doesn't raise.
     def test_short_signature_no_raise(self):
         from utils import confirm_tokens as ct
