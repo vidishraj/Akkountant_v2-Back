@@ -7,6 +7,9 @@ from flask import g
 from werkzeug.utils import secure_filename
 from models.user_files import UserFile, UserFolder
 from services.Base_Service import BaseService
+from utils.firebase_id_validator import (
+    assert_valid_firebase_id_for_path,
+)
 from utils.logger import Logger
 
 try:
@@ -45,6 +48,12 @@ class FileStorageService(BaseService):
         os.makedirs(self.base_upload_dir, exist_ok=True)
 
     def _get_user_dir(self, user_id):
+        # ak-et1b: shape-validate user_id before building the
+        # per-user upload dir. Also covers the :118
+        # relative_path construction which uses the same
+        # user_id (any caller that reaches here through the
+        # service passes the strict-shape gate).
+        user_id = assert_valid_firebase_id_for_path(user_id)
         user_dir = os.path.join(self.base_upload_dir, user_id)
         os.makedirs(user_dir, exist_ok=True)
         return user_dir

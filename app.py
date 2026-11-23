@@ -876,6 +876,35 @@ class Akkountant(Flask):
                 return jsonify({
                     "error": f"Unauthorized - {exc.reason}",
                 }), 401
+            # ak-et1b (2026-11-23): strict shape check on the
+            # verified uid BEFORE it becomes g.firebase_id. The
+            # downstream filesystem-path callsites
+            # (transactionsService / fileStorageService /
+            # signatureService / agentFileAttachmentService /
+            # agent_attachments) use g.firebase_id as a path
+            # component; a UID containing `/`, `..`, NUL, or
+            # other filesystem-sensitive chars would escape the
+            # sandbox dir. Firebase Auth UIDs are alphanumeric
+            # (+ -_) by spec; anything else is a request to
+            # reject at the chokepoint. Central defense; the 5
+            # cited audit sites ALSO call
+            # assert_valid_firebase_id_for_path as defense-in-
+            # depth.
+            from utils.firebase_id_validator import (
+                is_valid_firebase_id,
+            )
+            if not is_valid_firebase_id(verified_uid):
+                self.logger.warning(
+                    "[ak-et1b] rejecting request: verified "
+                    "firebase_id fails strict shape check "
+                    "(auth_mode=%s)",
+                    auth_mode,
+                )
+                return jsonify({
+                    "error": (
+                        "Bad request - firebase_id shape invalid"
+                    ),
+                }), 400
             g.firebase_id = verified_uid
             g.firebase_auth_mode = auth_mode
 

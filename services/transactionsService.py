@@ -10,6 +10,9 @@ from enums.TransactionTypeEnum import TransactionTypeEnum
 from models import User, UserToken, Transactions, TransactionForReview, StatementPasswords, FileDetails
 from models.transactions import ProcessingMethod
 from services.Base_Service import BaseService
+from utils.firebase_id_validator import (
+    assert_valid_firebase_id_for_path, InvalidFirebaseId,
+)
 from utils.logger import Logger
 
 
@@ -574,6 +577,9 @@ class TransactionService(BaseService):
         if not gmail_id:
             return None
 
+        # ak-et1b: shape-validate user_id before filesystem join
+        # (defense-in-depth; middleware is the primary gate).
+        user_id = assert_valid_firebase_id_for_path(user_id)
         base = os.path.join(os.getcwd(), "claude_statements", user_id)
 
         # Preferred: use processedEmails.pdf_filename if we have it.
@@ -1129,6 +1135,8 @@ class TransactionService(BaseService):
     def fetchLocalStatements(self, userId, bank=None):
         """Fetch list of locally stored Claude-analyzed statements"""
         try:
+            # ak-et1b: shape-validate userId before filesystem join.
+            userId = assert_valid_firebase_id_for_path(userId)
             statements_dir = os.path.join(os.getcwd(), "claude_statements", userId)
             
             if not os.path.exists(statements_dir):
@@ -1173,6 +1181,9 @@ class TransactionService(BaseService):
         """Download a locally stored statement"""
         try:
             # Sanitize to prevent path traversal
+            # ak-et1b: shape-validate userId FIRST — pre-ak-et1b
+            # bank + filename were sanitized but userId was not.
+            userId = assert_valid_firebase_id_for_path(userId)
             safe_bank = os.path.basename(bank)
             safe_filename = os.path.basename(filename)
             base_dir = os.path.join(os.getcwd(), "claude_statements", userId)
@@ -1196,6 +1207,9 @@ class TransactionService(BaseService):
         """Delete a locally stored statement"""
         try:
             # Sanitize to prevent path traversal
+            # ak-et1b: shape-validate userId FIRST (same reason as
+            # downloadLocalStatement above).
+            userId = assert_valid_firebase_id_for_path(userId)
             safe_bank = os.path.basename(bank)
             safe_filename = os.path.basename(filename)
             base_dir = os.path.join(os.getcwd(), "claude_statements", userId)
@@ -1228,6 +1242,11 @@ class TransactionService(BaseService):
         from models.processedEmails import ProcessedEmails
         from sqlalchemy import desc, asc
 
+        # ak-et1b: shape-validate userId once at the entry — the
+        # per-row full_path construction (:1305+) builds a path
+        # using this same userId; validating here is cheaper than
+        # per-row.
+        userId = assert_valid_firebase_id_for_path(userId)
         filters = filters or {}
         query = self.db.session.query(ProcessedEmails).filter_by(user_id=userId)
 

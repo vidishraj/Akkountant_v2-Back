@@ -466,7 +466,19 @@ class TransactionController:
             if not row or not row.pdf_filename:
                 return jsonify({"error": "PDF not available for this statement"}), 404
             import os
-            file_path = os.path.join(os.getcwd(), "claude_statements", userId, row.pdf_filename)
+            # ak-et1b (2026-11-23): shape-validate userId + basename
+            # the pdf_filename BEFORE path construction. userId comes
+            # from g.firebase_id (middleware now validates in
+            # app.py's _request_interceptor), but belt-and-brace
+            # here closes any future refactor that drops the
+            # middleware gate + any callsite that bypasses HTTP
+            # entry (test harness, direct service call).
+            from utils.firebase_id_validator import (
+                assert_valid_firebase_id_for_path,
+            )
+            userId = assert_valid_firebase_id_for_path(userId)
+            safe_pdf = os.path.basename(row.pdf_filename)
+            file_path = os.path.join(os.getcwd(), "claude_statements", userId, safe_pdf)
             if not os.path.exists(file_path):
                 return jsonify({"error": "PDF file not found on disk"}), 404
             return flask_send_file(file_path, as_attachment=True, download_name=os.path.basename(row.pdf_filename))

@@ -52,6 +52,9 @@ import shutil
 import uuid as _uuid_mod
 
 from services.Base_Service import BaseService
+from utils.firebase_id_validator import (
+    assert_valid_firebase_id_for_path,
+)
 from utils.logger import Logger
 
 from models.agentFileAttachments import AgentFileAttachment
@@ -240,6 +243,10 @@ class AgentFileAttachmentService(BaseService):
         # Per-user subdir (0o750 — group-r-x deliberate for opc:opc so
         # nginx or a sidecar in the same group could serve if we ever
         # front the directory; other-world has no access).
+        # ak-et1b: shape-validate user_id before building the
+        # per-user subdir. Pre-ak-et1b a uid containing `../` would
+        # escape _BASE_DIR entirely.
+        user_id = assert_valid_firebase_id_for_path(user_id)
         user_dir = os.path.join(_BASE_DIR, user_id)
         os.makedirs(user_dir, mode=0o750, exist_ok=True)
 

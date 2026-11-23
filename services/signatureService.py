@@ -4,6 +4,9 @@ from flask import g
 from werkzeug.utils import secure_filename
 from models.freelance_management import Signature
 from services.Base_Service import BaseService
+from utils.firebase_id_validator import (
+    assert_valid_firebase_id_for_path,
+)
 from utils.logger import Logger
 
 
@@ -71,8 +74,14 @@ class SignatureService(BaseService):
             # Secure filename
             filename = secure_filename(file.filename)
             user_id = g.get('firebase_id')
+            # ak-et1b: shape-validate user_id before embedding in
+            # the on-disk filename. `secure_filename` does not
+            # cover the user_id portion; a malicious uid could
+            # otherwise emit a filename like `../../etc/passwd_x`
+            # that escapes the upload_folder.
+            user_id = assert_valid_firebase_id_for_path(user_id)
             filename = f"{user_id}_{filename}"
-            
+
             # Save file
             filepath = os.path.join(self.upload_folder, filename)
             file.save(filepath)
