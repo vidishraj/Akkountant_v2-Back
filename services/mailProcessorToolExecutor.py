@@ -298,6 +298,51 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
     period_start_raw = args.get("period_start")
     period_end_raw = args.get("period_end")
 
+    # ak-csng Phase 1 (2026-11-23) — arg-validation fail-fast.
+    # This tool receives args from an LLM that may have been
+    # prompt-injected via an attacker email. Reject obviously-
+    # malformed calls BEFORE any DB write. Fields that can be
+    # silently omitted ("UNKNOWN" bank, missing gmail_message_id
+    # on a statement source) were previously accepted — a prompt-
+    # injection could craft a batch insert with no source/bank
+    # binding and poison the ledger. Fail-closed on:
+    #   * bank missing / equals "UNKNOWN" literal (sentinel for
+    #     "LLM didn't supply") — a legit statement tool-call
+    #     always carries the bank identifier.
+    #   * source == "Statement" but no gmail_message_id — the
+    #     dedup path + fileDetails creation both key on gmail
+    #     id; missing it means we can't correlate the insert
+    #     with the mail that produced it.
+    if not bank or bank == "UNKNOWN":
+        logger.warning(
+            "[ak-csng] insert_batch_transactions rejected: bank "
+            "missing or 'UNKNOWN' sentinel (prompt-injection "
+            "class — LLM tool call must carry a bank identifier). "
+            "user_id=%s source=%s",
+            user_id, source,
+        )
+        return {
+            "result": "invalid_args",
+            "error": "bank is required (ak-csng validation)",
+            "inserted": 0,
+        }
+    if source == "Statement" and not gmail_id and not file_id:
+        logger.warning(
+            "[ak-csng] insert_batch_transactions rejected: "
+            "Statement source without gmail_message_id OR "
+            "file_id (prompt-injection class — can't correlate "
+            "insert with source mail). user_id=%s bank=%s",
+            user_id, bank,
+        )
+        return {
+            "result": "invalid_args",
+            "error": (
+                "Statement source requires gmail_message_id "
+                "or file_id (ak-csng validation)"
+            ),
+            "inserted": 0,
+        }
+
     transactions = []
     # Track how each row was hashed so the batch summary log makes it
     # obvious when a chunk re-read collapses vs. a novel row lands.

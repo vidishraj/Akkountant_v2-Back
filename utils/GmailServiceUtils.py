@@ -160,12 +160,32 @@ class GmailServiceUtils:
         gmailService = self.googleService.get_gmail_service(userId, token)
 
         # ── Phase 1: Collect all message IDs ──────────────────────────
+        #
+        # ak-csng Phase 1 (2026-11-23): includeSpamTrash=False
+        # (was True). Spam/trash folder was feeding the mail
+        # pipeline — Gmail's spam folder is literally where
+        # phishing attempts live, and the prompt-injection attack
+        # surface in mailProcessorService.py was reachable via
+        # any email that reached the pipeline. Pulling spam out
+        # of the ingest path shrinks the attacker-reachable
+        # surface. Tradeoff: a legit bank/broker email mis-
+        # classified by Gmail as spam will no longer process
+        # automatically — Overseer can manually move spam→inbox
+        # if they notice a gap. Low probability (bank emails are
+        # usually correctly inboxed). Logged at INFO so the gap
+        # is diagnosable.
+        self.logger.info(
+            "[ak-csng] Mail pipeline scanning Inbox+other folders "
+            "ONLY (includeSpamTrash=False). Legit emails mis-"
+            "classified as spam will NOT process; manual move to "
+            "Inbox to re-ingest."
+        )
         all_message_ids: List[str] = []
         request = gmailService.users().messages().list(
             userId='me',
             q=f"after:{dateFrom} before:{dateTo}",
             maxResults=min(500, self.PAGE_SIZE * 5),
-            includeSpamTrash=True,
+            includeSpamTrash=False,
         )
 
         while request is not None:
