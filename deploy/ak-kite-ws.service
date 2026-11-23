@@ -1,0 +1,73 @@
+# ak-vue6 Phase 1 (2026-11-23): Kite WebSocket LTP daemon.
+#
+# Standalone systemd unit — NOT a child of app.service or
+# schedular.service. Owns the Kite WebSocket connection + the
+# in-memory tick dict + the UNIX-socket snapshot server at
+# /run/akkountant/kite-ltp.sock.
+#
+# Lifecycle:
+#   * Type=simple — single foreground process, stdout → journal.
+#   * Restart=always + RestartSec=5 — any exit (clean or crash
+#     or token-expired-signal) → relaunch within 5s. The daemon
+#     exits non-zero intentionally when the Kite token expires;
+#     the restart picks up the fresh token from the DB.
+#   * StartLimitIntervalSec=0 — no cap on restart attempts. The
+#     daemon self-paces its own token-expired bounces (30s wait
+#     inside the loop when no access_token on file).
+#
+# Overseer invariants:
+#   * DESTRUCTIVE systemctl permissions scope to this NEW unit
+#     only. No existing service (app / schedular) is touched by
+#     this bead.
+#   * RSS target 50-80 MB.
+#   * ak-6chz follow-up: deploy.yml adds a `systemctl restart
+#     ak-kite-ws.service` step (same treatment as ak-6chz will
+#     add for schedular.service). Filed as separate infra bead.
+#
+# Infra install:
+#   sudo cp deploy/ak-kite-ws.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ak-kite-ws.service
+
+[Unit]
+Description=Akkountant Kite WebSocket LTP daemon (ak-vue6)
+After=network-online.target mysqld.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+# Repo checkout — operator sets this to the deployed repo path.
+# Mirrors app.service / schedular.service precedent.
+WorkingDirectory=/home/opc/akkountantV2_back
+# RuntimeDirectory creates /run/akkountant with 0755 opc:opc
+# BEFORE this service starts; daemon tightens the socket file
+# inside it to 0600.
+RuntimeDirectory=akkountant
+RuntimeDirectoryMode=0755
+# Environment: KITE_API_KEY + DATABASE_URL mirror the existing
+# app.service EnvironmentFile. Operator must symlink or
+# duplicate the same file for this unit.
+EnvironmentFile=/etc/akkountant/kite-ws.env
+ExecStart=/usr/bin/python3 scripts/kite_ws_daemon_entrypoint.py
+Restart=always
+RestartSec=5
+# No upper bound on restart attempts — token-expiry triggers a
+# non-zero exit intentionally; the daemon paces itself with a
+# 30s sleep when no access_token is on file.
+StartLimitIntervalSec=0
+# Journal captures stdout+stderr; matches app.service pattern.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ak-kite-ws
+
+# Hardening (defense-in-depth; pairs with 0600 socket perm set
+# by the daemon on bind).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/run/akkountant /var/log
+
+[Install]
+WantedBy=multi-user.target

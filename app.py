@@ -31,6 +31,7 @@ from controllers.wealthDigestEP import WealthDigestController  # ak-5vg
 from controllers.userFilesEP import UserFilesController  # ak-9dz
 from controllers.reconciliationEP import ReconciliationController  # ak-cipj
 from controllers.watchlistEP import WatchlistController  # ak-05af
+from controllers.kiteLtpEP import KiteLtpController  # ak-vue6
 from enums.TaskStatusEnum import JobStatus
 from services.InvestmentService import InvestmentService
 from services.tasks.scheduler import TaskScheduler
@@ -263,8 +264,14 @@ class Akkountant(Flask):
             self.watchlistService,
             investment_service=self.investmentService,
         )
-
-    def _setup_schedulers(self):
+        # ak-vue6 Phase 1 (2026-11-23): Kite LTP SSE + single-symbol
+        # endpoints. Flask-side CLIENT of the standalone
+        # ``ak-kite-ws.service`` daemon (UNIX-socket IPC at
+        # /run/akkountant/kite-ltp.sock). The daemon owns the Kite
+        # WebSocket; app.service only reads snapshots. Clean failure
+        # when the daemon is down: 503 on single-symbol, SSE emits
+        # ``reconnect_required`` + closes.
+        self.kiteLtpEP = KiteLtpController()
         """Set up background daemon threads (CronAgent, mail, snapshots).
         TaskScheduler is run separately via schedular.service.
         Uses a file lock so only one gunicorn worker starts these threads."""
@@ -504,6 +511,20 @@ class Akkountant(Flask):
             ('/watchlist/ltp', 'GET', self.watchlistEP.fetchLtp),
         ]
         for rule, method, view_func in watchlistRoutes:
+            self.add_url_rule(rule, methods=[method], view_func=view_func)
+
+        # ak-vue6 Phase 1 (2026-11-23): Kite LTP SSE + snapshot
+        # endpoints. Both READ-ONLY — single-symbol snapshot + SSE
+        # delta stream. Backed by the standalone ak-kite-ws.service
+        # daemon via UNIX-socket IPC. Overseer-approved spec:
+        # /api/kite/* prefix (not /kite/*) so the FE companion can
+        # cleanly route the live-data surface separately from the
+        # REST Kite endpoints.
+        kiteLtpRoutes = [
+            ('/api/kite/ltp/<symbol>', 'GET', self.kiteLtpEP.getLtp),
+            ('/api/kite/stream/ltp', 'GET', self.kiteLtpEP.streamLtp),
+        ]
+        for rule, method, view_func in kiteLtpRoutes:
             self.add_url_rule(rule, methods=[method], view_func=view_func)
 
         # Freelance Management API Routes
