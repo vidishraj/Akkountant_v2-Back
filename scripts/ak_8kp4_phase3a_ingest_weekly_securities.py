@@ -51,9 +51,10 @@ After the pass, emits:
   * total rows inserted / deduped / rejected (parser-side)
   * BUY / SELL counts, distinct-ISIN count, trade-date range
   * per-FY (Apr→Mar Indian financial year) row count
-  * ISIN reconciliation: ISINs in PDF text == rows + rejections
-    + pending-skipped + unaccounted (ak-4t7f); files with
-    unaccounted ISINs are counted and WARNed
+  * ISIN reconciliation (ak-vm8a, two-sided): checksum-valid ISINs
+    in the PDF text == table rows with a valid ISIN (candidates +
+    valid-ISIN rejections + pending-skipped); mismatching files are
+    counted and WARNed in either direction
   * elapsed time
 
 §23 preserved: #2 (verbatim PDF tuple dedup, no normalization),
@@ -169,8 +170,8 @@ def _parse_all_pdfs(pdf_paths: list, logger) -> tuple:
     Returns (rows, rejections, stats). `stats` sums the parser's
     per-file stats plus:
       * parse_failures: files whose parse raised
-      * files_unaccounted: files with ISINs in the text that did not
-        reach a row, rejection or pending skip (ak-4t7f fail-loud)
+      * files_mismatch: files whose text-ISIN count differs from
+        their valid-ISIN table rows in EITHER direction (ak-vm8a)
     """
     from services.statement_parsers.zerodha_weekly_securities import (
         parse_weekly_securities_pdf,
@@ -191,8 +192,8 @@ def _parse_all_pdfs(pdf_paths: list, logger) -> tuple:
         all_rows.extend(rows)
         all_rejections.update(rejections)
         stats.update(st)
-        if st.get("unaccounted_isins"):
-            stats["files_unaccounted"] += 1
+        if st.get("unaccounted_isins") or st.get("overcounted_isins"):
+            stats["files_mismatch"] += 1
     for k in ("qty_ambiguous", "label_mismatch", "missing_settlement",
               "malformed"):
         all_rejections.setdefault(k, 0)
@@ -241,30 +242,42 @@ def _build_report(
         len(rows), buys, sells, len({r["isin"] for r in rows}),
         min(dates) if dates else "n/a", max(dates) if dates else "n/a",
     )
+    # ak-vm8a: compare like with like, two-sided. text_isins counts
+    # checksum-valid ISINs in the page text; isin_rows counts table
+    # rows whose ISIN cell is checksum-valid (= candidates +
+    # rejections that still had a valid ISIN + pending skips).
+    # Rejections WITHOUT a valid ISIN are reported separately; they
+    # must never be added to the accounted side.
     candidates = stats.get("candidate_rows", len(rows))
-    accounted = (
-        candidates + total_rejected + stats.get("pending_skipped", 0)
-        + stats.get("unaccounted_isins", 0)
-    )
+    text_isins = stats.get("text_isins", 0)
+    isin_rows = stats.get("isin_rows", 0)
+    pending = stats.get("pending_skipped", 0)
+    valid_rejected = max(0, isin_rows - candidates - pending)
     logger.info(
-        "  ISIN reconciliation: ISINs in PDF text=%d == candidate "
-        "rows %d + rejected %d + pending-skipped %d + unaccounted "
-        "%d (=%d) -> %s",
-        stats.get("text_isins", 0), candidates, total_rejected,
-        stats.get("pending_skipped", 0),
-        stats.get("unaccounted_isins", 0), accounted,
+        "  ISIN reconciliation: ISINs in PDF text=%d vs table rows "
+        "with a valid ISIN=%d (candidate rows %d + rejected %d + "
+        "pending-skipped %d) -> %s",
+        text_isins, isin_rows, candidates, valid_rejected, pending,
         (
             "INCOMPLETE (parse failures)" if stats.get("parse_failures")
-            else "OK" if accounted == stats.get("text_isins", 0)
+            else "OK" if text_isins == isin_rows
             else "MISMATCH"
         ),
     )
-    if stats.get("files_unaccounted", 0):
+    logger.info(
+        "  ISIN cells recovered from truncation: %d (reverted as "
+        "unreconciled: %d) | rejected rows without a valid ISIN: %d",
+        stats.get("isin_repaired", 0),
+        stats.get("isin_repair_reverted", 0),
+        max(0, total_rejected - valid_rejected),
+    )
+    if stats.get("files_mismatch", 0):
         logger.warning(
-            "  %d file(s) contain ISINs that reached no row / "
-            "rejection / pending skip (%d ISINs total). See the "
+            "  %d file(s) have an ISIN count mismatch (text vs table: "
+            "%d missing from tables, %d extra in tables). See the "
             "per-file WARNs above; the layout may have changed.",
-            stats["files_unaccounted"], stats.get("unaccounted_isins", 0),
+            stats["files_mismatch"], stats.get("unaccounted_isins", 0),
+            stats.get("overcounted_isins", 0),
         )
     logger.info(
         "  tables: %d | zero-activity rows: %d | pending rows "

@@ -332,11 +332,116 @@ class TestParserRealShapedTables(unittest.TestCase):
         txt = f"SEBI Reg.No.: INZ000031633\n{ISIN_A}\n{ISIN_B}\nINE000T01013"
         self.assertEqual(self.m.count_text_isins(txt), 2)
 
+    def test_text_isin_count_glued_and_overlapping(self):
+        # ak-vm8a A: get_text can glue an ISIN to the next cell's
+        # text; a trailing word boundary missed it.
+        c = self.m.count_text_isins
+        self.assertEqual(c(f"{ISIN_A}SYNTHCO"), 1)          # right-glued
+        self.assertEqual(c(f"2024001{ISIN_A}"), 1)           # left-glued
+        self.assertEqual(c(f"{ISIN_A}{ISIN_B}"), 2)          # back-to-back
+        self.assertEqual(c(f"{ISIN_A}{ISIN_A[2:]}"), 1)      # no double count
+        self.assertEqual(c("INZ000031633SYNTH"), 0)          # reg-no excluded
+
+    # ── ak-vm8a B: truncated ISIN cell recovery (pure helper) ──
+
+    ISIN_RECT = (476.0, 255.0, 512.0, 275.0)
+    SCRIP_RECT = (512.0, 255.0, 592.0, 275.0)
+
+    def _words(self, isin_text, scrip_words=("SYNTH", "CO")):
+        ws = [(477.0, 258.0, 520.0, 265.0, isin_text, 0, 0, 0)]
+        x = 521.0
+        for t in scrip_words:
+            ws.append((x, 258.0, x + 15, 265.0, t, 0, 1, 0))
+            x += 17
+        return ws
+
+    def _repair(self, isin_cell, scrip_cell, words):
+        row = settled_row(isin=isin_cell, scrip=scrip_cell)
+        status = self.m.repair_truncated_isin(
+            row, 13, 14, self.ISIN_RECT, self.SCRIP_RECT, words)
+        return status, row
+
+    def test_repair_truncated_isin_and_scrip(self):
+        status, row = self._repair(ISIN_A[:10], "S1Y2NTH CO",
+                                   self._words(ISIN_A))
+        self.assertEqual(status, "repaired")
+        self.assertEqual((row[13], row[14]), (ISIN_A, "SYNTH CO"))
+
+    def test_repair_when_tail_not_leaked_into_scrip(self):
+        status, row = self._repair(ISIN_A[:11], "SYNTH CO",
+                                   self._words(ISIN_A))
+        self.assertEqual(status, "repaired")
+        self.assertEqual((row[13], row[14]), (ISIN_A, "SYNTH CO"))
+
+    def test_repair_from_glued_word(self):
+        status, row = self._repair(ISIN_A[:11], "SYNTH CO",
+                                   self._words(ISIN_A + "XYZ"))
+        self.assertEqual((status, row[13]), ("repaired", ISIN_A))
+
+    def test_probe_case2_neighbour_bleeding_in_is_ignored(self):
+        # ak-vm8a review probe 2: own full ISIN absent from words; a
+        # neighbour word that STARTS outside the cell (bleeds ~1pt
+        # into its band) completes the prefix to a different ISIN.
+        prefix = ISIN_A[:10]  # 'INE000T010': A's clip, also B's prefix
+        neighbour = (440.0, 256.0, 477.0, 263.0, ISIN_B, 0, 0, 0)
+        status, row = self._repair(prefix, "SYNTH CO",
+                                   [neighbour] + self._words("X")[1:])
+        self.assertEqual(status, "unrecoverable")
+        self.assertEqual(row[13], prefix)
+
+    def test_probe_case4_short_prefix_not_completed(self):
+        # ak-vm8a review probe 4: a 6-char prefix completes to any
+        # INE000… security -> never guess.
+        status, row = self._repair("INE000", "SYNTH CO",
+                                   self._words(ISIN_B))
+        self.assertEqual(status, "unrecoverable")
+        self.assertEqual(row[13], "INE000")
+
+    def test_word_centred_outside_row_band_is_ignored(self):
+        w = (477.0, 270.0, 520.0, 284.0, ISIN_A, 0, 0, 0)  # centre 277 > 275
+        status, _ = self._repair(ISIN_A[:11], "SYNTH CO", [w])
+        self.assertEqual(status, "unrecoverable")
+
+    def test_no_repair_when_ambiguous(self):
+        # Two different checksum-valid completions of the same
+        # prefix -> keep rejecting.
+        prefix = "INE000T010"
+        words = self._words(ISIN_A) + [
+            (478.0, 266.0, 510.0, 272.0, ISIN_B, 0, 2, 0)]
+        status, row = self._repair(prefix, "SYNTH CO", words)
+        self.assertEqual(status, "unrecoverable")
+        self.assertEqual(row[13], prefix)
+
+    def test_no_repair_when_completion_fails_checksum(self):
+        status, row = self._repair(ISIN_A[:11], "SYNTH CO",
+                                   self._words(ISIN_A[:11] + "3"))
+        self.assertEqual(status, "unrecoverable")
+
+    def test_no_repair_when_scrip_cannot_be_reconciled(self):
+        # Scrip cell disagrees with the scrip words even after
+        # removing the leaked tail -> don't guess.
+        status, row = self._repair(ISIN_A[:10], "S1Y2NTH CO",
+                                   self._words(ISIN_A, ("OTHER", "CO")))
+        self.assertEqual(status, "unrecoverable")
+        self.assertEqual(row[13], ISIN_A[:10])
+
+    def test_repair_noop_on_valid_or_na(self):
+        for cell in (ISIN_A, "NA", ""):
+            status, _ = self._repair(cell, "SYNTH CO", [])
+            self.assertEqual(status, "ok", cell)
+
+    def test_unrecoverable_row_still_rejected_downstream(self):
+        rows, rej, _ = self.m.extract_rows_from_tables(
+            doc([settled_row(isin=ISIN_A[:11])]), "x.pdf")
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 1)
+
 
 # ─── Real-layout PDF through fitz find_tables ────────────────
 
 
-def _build_statement_pdf(path, settled_rows, pending_rows):
+def _build_statement_pdf(path, settled_rows, pending_rows,
+                          overflow_isin_fontsize=None):
     """Render a one-page statement with the broker's real layout:
     title lines, then two ruled 21-column tables (header +
     sub-header + data) on an A4-landscape page."""
@@ -362,7 +467,15 @@ def _build_statement_pdf(path, settled_rows, pending_rows):
                 rect = fitz.Rect(xs[c], yy, xs[c + 1], yy + h)
                 page.draw_rect(rect, color=(0, 0, 0), width=0.5)
                 txt = row[c] or ""
-                if txt:
+                if (overflow_isin_fontsize and c == 13 and h == 20
+                        and txt.startswith("IN")):
+                    # ak-vm8a: draw the ISIN as ONE run that overflows
+                    # its cell's right border (as on the prod PDF that
+                    # lost a trade): find_tables then clips the tail
+                    # into the Scrip Name cell.
+                    page.insert_text((rect.x0 + 1, rect.y0 + 8), txt,
+                                     fontsize=overflow_isin_fontsize)
+                elif txt:
                     page.insert_textbox(rect + (1, 1, -1, -1), txt,
                                         fontsize=4.2, fontname="helv")
             yy += h
@@ -409,10 +522,88 @@ class TestParserRealLayoutPdf(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _pdf(self, settled, pending):
+    def _pdf(self, settled, pending, **kw):
         p = os.path.join(self.tmp.name, "2024-02-17_weekly-securities-statement_HA6023.pdf")
-        _build_statement_pdf(p, settled, pending)
+        _build_statement_pdf(p, settled, pending, **kw)
         return p
+
+    def test_truncated_isin_cell_is_recovered(self):
+        # ak-vm8a B: on prod, find_tables returned an 11-char ISIN
+        # cell and the row was rejected -> a real trade lost.
+        import fitz
+        p = self._pdf([settled_row(), sell_row()], [NA_ROW],
+                      overflow_isin_fontsize=6.5)
+        with fitz.open(p) as d:  # precondition: the clipping happens
+            cells = [r for r in d[0].find_tables().tables[0].extract()
+                     if r[13] and r[13].startswith("INE")]
+        self.assertTrue(all(10 <= len(r[13]) < 12 for r in cells), cells)
+        rows, rej, st = self.parse_pdf(p)
+        self.assertEqual(sum(rej.values()), 0, rej)
+        self.assertEqual(
+            sorted((r["isin"], r["symbol"], r["transaction_type"]) for r in rows),
+            [(ISIN_A, "SYNTH CO LTD-EQ 10/-", "BUY"),
+             (ISIN_B, "SYNTH CO LTD-EQ 10/-", "SELL")],
+        )
+        self.assertEqual(st["isin_repaired"], 2)
+        self.assertEqual(st["text_isins"], st["isin_rows"])
+        self.assertEqual(st["unaccounted_isins"] + st["overcounted_isins"], 0)
+
+    def test_short_clip_is_rejected_not_guessed(self):
+        # ak-vm8a review (b): a 9-char clip is too short to trust.
+        import fitz
+        p = self._pdf([settled_row()], [NA_ROW], overflow_isin_fontsize=7.2)
+        with fitz.open(p) as d:
+            clip = [r[13] for r in d[0].find_tables().tables[0].extract()
+                    if r[13] and r[13].startswith("INE")]
+        self.assertEqual([len(c) for c in clip], [9])
+        rows, rej, st = self.parse_pdf(p)
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 1)
+        self.assertEqual(st["isin_repaired"], 0)
+
+    def test_repair_reverted_when_file_multiset_mismatches(self):
+        # ak-vm8a review (d): fail closed. If the file's ISIN multiset
+        # doesn't reconcile, a repaired row is rejected, not ingested.
+        from unittest import mock
+        from services.statement_parsers import zerodha_weekly_securities as m
+        p = self._pdf([settled_row(), sell_row()], [NA_ROW],
+                      overflow_isin_fontsize=6.5)
+        with mock.patch.object(m, "find_text_isins",
+                               return_value=[ISIN_A, ISIN_C]), \
+                self.assertLogs(m._LOG, level="WARNING") as cm:
+            rows, rej, st = self.parse_pdf(p)
+        self.assertEqual(rows, [])
+        self.assertEqual(rej["malformed"], 2)
+        self.assertEqual(st["isin_repair_reverted"], 2)
+        self.assertEqual(st["isin_repaired"], 0)
+        self.assertIn("REVERTED", "\n".join(cm.output))
+
+    def test_multiset_catches_substitution_with_equal_counts(self):
+        # ak-vm8a review (c): text has {A, C}, tables have {A, B}:
+        # counts are equal (2 == 2) but the sets differ.
+        from unittest import mock
+        from services.statement_parsers import zerodha_weekly_securities as m
+        p = self._pdf([settled_row(), sell_row()], [NA_ROW])
+        with mock.patch.object(m, "find_text_isins",
+                               return_value=[ISIN_A, ISIN_C]), \
+                self.assertLogs(m._LOG, level="WARNING"):
+            rows, rej, st = self.parse_pdf(p)
+        self.assertEqual(st["text_isins"], st["isin_rows"])  # counts equal
+        self.assertEqual(st["unaccounted_isins"], 1)  # C
+        self.assertEqual(st["overcounted_isins"], 1)  # B
+
+    def test_two_sided_mismatch_warns_when_tables_exceed_text(self):
+        # ak-vm8a A: an undercounting text side must not hide a gap.
+        from unittest import mock
+        from services.statement_parsers import zerodha_weekly_securities as m
+        p = self._pdf([settled_row()], [NA_ROW])
+        with mock.patch.object(m, "find_text_isins", return_value=[]), \
+                self.assertLogs(m._LOG, level="WARNING") as cm:
+            rows, rej, st = self.parse_pdf(p)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(st["overcounted_isins"], 1)
+        self.assertIn("mismatch", "\n".join(cm.output))
+        self.assertNotIn(ISIN_A, "\n".join(cm.output))
 
     def test_get_text_is_one_cell_per_line(self):
         # Pin the property that broke the old line parser.
@@ -461,7 +652,7 @@ class TestParserRealLayoutPdf(unittest.TestCase):
             rows, rej, st = self.parse_pdf(p)
         self.assertEqual(rows, [])
         self.assertEqual(st["unaccounted_isins"], 1)
-        self.assertIn("did not reach", "\n".join(cm.output))
+        self.assertIn("reconciliation mismatch", "\n".join(cm.output))
         self.assertNotIn(ISIN_A, "\n".join(cm.output))
 
 
@@ -676,6 +867,10 @@ class TestIngestScriptShape(unittest.TestCase):
         self.assertIn("Per-FY breakdown", self.src)
         self.assertIn("month >= 4", self.src)  # Indian FY (Apr→Mar)
         self.assertIn("ISIN reconciliation", self.src)
+        # ak-vm8a: OK only when text ISINs == valid-ISIN table rows,
+        # and invalid-ISIN rejections never pad the accounted side.
+        self.assertIn('"OK" if text_isins == isin_rows', self.src)
+        self.assertIn("files_mismatch", self.src)
 
     def test_report_logs_aggregates_only(self):
         self.assertNotIn("Top 10 scrips", self.src)

@@ -103,6 +103,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import Counter
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import List, Optional
@@ -153,7 +154,11 @@ _ISIN_RE = re.compile(r"^IN[A-Z0-9]{9}[0-9]$")
 # prefixes only (E company, F fund, 0-9 government). This excludes
 # the broker's "SEBI Reg.No.: INZ…" header token, which happens to
 # pass the ISIN checksum.
-_TEXT_ISIN_RE = re.compile(r"\bIN[EF0-9][A-Z0-9]{8}[0-9]\b")
+# ak-vm8a: NO word boundaries. get_text("text") can glue an ISIN to
+# the neighbouring cell's text (e.g. "INE000T01012SYNTH"), which a
+# trailing \b missed. Overlapping candidates are found via lookahead
+# and resolved left-to-right in count_text_isins.
+_TEXT_ISIN_RE = re.compile(r"(?=(IN[EF0-9][A-Z0-9]{8}[0-9]))")
 _PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 _SETTLEMENT_RE = re.compile(r"^[0-9A-Z]{4,12}$")
 _QTY_RE = re.compile(r"^-?\d+(\.\d+)?$")
@@ -459,13 +464,133 @@ def _section_for_table(page, table_y0: float) -> Optional[str]:
     return best
 
 
+def find_text_isins(text: str) -> list:
+    """Checksum-valid Indian ISINs in raw page text, in order, as an
+    independent cross-check on the table extraction.
+
+    ak-vm8a: matches anywhere (no word boundaries), keeps only
+    checksum-valid hits, and never counts overlapping windows twice
+    (after a hit, scanning resumes 12 chars later). The broker's
+    "SEBI Reg.No.: INZ…" token stays excluded by the IN[EF0-9]
+    issuer-type prefix."""
+    text = text or ""
+    found = []
+    next_free = 0
+    for m in _TEXT_ISIN_RE.finditer(text):
+        if m.start() < next_free:
+            continue
+        cand = m.group(1)
+        if isin_checksum_ok(cand):
+            found.append(cand)
+            next_free = m.start() + len(cand)
+    return found
+
+
 def count_text_isins(text: str) -> int:
-    """Checksum-valid Indian ISIN tokens in raw page text, as an
-    independent cross-check on the table extraction."""
-    return sum(
-        1 for t in _TEXT_ISIN_RE.findall(text or "")
-        if isin_checksum_ok(t)
-    )
+    return len(find_text_isins(text))
+
+
+def _strip_subsequence(text: str, chars: str) -> Optional[str]:
+    """Remove `chars` from `text` as an ordered subsequence (first
+    occurrences, left to right). None if they aren't all present."""
+    out = list(text)
+    pos = 0
+    for ch in chars:
+        while pos < len(out) and out[pos] != ch:
+            pos += 1
+        if pos >= len(out):
+            return None
+        del out[pos]
+    return "".join(out)
+
+
+def _overlaps(word, rect, tol: float = 0.5) -> bool:
+    x0, y0, x1, y1 = word[:4]
+    return (x1 > rect[0] + tol and x0 < rect[2] - tol
+            and y1 > rect[1] + tol and y0 < rect[3] - tol)
+
+
+def _starts_in(word, rect, tol: float = 0.5) -> bool:
+    x0, y0, x1, y1 = word[:4]
+    yc = (y0 + y1) / 2
+    return (rect[0] - tol <= x0 < rect[2]
+            and rect[1] <= yc <= rect[3])
+
+
+def repair_truncated_isin(row, isin_idx, scrip_idx, isin_rect,
+                          scrip_rect, words) -> str:
+    """ak-vm8a: find_tables clips cell text by geometry, so an ISIN
+    whose glyphs overflow its cell's right border loses its tail.
+    The lost characters land interleaved at the start of the Scrip
+    Name cell (e.g. ISIN 'INE000T010' + scrip 'S1Y2NTH…').
+
+    Recover in place, only when unambiguous:
+      * the truncated cell value has >= 10 of the 12 chars;
+      * the page words that START inside the ISIN cell (vertical
+        centre within its band) contain EXACTLY ONE distinct
+        checksum-valid 12-char ISIN starting with that value;
+      * the Scrip cell, with the leaked tail removed (or unchanged
+        if nothing leaked into it), must equal the scrip rebuilt
+        from the words that START inside the Scrip cell (whitespace
+        ignored).
+    Returns 'ok' (nothing to do), 'repaired', or 'unrecoverable'
+    (row left untouched, so pass 2 rejects it as malformed).
+    The caller additionally reverts every repair in a file whose
+    ISIN multiset doesn't reconcile with the page text (see
+    parse_weekly_securities_pdf), so a repair can never silently
+    attach a different security.
+
+    `words` items are (x0, y0, x1, y1, text, ...) as returned by
+    page.get_text("words"); rects are (x0, y0, x1, y1).
+    """
+    if isin_idx is None or isin_idx >= len(row):
+        return "ok"
+    v = _norm(row[isin_idx]).replace(" ", "")
+    if _is_na(v) or isin_checksum_ok(v):
+        return "ok"
+    # ak-vm8a review (b): a short prefix can complete to a different
+    # security; require >= 10 of the 12 chars (the observed clip
+    # left 11).
+    if not re.fullmatch(r"IN[A-Z0-9]{8,10}", v) or isin_rect is None:
+        return "unrecoverable"
+
+    cands = set()
+    for w in words:
+        # ak-vm8a review (a): only a word that STARTS inside the ISIN
+        # cell (and is vertically centred in its band) can be this
+        # cell's ISIN; a neighbour that merely bleeds in must not.
+        if not _starts_in(w, isin_rect):
+            continue
+        text = str(w[4])
+        start = text.find(v)
+        while start != -1:
+            cand = text[start:start + 12]
+            if len(cand) == 12 and isin_checksum_ok(cand):
+                cands.add(cand)
+            start = text.find(v, start + 1)
+    if len(cands) != 1:
+        return "unrecoverable"
+    isin = cands.pop()
+    leaked = isin[len(v):]
+
+    if scrip_idx is not None and scrip_idx < len(row) and scrip_rect is not None:
+        ft_scrip = row[scrip_idx] or ""
+        own = [w for w in words
+               if scrip_rect[0] - 0.5 <= w[0] < scrip_rect[2]
+               and _overlaps(w, scrip_rect)]
+        own.sort(key=lambda w: (round(w[1]), w[0]))
+        expected = "".join(str(w[4]) for w in own)
+
+        def flat(t):
+            return "".join((t or "").split())
+
+        cleaned = _strip_subsequence(ft_scrip, leaked)
+        if cleaned is not None and flat(cleaned) == expected:
+            row[scrip_idx] = cleaned
+        elif flat(ft_scrip) != expected:
+            return "unrecoverable"
+    row[isin_idx] = isin
+    return "repaired"
 
 
 def parse_weekly_securities_pdf(pdf_path: str) -> tuple:
@@ -474,10 +599,12 @@ def parse_weekly_securities_pdf(pdf_path: str) -> tuple:
     Returns (rows, rejections, stats). Besides the
     extract_rows_from_tables keys, `stats` carries:
       * text_isins: checksum-valid ISIN tokens in the page text
-      * unaccounted_isins: max(0, text_isins - isin_rows), i.e.
-        ISINs that are present in the PDF but never reached a row,
-        a rejection, or a pending skip. Any non-zero value is
-        logged as a WARN.
+      * isin_repaired: ISIN cells recovered (ak-vm8a)
+      * isin_repair_reverted: repairs undone because the file's
+        ISIN multiset didn't reconcile (those rows are rejected)
+      * overcounted_isins / unaccounted_isins: per-ISIN MULTISET
+        differences between table rows with a valid ISIN and the
+        page text, in each direction; any non-zero value is WARNed.
     A fitz load failure returns ([], zero rejections, stats with
     load_failed=1) and logs a WARN.
     """
@@ -495,37 +622,118 @@ def parse_weekly_securities_pdf(pdf_path: str) -> tuple:
             base, type(exc).__name__,
         )
         stats = _empty_stats()
-        stats.update(text_isins=0, unaccounted_isins=0, load_failed=1)
+        stats.update(text_isins=0, unaccounted_isins=0,
+                     overcounted_isins=0, isin_repaired=0,
+                     isin_repair_reverted=0, isin_unrecoverable=0,
+                     load_failed=1)
         return [], _empty_rejections(), stats
 
     tables = []
-    text_isins = 0
+    text_counter = Counter()
+    repairs = []  # (row, isin_idx, orig_isin, scrip_idx, orig_scrip)
+    unrecoverable = 0
+    cmap = None
     try:
         for pno, page in enumerate(doc):
-            text_isins += count_text_isins(page.get_text("text"))
+            text_counter.update(find_text_isins(page.get_text("text")))
             if not hasattr(page, "find_tables"):  # pragma: no cover
                 raise RuntimeError(
                     "PyMuPDF >= 1.23 required (Page.find_tables)"
                 )
+            words = None
             for t in page.find_tables().tables:
+                matrix = t.extract()
+                for i, row in enumerate(matrix):
+                    hm = _header_map(row)
+                    if hm is not None:
+                        cmap = hm
+                        continue
+                    if cmap is None or i >= len(t.rows):
+                        continue
+                    if words is None:
+                        words = page.get_text("words")
+                    cells = t.rows[i].cells
+                    ii, si = cmap.get("isin"), cmap.get("symbol")
+                    orig = (
+                        row[ii] if ii is not None and ii < len(row) else None,
+                        row[si] if si is not None and si < len(row) else None,
+                    )
+                    status = repair_truncated_isin(
+                        row, ii, si,
+                        cells[ii] if ii is not None and ii < len(cells) else None,
+                        cells[si] if si is not None and si < len(cells) else None,
+                        words,
+                    )
+                    if status == "repaired":
+                        repairs.append((row, ii, orig[0], si, orig[1]))
+                    elif status == "unrecoverable":
+                        unrecoverable += 1
                 tables.append({
                     "section": _section_for_table(page, t.bbox[1]),
                     "page": pno,
-                    "rows": t.extract(),
+                    "rows": matrix,
+                    "cmap": cmap,
                 })
     finally:
         doc.close()
 
-    rows, rejections, stats = extract_rows_from_tables(tables, pdf_path)
-    stats["text_isins"] = text_isins
-    stats["unaccounted_isins"] = max(0, text_isins - stats["isin_rows"])
-    stats["load_failed"] = 0
-    if stats["unaccounted_isins"]:
+    def table_counter():
+        c = Counter()
+        for tab in tables:
+            cm = tab["cmap"]
+            if not cm or cm.get("isin") is None:
+                continue
+            for row in tab["rows"]:
+                if _header_map(row) is not None or cm["isin"] >= len(row):
+                    continue
+                v = _norm(row[cm["isin"]]).replace(" ", "")
+                if isin_checksum_ok(v):
+                    c[v] += 1
+        return c
+
+    # ak-vm8a review (c): MULTISET reconciliation; equal counts with a
+    # substituted ISIN must still mismatch.
+    tab_counter = table_counter()
+    reverted = 0
+    if repairs and tab_counter != text_counter:
+        # ak-vm8a review (d): fail closed. A repair in a file that
+        # doesn't reconcile may have attached the wrong security;
+        # undo every repair so pass 2 rejects those rows.
+        for row, ii, o_isin, si, o_scrip in repairs:
+            row[ii] = o_isin
+            if si is not None and si < len(row):
+                row[si] = o_scrip
+        reverted = len(repairs)
         _LOG.warning(
-            "[ak-4t7f] %s: %d ISIN(s) in the PDF text did not reach "
-            "a row, rejection or pending skip (tables=%d); the "
-            "layout may have changed",
-            base, stats["unaccounted_isins"], stats["tables"],
+            "[ak-vm8a] %s: %d ISIN repair(s) REVERTED (rows will be "
+            "rejected): the file's ISIN multiset does not reconcile "
+            "with the page text", base, reverted,
+        )
+        tab_counter = table_counter()
+
+    for tab in tables:
+        tab.pop("cmap", None)
+    rows, rejections, stats = extract_rows_from_tables(tables, pdf_path)
+    stats["text_isins"] = sum(text_counter.values())
+    stats["isin_repaired"] = len(repairs) - reverted
+    stats["isin_repair_reverted"] = reverted
+    stats["isin_unrecoverable"] = unrecoverable  # rejected as malformed
+    # Two-sided, per ISIN.
+    stats["unaccounted_isins"] = sum((text_counter - tab_counter).values())
+    stats["overcounted_isins"] = sum((tab_counter - text_counter).values())
+    stats["load_failed"] = 0
+    if stats["isin_repaired"]:
+        _LOG.info(
+            "[ak-vm8a] %s: recovered %d ISIN cell(s) truncated by "
+            "table extraction", base, stats["isin_repaired"],
+        )
+    if stats["unaccounted_isins"] or stats["overcounted_isins"]:
+        _LOG.warning(
+            "[ak-vm8a] %s: ISIN reconciliation mismatch: %d in PDF "
+            "text missing from tables, %d in tables missing from "
+            "text (tables=%d); the layout may have changed",
+            base, stats["unaccounted_isins"],
+            stats["overcounted_isins"], stats["tables"],
         )
     return rows, rejections, stats
 
@@ -534,6 +742,8 @@ __all__ = [
     "parse_weekly_securities_pdf",
     "extract_rows_from_tables",
     "count_text_isins",
+    "find_text_isins",
+    "repair_truncated_isin",
     "isin_checksum_ok",
     "SECTION_SETTLED",
     "SECTION_PENDING",
