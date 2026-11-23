@@ -572,6 +572,97 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
         result["statement_transactions_replaced"] = reconciliation_result.get("statement_transactions_deleted", 0)
         result["statement_period_recorded"] = reconciliation_result.get("statement_period_recorded", False)
 
+    # ak-qic6 (2026-11-23): wire the ak-qpkm statement-reconciliation
+    # alarm into the post-ingest path. Phase 2b alarm infra landed
+    # in ak-qpkm (f8072cb) but stayed INERT — audit_statement_file
+    # was never invoked on real imports. This wiring activates it.
+    #
+    # Design:
+    #   * advisory, NOT gating — wrap in try/except so an alarm
+    #     failure (unlikely; it's a pure read-aggregate) can never
+    #     fail a successful ingest.
+    #   * expected_row_count = `inserted` — the count of tx rows
+    #     this batch landed. audit_statement_file() then counts
+    #     the TOTAL for (file_id, user_id, source='Statement') and
+    #     flags drift. For single-chunk statements this is the
+    #     exact expected number; for multi-chunk statements, later
+    #     batches extend the total and the audit's expected is
+    #     the CURRENT-BATCH contribution — which is what we want
+    #     the per-batch alarm to pin.
+    #   * severity mapping:
+    #       - clean          → no log
+    #       - info           → logger.warning (ROW_COUNT_DRIFT /
+    #                          SUM_DRIFT / NEW_IMPORT not alarming)
+    #       - critical       → logger.error (REGRESSED / empty
+    #                          import when expected non-trivial)
+    #   * audit summary exposed on the result dict so FE
+    #     companions (ak-dngn-sibling) can surface a
+    #     "RECONCILIATION DRIFT: review" badge alongside the
+    #     ak-tik degraded_dedup_rows banner.
+    #
+    # §23 #4 PII guard: audit result carries only (file_id, bank,
+    # user_id, counts, sums, flags, severity) — NEVER tx
+    # descriptions / amounts-per-row. Confirmed by the ak-qpkm
+    # test `test_result_dict_excludes_tx_descriptions`.
+    #
+    # Only runs on successful Statement imports — the common case.
+    # Email-alert ingests don't carry file_id → audit is skipped
+    # (the function would raise ValueError on empty file_id; the
+    # wiring pre-checks instead of catching).
+    if source == "Statement" and file_id and user_id and inserted > 0:
+        try:
+            from services.statement_reconciliation_alarm import (
+                FLAG_REGRESSED,
+                audit_statement_file,
+            )
+            session = _get_db_session(transaction_service)
+            audit_result = audit_statement_file(
+                session=session,
+                file_id=file_id,
+                bank=bank,
+                user_id=user_id,
+                expected_row_count=inserted,
+            )
+            # Expose on the result dict so FE can surface an
+            # import-quality banner. Keep the field name explicit
+            # so a future refactor doesn't quietly drop it.
+            result["reconciliation_audit"] = {
+                "severity": audit_result.get("severity"),
+                "flags": audit_result.get("flags", []),
+                "actual_row_count": audit_result.get("actual_row_count"),
+                "expected_row_count": audit_result.get("expected_row_count"),
+                "row_count_delta": audit_result.get("row_count_delta"),
+            }
+            severity = audit_result.get("severity")
+            if severity == "critical":
+                logger.error(
+                    f"statementReconciliationAlarm REGRESSED: "
+                    f"file={file_id} bank={bank} user={user_id} "
+                    f"flags={audit_result.get('flags')} "
+                    f"actual_rows={audit_result.get('actual_row_count')} "
+                    f"expected_rows={audit_result.get('expected_row_count')} "
+                    f"delta={audit_result.get('row_count_delta')}"
+                )
+            elif severity == "info":
+                logger.warning(
+                    f"statementReconciliationAlarm drift: "
+                    f"file={file_id} bank={bank} user={user_id} "
+                    f"flags={audit_result.get('flags')} "
+                    f"actual_rows={audit_result.get('actual_row_count')} "
+                    f"expected_rows={audit_result.get('expected_row_count')} "
+                    f"delta={audit_result.get('row_count_delta')}"
+                )
+            # severity == "clean" → no log (quiet-success path)
+        except Exception as exc:
+            # Alarm is advisory — must not block a successful ingest.
+            # Log class-only (no stack, no row content) so §23 #4 PII
+            # guard holds even when the alarm itself malfunctions.
+            logger.warning(
+                f"statementReconciliationAlarm wiring failed "
+                f"(advisory; ingest unaffected): "
+                f"{type(exc).__name__} file={file_id} bank={bank}"
+            )
+
     return result
 
 
