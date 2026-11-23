@@ -38,9 +38,12 @@ Wants=network-online.target
 Type=simple
 User=opc
 Group=opc
-# Repo checkout — operator sets this to the deployed repo path.
-# Mirrors app.service / schedular.service precedent.
-WorkingDirectory=/home/opc/akkountantV2_back
+# Repo checkout — mirrors the prod path used by app.service +
+# schedular.service. ak-vue6-unit-hotfix (2026-11-23): was
+# /home/opc/akkountantV2_back (lowercase, non-existent) —
+# corrected to the real hyphenated-capitalized prod path. Drift
+# guard in test_ak_kite_ws_service_shape.py pins the suffix.
+WorkingDirectory=/home/opc/Akkountant_v2-Back
 # RuntimeDirectory creates /run/akkountant with 0755 opc:opc
 # BEFORE this service starts; daemon tightens the socket file
 # inside it to 0600.
@@ -50,7 +53,13 @@ RuntimeDirectoryMode=0755
 # app.service EnvironmentFile. Operator must symlink or
 # duplicate the same file for this unit.
 EnvironmentFile=/etc/akkountant/kite-ws.env
-ExecStart=/usr/bin/python3 scripts/kite_ws_daemon_entrypoint.py
+# ak-vue6-unit-hotfix (2026-11-23): use the venv's python (same
+# pattern as app.service + schedular.service). System /usr/bin/
+# python3 lacks sqlalchemy / mysql-connector / kiteconnect so the
+# daemon would fail to import on boot. The symlink-form (python3,
+# not python3.11) keeps the unit resilient to venv regenerations
+# that may bump the minor version.
+ExecStart=/home/opc/Akkountant_v2-Back/venv/bin/python3 scripts/kite_ws_daemon_entrypoint.py
 Restart=always
 RestartSec=5
 # No upper bound on restart attempts — token-expiry triggers a

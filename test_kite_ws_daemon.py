@@ -576,6 +576,56 @@ def test_entrypoint_script_present():
     )
 
 
+# ─── ak-vue6-unit-hotfix (2026-11-23) ─────────────────────────
+
+
+def test_systemd_unit_working_directory_prod_path():
+    """ak-vue6-unit-hotfix: infra preflight caught WorkingDirectory
+    was lowercase (/home/opc/akkountantV2_back) but the real prod
+    path is hyphenated + capitalized (/home/opc/Akkountant_v2-Back).
+    Pin the correct suffix so a future accidental revert reds.
+    """
+    src = _read_source("deploy/ak-kite-ws.service")
+    assert re.search(
+        r"^WorkingDirectory\s*=\s*/home/opc/Akkountant_v2-Back\s*$",
+        src, re.MULTILINE,
+    ), (
+        "ak-vue6-unit-hotfix: WorkingDirectory must be the real "
+        "prod path /home/opc/Akkountant_v2-Back (hyphenated, "
+        "capital A + V) — the lowercase akkountantV2_back doesn't "
+        "exist on prod. Infra preflight catches this but the drift "
+        "guard pins it in-repo."
+    )
+
+
+def test_systemd_unit_execstart_uses_venv_python():
+    """ak-vue6-unit-hotfix: infra preflight caught ExecStart was
+    /usr/bin/python3 (system) which lacks sqlalchemy /
+    mysql-connector / kiteconnect. Must use the venv's python,
+    same pattern as app.service + schedular.service. Pin the
+    /venv/ substring so a revert to system python reds.
+    """
+    src = _read_source("deploy/ak-kite-ws.service")
+    exec_match = re.search(
+        r"^ExecStart\s*=\s*(\S+)\s+scripts/kite_ws_daemon_entrypoint\.py",
+        src, re.MULTILINE,
+    )
+    assert exec_match, (
+        "ExecStart line not found in expected shape"
+    )
+    python_path = exec_match.group(1)
+    assert "/venv/" in python_path, (
+        f"ak-vue6-unit-hotfix: ExecStart python path must be from "
+        f"venv (contain '/venv/'); got {python_path!r}. The daemon "
+        f"imports sqlalchemy / mysql-connector / kiteconnect which "
+        f"the system python3 lacks."
+    )
+    assert "/usr/bin/python" not in python_path, (
+        f"ak-vue6-unit-hotfix: ExecStart must NOT use system "
+        f"python; got {python_path!r}"
+    )
+
+
 # ─── Entrypoint subscription_provider — AST-lift ──────────────
 #
 # scripts/kite_ws_daemon_entrypoint.py imports the configured
