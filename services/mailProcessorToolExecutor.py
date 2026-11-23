@@ -287,6 +287,7 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
     from utils.reference_id import (
         generate_reference_v2,
         generate_reference_v2_fallback,
+        normalize_description_for_backstop,
     )
 
     generic = GenericUtil()
@@ -337,27 +338,66 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
                 fallback_hash_count += 1
                 _record_hash_tier(_dual_path_seen, txn, primary=False)
             else:
-                # Extractor didn't give us a positional anchor.
-                # Fall back to the legacy content hash so the row
-                # still lands (Overseer: no tx loss). Adds `idx` so
-                # two ref-less same-content rows in the SAME batch
-                # don't accidentally collide — chunk re-reads emit
-                # rows in the same order so this stays deterministic
-                # per-batch, at the cost of not collapsing an
-                # inter-batch re-read of a ref-less row. That's
-                # acceptable — ref-less rows are the minority tail;
-                # the majority already collapse via v2 primary.
+                # ak-tik (2026-11-23): the extractor didn't give us
+                # a positional anchor. This is the LAST-RESORT path,
+                # triggered ONLY when the LLM missed both
+                # bank_reference_id AND line_position (prompt drift
+                # or chunk-boundary partial read).
+                #
+                # Pre-ak-tik the hash included batch-local `idx`,
+                # which made chunk re-reads of the SAME ref-less row
+                # produce DIFFERENT hashes → different refs → no PK
+                # collision → backstop never fires → both rows land
+                # as duplicates on the user's Transactions page.
+                # This WAS the "chunk-overlap re-extraction bug
+                # bypasses dedup" shape surfaced by the Overseer.
+                #
+                # Fix: drop `idx` from the hash. Use (date, amount,
+                # bank, file_id, normalized_desc) so two reads of
+                # the SAME row in different chunks produce the SAME
+                # ref → PK collision → backstop sees content-equal
+                # (via the SAME normalize_description_for_backstop
+                # the hash uses) → silent-drop path (correct
+                # chunk-overlap dedup).
+                #
+                # Accepted tradeoff: two LEGITIMATELY-DIFFERENT
+                # ref-less rows with the same (date, amount,
+                # normalized-desc) now collapse via the backstop's
+                # content-equal path. That's the ak-tik-era
+                # regression the ak-8l5 refactor ADDRESSED by
+                # requiring line_position. The regression only
+                # bites in a double-degradation state (missing
+                # bank_reference_id AND missing line_position) that
+                # SHOULD be rare post-ak-8l5; the WARN below is
+                # the operator's trigger to fix the extractor
+                # prompt.
+                #
+                # Net effect: user-visible duplicate-row bug
+                # collapses correctly; rare legitimate-duplicate
+                # case silently collapses, logged.
+                norm_desc = normalize_description_for_backstop(
+                    txn["description"],
+                )
+                # file_id defaults to a scope sentinel so non-
+                # statement callers (email-alert path, if ever
+                # routed here) still produce a stable hash within
+                # their own scope.
+                scope = file_id or "no_file"
                 ref_id = generic.generate_reference_id(
-                    txn["date"], f"{txn['description']}|no_pos|{idx}",
+                    txn["date"],
+                    f"{bank}|{scope}|{norm_desc}|no_pos",
                     txn["amount"],
                 )
                 fallback_hash_count += 1
                 _record_hash_tier(_dual_path_seen, txn, primary=False)
                 logger.warning(
-                    f"insert_batch_transactions: row missing "
-                    f"bank_reference_id AND line_position; using legacy "
-                    f"content hash. bank={bank} file_id={file_id} "
-                    f"idx={idx} desc={txn['description'][:50]!r}"
+                    f"insert_batch_transactions ak-tik: row missing "
+                    f"bank_reference_id AND line_position; using "
+                    f"file-scoped content hash (NOT idx-scoped — see "
+                    f"docstring). bank={bank} file_id={file_id} "
+                    f"idx={idx} desc={txn['description'][:50]!r} — "
+                    f"fix extractor prompt to emit line_position for "
+                    f"ref-less rows so this path stops firing."
                 )
         transactions.append({
             "reference": ref_id,
@@ -487,12 +527,44 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
     elif errors > 0 and file_id and source == "Statement":
         transaction_service.updateStatementCount(file_id, inserted)
 
+    # ak-tik Overseer Option 1 mitigation (2026-11-23): surface the
+    # count of rows that fell into the fallback hash path so the FE
+    # ingest-complete screen can show a banner when the dedup was
+    # degraded. The hash-fix itself (c500560) collapses chunk re-reads
+    # correctly but ACCEPTS a rare regression where two legitimately-
+    # different ref-less rows with identical (date, amount, normalized-
+    # desc) collapse via the backstop. This count is the operator /
+    # user signal that the accepted-tradeoff path fired this batch.
+    #
+    # Contract for FE / agent-tool consumers:
+    #   * degraded_dedup_rows  — int ≥ 0. Count of rows this batch
+    #     that hashed via the fallback tier (no bank_reference_id,
+    #     OR no line_position + no file_id → legacy content hash).
+    #     Any value > 0 means at least one row was subject to the
+    #     accepted-tradeoff path; users can review Transactions for
+    #     that batch's date range.
+    #   * dual_tier_tuples    — int ≥ 0. Count of normalized
+    #     (date, amount, desc) tuples that crossed BOTH the primary
+    #     AND fallback tiers in the same batch (ak-8l5 M1 signal;
+    #     extractor-prompt-drift canary). Any value > 0 warrants
+    #     operator attention.
+    #
+    # FE banner rule: if degraded_dedup_rows > 0 → show a non-blocking
+    # yellow banner naming the file + count ("N transactions in this
+    # file were deduped without a bank reference — review on
+    # Transactions"). If dual_tier_tuples > 0 → additional WARN
+    # already fires in the batch log (line 425-430); banner can
+    # optionally link to a "why" explainer.
+    _dual = [k for k, v in _dual_path_seen.items() if v[0] and v[1]]
     result = {
         "result": "success",
         "total": len(transactions),
         "inserted": inserted,
         "duplicates": errors,
         "file_id": file_id,
+        # ak-tik mitigation surface — see comment above.
+        "degraded_dedup_rows": fallback_hash_count,
+        "dual_tier_tuples": len(_dual),
     }
 
     if reconciliation_result:
