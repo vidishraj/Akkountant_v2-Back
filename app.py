@@ -382,6 +382,27 @@ class Akkountant(Flask):
             self.logger.info("Skipping schedulers in LOCAL environment.")
             return
 
+        # ak-dzla (2026-11-23): standalone-unit early-exit. The
+        # ak-kite-ws.service entrypoint imports this Akkountant
+        # class to bootstrap Flask app context (DB session +
+        # config), but MUST NOT spin up the scheduler daemons —
+        # app.service already owns CronAgent / mail / snapshot.
+        # The fcntl lock below is per-process-group scope so it
+        # does NOT prevent cross-service duplication; without this
+        # env gate ak-kite-ws spawns a SECOND set of daemons
+        # (observed 2026-11-23 post-ak-uvjk install: journalctl
+        # showed 2x snapshot thread → §2 accounting-correctness
+        # risk of duplicated InvestmentSnapshot rows at 11PM IST).
+        # Pair: deploy/ak-kite-ws.service sets AK_SKIP_SCHEDULERS=1
+        # via Environment=; drift guard in test_ak_skip_
+        # schedulers_env_gate.py pins both ends.
+        if os.getenv('AK_SKIP_SCHEDULERS') == '1':
+            self.logger.info(
+                "Skipping schedulers: AK_SKIP_SCHEDULERS=1 "
+                "(standalone unit — app.service owns schedulers)."
+            )
+            return
+
         lock_path = '/tmp/akkountant_scheduler.lock'
         try:
             self._scheduler_lock_fd = open(lock_path, 'w')

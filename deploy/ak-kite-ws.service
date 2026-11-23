@@ -53,6 +53,16 @@ RuntimeDirectoryMode=0755
 # app.service EnvironmentFile. Operator must symlink or
 # duplicate the same file for this unit.
 EnvironmentFile=/etc/akkountant/kite-ws.env
+# ak-dzla (2026-11-23): the entrypoint imports the Akkountant
+# class from app.py to bootstrap Flask app context (needed for
+# DB session + config). That __init__ chain calls
+# _setup_schedulers which would spawn duplicate CronAgent /
+# mail / snapshot daemon threads — app.service already owns
+# those. AK_SKIP_SCHEDULERS=1 forces _setup_schedulers to
+# early-return. Pairs with the ENV=='LOCAL' gate in app.py.
+# Drift guard: test_ak_skip_schedulers_env_gate.py pins this
+# line + the matching gate on the BE side.
+Environment=AK_SKIP_SCHEDULERS=1
 # ak-vue6-unit-hotfix (2026-11-23): use the venv's python (same
 # pattern as app.service + schedular.service). System /usr/bin/
 # python3 lacks sqlalchemy / mysql-connector / kiteconnect so the
