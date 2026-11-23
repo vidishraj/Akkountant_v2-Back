@@ -611,32 +611,46 @@ def test_web_gate_source_still_checks_four_conditions():
     """Drift guard — the production branch in agentService.py must
     still check the four conditions: (web_fetch_state wired,
     tool is insert_investment, web_fetch_state["used"] is True,
-    tool not in confirmed_tools). The local reproduction in this
+    call not already confirmed). The local reproduction in this
     test file omits the first (which is a nullness guard, not a
     gate condition) because we only reach the gate when the
     state is wired.
+
+    ak-dixt (2026-11-23): the 4th condition migrated from
+    `_tn not in confirmed_tools` (client-asserted name list) to
+    `not _is_call_confirmed(_tn, args)` (prefers server-signed
+    tokens; dual-accepts legacy name-list with WARN log).
+    Updated assertions reflect the new shape.
 
     Uses source-text grep rather than inspect because importing
     agentService pulls the Google auth chain — see the module-
     scope note.
     """
     src = _read_source("services/agentService.py")
-    # All four literals must appear inside the source. We pin on the
-    # exact Python expressions so a refactor that changes the operator
-    # (e.g., `or` instead of `and`) also trips this test.
+    # First three literals unchanged by ak-dixt.
     assert "web_fetch_state is not None" in src
     assert '_tn == "insert_investment"' in src
     assert 'web_fetch_state["used"]' in src
-    assert "_tn not in confirmed_tools" in src
+    # ak-dixt: 4th condition is now a helper call. Both the helper
+    # declaration + the gate call site must appear.
+    assert "def _is_call_confirmed(" in src, (
+        "ak-dixt helper _is_call_confirmed missing — the dual-"
+        "accept gate (server-signed tokens + legacy fallback)"
+    )
+    assert "not _is_call_confirmed(_tn, args)" in src, (
+        "ak-dixt: gate 4th condition must be "
+        "`not _is_call_confirmed(_tn, args)` — the server-token "
+        "preferred path with legacy dual-accept"
+    )
     # And the four conditions must be in the SAME `if` statement
-    # (and-chained, not or-chained). Pin the structural shape by
-    # grepping for the exact if-head the production code uses.
+    # (and-chained). Pin the structural shape with ak-dixt's new
+    # 4th-condition shape.
     assert (
         "if (\n"
         "                    web_fetch_state is not None\n"
         "                    and _tn == \"insert_investment\"\n"
         "                    and web_fetch_state[\"used\"]\n"
-        "                    and _tn not in confirmed_tools\n"
+        "                    and not _is_call_confirmed(_tn, args)\n"
         "                ):"
     ) in src, (
         "web-gate branch no longer matches the expected four-condition "

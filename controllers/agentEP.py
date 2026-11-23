@@ -41,6 +41,10 @@ class AgentController:
         agent_type = data.get("agent_type")
         messages = data.get("messages", [])
         confirmed_tools = data.get("confirmed_tools", [])
+        # ak-dixt (2026-11-23): server-signed destructive-confirm
+        # tokens. Dual-accept with legacy `confirmed_tools: [str]`
+        # during the migration window; see utils/confirm_tokens.py.
+        confirmed_calls = data.get("confirmed_calls", []) or []
         attachments = data.get("attachments", []) or []
         conversation_id = data.get("conversation_id")  # ak-bq5
         user_id = g.get("firebase_id")
@@ -97,6 +101,9 @@ class AgentController:
                 confirmed_tools=confirmed_tools,
                 attachments=attachments,
                 conversation_id=conversation_id,
+                # ak-dixt: server-signed confirm tokens (dual-accept
+                # with the legacy confirmed_tools name-list).
+                confirmed_calls=confirmed_calls,
             )
 
         def _producer_error_to_sse(exc: BaseException):

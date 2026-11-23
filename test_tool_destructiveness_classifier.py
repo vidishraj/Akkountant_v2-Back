@@ -272,8 +272,12 @@ def test_destructive_confirm_event_includes_destructiveness_field():
     anchor = "Check if destructive and not confirmed"
     i = src.find(anchor)
     assert i != -1, "could not locate destructive-confirm branch"
-    # Grab the next ~1500 chars — the branch body.
-    chunk = src[i:i + 1500]
+    # Grab the next ~2500 chars — the branch body. ak-dixt
+    # (2026-11-23) added issue_confirm_token mint + confirm_id
+    # payload assembly inside this branch, growing it from ~1500
+    # to ~2000 chars; widen the window so the assertion still
+    # reaches get_tool_destructiveness.
+    chunk = src[i:i + 2500]
     assert "get_tool_destructiveness(_tn)" in chunk, (
         "destructive-confirm event payload must include "
         "destructiveness=get_tool_destructiveness(_tn) — ak-npdf "

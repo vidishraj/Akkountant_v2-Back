@@ -14,6 +14,9 @@ from services.agent_tools import get_agent_config, get_tool_destructiveness
 from services.agent_tool_executor import execute_tool, TOOL_ERROR_KEY
 from utils.logger import Logger
 from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
+from utils.confirm_tokens import (
+    issue_confirm_token, verify_confirm_token,
+)
 import base64 as _base64  # ak-1x4 pass 2: encode attachment bytes for tool result
 from utils.agent_attachments import (
     AttachmentNotFound,
@@ -44,6 +47,15 @@ from utils.agent_constants import AGENT_MODEL_ID  # noqa: F401
 
 
 # Tools that require user confirmation before execution
+# ak-dixt (2026-11-23): update_invoice added to DESTRUCTIVE_TOOLS
+# below. Pre-ak-dixt the tool was ungated — a mutation path that
+# can change line items, status, customer linkage. Added to the
+# confirm-gate so a tool call must carry a server-signed confirm
+# token (or legacy name-list entry during the dual-accept
+# migration window). Comment lives OUTSIDE the set literal
+# because the DESTRUCTIVE_TOOLS block is parsed by the drift-
+# guard test in test_tool_destructiveness_classifier.py which
+# splits-by-comma without tolerating embedded comments.
 DESTRUCTIVE_TOOLS = {
     "delete_single_investment",
     "delete_all_investments",
@@ -54,6 +66,7 @@ DESTRUCTIVE_TOOLS = {
     "scan_statements",
     "sync_kite_holdings",
     "process_mail_pipeline",
+    "update_invoice",
 }
 
 # Tools that mutate data (used to signal frontend to refresh)
@@ -531,7 +544,8 @@ class AgentService(BaseService):
             self.file_attachment_service = file_attachment_service
 
     def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None,
-                    attachments=None, conversation_id=None):
+                    attachments=None, conversation_id=None,
+                    confirmed_calls=None):
         """
         Generator that yields SSE events for the agent chat.
         Uses claude_agent_sdk with MCP tools to process queries.
@@ -564,6 +578,11 @@ class AgentService(BaseService):
         scope-violating request.
         """
         confirmed_tools = confirmed_tools or []
+        # ak-dixt (2026-11-23): server-signed confirm tokens. Dual-
+        # accept with legacy `confirmed_tools: [str]` list — this
+        # new list is the hardened path (HMAC + args-bind + user-
+        # bind + expiry + one-time-use). See utils/confirm_tokens.py.
+        confirmed_calls = confirmed_calls or []
         attachments = attachments or []
         tool_events = []  # Collected intermediate events (tool_exec, confirm)
         mutations = []
@@ -759,6 +778,10 @@ class AgentService(BaseService):
                 # insert_investment handler can gate on prior web
                 # tool use within THIS turn.
                 web_fetch_state=web_fetch_state,
+                # ak-dixt: thread server-signed confirm tokens so
+                # the gate can prefer the hardened path over the
+                # legacy name-list.
+                confirmed_calls=confirmed_calls,
             )
 
             # ak-1x4 pass 2: when this turn carries attachments, register
@@ -1136,7 +1159,8 @@ class AgentService(BaseService):
 
     def _build_sdk_tools(self, agent_type, tool_defs, user_id,
                          tool_events, mutations, confirmed_tools,
-                         conversation_id=None, web_fetch_state=None):
+                         conversation_id=None, web_fetch_state=None,
+                         confirmed_calls=None):
         """Build SdkMcpTool objects from tool definitions with handler closures.
 
         ak-9dz: `conversation_id` is threaded into the closure so the
@@ -1163,8 +1187,53 @@ class AgentService(BaseService):
         entirely — preserves backwards compatibility for any caller
         that constructs _build_sdk_tools without the new state
         (e.g., existing test harness builds).
+
+        ak-dixt (2026-11-23): ``confirmed_calls`` — server-signed
+        destructive-confirm tokens issued on the prior turn's
+        ``confirm`` event. Dual-accept with the legacy
+        ``confirmed_tools: [str]`` list: the hardened token path
+        is preferred (binds to tool + args + user + expiry + one-
+        time-use); legacy names list WARN-logs on hit for the 7-
+        day migration window.
         """
         sdk_tools = []
+
+        confirmed_calls = confirmed_calls or []
+
+        # ak-dixt helper: resolve whether THIS specific (tool, args,
+        # user_id) call is confirmed. Tries the hardened token path
+        # first (one-time-use is enforced inside verify_confirm_
+        # token — a successful verify also marks the token
+        # consumed). Falls through to the legacy name-list with a
+        # WARN log.
+        logger = self.logger
+
+        def _is_call_confirmed(_tn, args):
+            # Hardened path: any token in confirmed_calls that
+            # verifies for this exact (tool, args, user_id) is a hit.
+            for tok in confirmed_calls:
+                try:
+                    if verify_confirm_token(tok, _tn, args, user_id):
+                        return True
+                except Exception:
+                    # verify_confirm_token is designed to not raise,
+                    # but defensively swallow + continue trying any
+                    # other tokens. A raise would otherwise fall
+                    # through to legacy + mask the bug.
+                    continue
+            # Legacy path (dual-accept, warn-log for 7-day migration
+            # window per ak-x74g precedent).
+            if _tn in confirmed_tools:
+                logger.warning(
+                    "[AK-DIXT-LEGACY] destructive confirm accepted "
+                    "via legacy confirmed_tools name-list (tool=%s, "
+                    "user=%s). Client should migrate to server-"
+                    "signed confirm_calls tokens; see utils/"
+                    "confirm_tokens.py.",
+                    _tn, user_id,
+                )
+                return True
+            return False
 
         for tool_def in tool_defs:
             tool_name = tool_def["name"]
@@ -1186,18 +1255,26 @@ class AgentService(BaseService):
                 # applies when (a) web_fetch_state is wired, (b) a
                 # web tool has already fired this turn, (c) the
                 # tool now being called is insert_investment, and
-                # (d) this specific insert hasn't been confirmed yet
-                # (gate-token mirrors the DESTRUCTIVE_TOOLS pattern:
-                # the FE sends the tool_name in `confirmed_tools` on
-                # the retry turn to authorize execution).
+                # (d) this specific insert hasn't been confirmed yet.
+                #
+                # ak-dixt (2026-11-23): gate-check migrated from
+                # `_tn not in confirmed_tools` (client-asserted name
+                # list, forgeable) to `_is_call_confirmed(...)` which
+                # prefers the server-signed token path. Confirm event
+                # now carries a `confirm_id` (HMAC-signed, binds to
+                # tool+args+user+exp) for the FE to echo back.
                 if (
                     web_fetch_state is not None
                     and _tn == "insert_investment"
                     and web_fetch_state["used"]
-                    and _tn not in confirmed_tools
+                    and not _is_call_confirmed(_tn, args)
                 ):
                     msg = AgentService._get_web_insert_confirm_message(args)
-                    tool_events.append(("confirm", {
+                    # ak-dixt: mint server-signed confirm_id. None on
+                    # missing AK_CONFIRM_SECRET — FE falls back to
+                    # legacy name-list path (dual-accept).
+                    _confirm_id = issue_confirm_token(_tn, args, user_id)
+                    _confirm_payload = {
                         "tool": _tn,
                         "input": args,
                         "message": msg,
@@ -1212,7 +1289,10 @@ class AgentService(BaseService):
                         # the underlying tool is still a mutation
                         # (inserts a row; doesn't delete).
                         "destructiveness": get_tool_destructiveness(_tn),
-                    }))
+                    }
+                    if _confirm_id is not None:
+                        _confirm_payload["confirm_id"] = _confirm_id
+                    tool_events.append(("confirm", _confirm_payload))
                     return {
                         "content": [{
                             "type": "text",
@@ -1227,10 +1307,21 @@ class AgentService(BaseService):
                         "is_error": True,
                     }
 
-                # Check if destructive and not confirmed
-                if _tn in DESTRUCTIVE_TOOLS and _tn not in confirmed_tools:
+                # Check if destructive and not confirmed.
+                # ak-dixt (2026-11-23): gate migrated from client-
+                # asserted `confirmed_tools: [str]` (forgeable name
+                # list) to `_is_call_confirmed(...)` which prefers
+                # server-signed `confirmed_calls: [token]`. Tokens
+                # bind to tool + args + user + expiry + one-time-use.
+                # Legacy name-list path still accepted during
+                # dual-accept migration window (WARN-logs on hit).
+                if _tn in DESTRUCTIVE_TOOLS and not _is_call_confirmed(_tn, args):
                     msg = AgentService._get_confirmation_message(_tn, args)
-                    tool_events.append(("confirm", {
+                    # ak-dixt: mint server-signed confirm_id. None
+                    # on missing AK_CONFIRM_SECRET → FE falls back
+                    # to legacy name-list path (dual-accept).
+                    _confirm_id = issue_confirm_token(_tn, args, user_id)
+                    _confirm_payload = {
                         "tool": _tn,
                         "input": args,
                         "message": msg,
@@ -1241,7 +1332,10 @@ class AgentService(BaseService):
                         # a future destructive tool named with a
                         # different prefix (purge_*, remove_*, etc.).
                         "destructiveness": get_tool_destructiveness(_tn),
-                    }))
+                    }
+                    if _confirm_id is not None:
+                        _confirm_payload["confirm_id"] = _confirm_id
+                    tool_events.append(("confirm", _confirm_payload))
                     return {
                         "content": [{
                             "type": "text",
