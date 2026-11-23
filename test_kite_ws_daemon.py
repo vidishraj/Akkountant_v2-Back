@@ -626,6 +626,57 @@ def test_systemd_unit_execstart_uses_venv_python():
     )
 
 
+# ─── ak-33ex (2026-11-23) — app.service shared-runtimedir ─────
+#
+# Shared /run/akkountant was only declared by ak-kite-ws.service;
+# a restart of ak-kite-ws rm -rf'd /run/akkountant and wiped
+# gunicorn's /run/akkountant/app.sock, 502'ing nginx until
+# app.service recreated the socket. Reproduced 2026-11-23
+# 08:53Z — 8-min prod downtime. ak-33ex tracks app.service in
+# the repo + declares RuntimeDirectory=akkountant on BOTH
+# units so systemd ref-counts the directory's lifecycle.
+#
+# These guards pin: (a) deploy/app.service exists so unit
+# edits go through PR/review, (b) the RuntimeDirectory key
+# stays declared. Adjacent ak-kite-ws tests
+# (`test_systemd_unit_has_runtime_directory` above) pin the
+# mirror side.
+
+
+def test_app_service_file_present():
+    """ak-33ex: deploy/app.service tracked in repo so unit
+    changes go through PR/review rather than untracked prod
+    edits. Pre-ak-33ex only ak-kite-ws.service lived in the
+    repo; app.service was prod-only state."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    assert os.path.exists(
+        os.path.join(here, "deploy", "app.service"),
+    ), (
+        "ak-33ex: deploy/app.service missing — infra needs it "
+        "tracked so the prod unit file goes through PR/review. "
+        "See bead ak-33ex for the 2026-11-23 incident."
+    )
+
+
+def test_app_service_has_runtime_directory():
+    """ak-33ex: app.service must declare RuntimeDirectory=
+    akkountant so systemd ref-counts /run/akkountant lifecycle
+    across units. Without this, a restart of ak-kite-ws.service
+    wipes app.sock (reproduced 2026-11-23 08:53Z incident,
+    8-min downtime)."""
+    src = _read_source("deploy/app.service")
+    assert re.search(
+        r"^RuntimeDirectory\s*=\s*akkountant", src, re.MULTILINE,
+    ), (
+        "ak-33ex: app.service must set "
+        "RuntimeDirectory=akkountant to participate in systemd's "
+        "shared-runtimedir ref-counting. Without this key, a "
+        "restart of ak-kite-ws.service deletes /run/akkountant "
+        "including gunicorn's app.sock, 502'ing nginx. See bead "
+        "ak-33ex for the 2026-11-23 incident."
+    )
+
+
 # ─── Entrypoint subscription_provider — AST-lift ──────────────
 #
 # scripts/kite_ws_daemon_entrypoint.py imports the configured

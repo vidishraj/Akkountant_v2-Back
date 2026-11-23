@@ -1,0 +1,48 @@
+# ak-33ex (2026-11-23): shared /run/akkountant RuntimeDirectory.
+#
+# BOTH this unit AND ak-kite-ws.service declare
+# RuntimeDirectory=akkountant. systemd 235+ ref-counts a
+# shared RuntimeDirectory across units, so stopping ONE of
+# them (restart, deploy) leaves /run/akkountant intact as
+# long as the other still runs. Before ak-33ex, only
+# ak-kite-ws.service declared it; a restart of ak-kite-ws
+# would rm -rf /run/akkountant and wipe gunicorn's
+# /run/akkountant/app.sock, 502'ing nginx until app.service
+# recreated the socket. 2026-11-23 08:53Z prod incident +
+# 8-min downtime caught the gap.
+#
+# Drift guard: test_app_service_has_runtime_directory in
+# test_kite_ws_daemon.py pins the RuntimeDirectory=akkountant
+# line.
+#
+# Infra install (NOT auto-applied by GHA — see ak-m4wv):
+#   sudo cp deploy/app.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart app.service   # registers refcount
+
+[Unit]
+Description=Gunicorn instance to serve AkkountantV2
+After=network.target mysqld.service
+Requires=mysqld.service
+
+[Service]
+User=opc
+WorkingDirectory=/home/opc/Akkountant_v2-Back
+Environment="HOME=/home/opc"
+Environment="TMPDIR=/tmp"
+Environment="LC_ALL=C.UTF-8"
+Environment="LANG=C.UTF-8"
+Environment="PATH=/home/opc/Akkountant_v2-Back/venv/bin:/home/opc/.nvm/versions/node/v20.18.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="WEALTH_DIGEST_USER_ID=AwKnpKEPmEhQnpc2kJAnsEikOBK2"
+Environment="CLAUDE_CONFIG_DIR=/home/opc/.claude-sdk"
+Environment="FIREBASE_CREDENTIALS_PATH=/home/opc/.akkountant-secrets/firebase-service-account.json"
+Environment="FIREBASE_AUTH_MODE=verify_with_raw_uid_fallback"
+ExecStartPre=/home/opc/Akkountant_v2-Back/venv/bin/python -m utils.oauth_refresh --force
+ExecStart=/bin/bash -c 'source /home/opc/Akkountant_v2-Back/venv/bin/activate && exec gunicorn --config /home/opc/Akkountant_v2-Back/gunicorn.conf.py wsgi:flask_app'
+RuntimeDirectory=akkountant
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
