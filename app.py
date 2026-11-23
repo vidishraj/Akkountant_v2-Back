@@ -142,30 +142,116 @@ class Akkountant(Flask):
         except Exception as e:
             self.logger.error(f"An error occurred while updating the database: {e}")
 
+    # ak-htnb (2026-11-23): file-lock guarding first-boot DDL from
+    # the concurrent-gunicorn-worker race. See
+    # ``_setup_database`` for the full root-cause write-up.
+    #
+    # Chosen BLOCKING (not LOCK_NB) so every worker waits for the
+    # lock-holder — all workers finish with a consistent healthy DB
+    # view. The scheduler lock at ``_setup_schedulers`` uses
+    # LOCK_NB-with-skip (correct for daemon exclusivity); the DDL
+    # guard here uses LOCK_EX-with-wait (correct for "all workers
+    # must observe the created schema").
+    _DB_INIT_LOCK_PATH = '/tmp/akkountant_db_init.lock'
+
     def _setup_database(self):
-        """Set up database connection and create tables."""
+        """Set up database connection and create tables.
+
+        ak-htnb (2026-11-23) — root cause analysis of the
+        2026-11-22 P0 first-boot-after-DDL crash:
+
+        gunicorn.conf.py runs ``workers = 2`` without
+        ``preload_app = True``. Default gunicorn behavior is to
+        fork each worker as its own process + each independently
+        imports + boots the Flask app, meaning BOTH workers call
+        ``_setup_database()`` → ``self.db.create_all()``
+        concurrently on fresh starts.
+
+        Pre-ak-htnb, ``create_all()`` had NO cross-worker
+        serialization. With a fresh DDL batch (e.g. ak-kxdr +
+        ak-l8a7 + ak-05af introducing new tables / constraints
+        on 2026-11-22), the two workers race:
+
+          * Worker A: SELECT information_schema (table X absent)
+                      → BEGIN → CREATE TABLE X → COMMIT. OK.
+          * Worker B (concurrent): SELECT shows absent → BEGIN
+                      → CREATE TABLE X → MySQL raises "Table
+                      exists" / metadata-lock contention → worker
+                      exits code=3.
+
+        systemd's ``Restart=on-failure`` fires → fresh master
+        → sequential worker boot (the first worker completes
+        the DDL before the second one checks) → observed
+        "second-boot succeeded with no error logged". This
+        matches the recorded journal signature verbatim.
+
+        Secondary P0 impact: the unintentional restart lifted
+        ffdae30 (ak-c8l Firebase middleware) into memory WITHOUT
+        its accompanying env vars → 30-min silent 401 cascade
+        until the Overseer noticed. Had the first boot not
+        crashed, the restart wouldn't have happened, and the
+        middleware wouldn't have activated prematurely.
+
+        Fix: fcntl advisory lock around the DDL window. BLOCKING
+        acquire so Worker B waits for A to finish rather than
+        skipping — once released, B's create_all() is a clean
+        no-op via SQLAlchemy's checkfirst=True reflection. Both
+        workers finish with the same consistent schema view.
+
+        Belt-and-brace (not either-or): the correct long-term
+        fix is ``preload_app = True`` in gunicorn.conf.py (makes
+        the master boot the app ONCE before forking). Filing
+        that as a separate P2 bead so this hotfix is the
+        minimal-LOC immediate protection. See ak-htnb bead
+        comment for the preload-app validation plan.
+        """
         self.db = SQLAlchemy(self, model_class=models.Base)
-        with self.app_context():
-            self.logger.info("Creating database tables if not exist.")
-            inspector = inspect(self.db.engine)
+        lock_fd = None
+        try:
+            # Acquire the DDL lock BEFORE entering app_context so a
+            # failure to open the lock file surfaces immediately (bad
+            # perms on /tmp, disk full, etc) rather than after a
+            # partial SQLAlchemy bind.
+            import fcntl
+            lock_fd = open(self._DB_INIT_LOCK_PATH, 'w')
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)  # BLOCKING — see docstring
+            with self.app_context():
+                self.logger.info(
+                    "Creating database tables if not exist "
+                    "(DDL lock held)."
+                )
+                inspector = inspect(self.db.engine)
 
-            existing_tables_before = inspector.get_table_names()
-            self.db.create_all()
+                existing_tables_before = inspector.get_table_names()
+                self.db.create_all()
 
-            self._insert_initial_jobs("SetNPSRate", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetNPSDetails", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetStocksOldDetails", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetStocksDetails", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetMFRate", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetMFDetails", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetGoldRate", "Pending", "High", datetime.datetime.now())
-            self._insert_initial_jobs("SetPPFRate", "Pending", "High", datetime.datetime.now())
-            existing_tables_after = inspector.get_table_names()
-            new_tables = set(existing_tables_after) - set(existing_tables_before)
-            if new_tables:
-                self.logger.info(f"New tables created: {new_tables}")
-            else:
-                self.logger.info("No new tables created.")
+                self._insert_initial_jobs("SetNPSRate", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetNPSDetails", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetStocksOldDetails", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetStocksDetails", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetMFRate", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetMFDetails", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetGoldRate", "Pending", "High", datetime.datetime.now())
+                self._insert_initial_jobs("SetPPFRate", "Pending", "High", datetime.datetime.now())
+                existing_tables_after = inspector.get_table_names()
+                new_tables = set(existing_tables_after) - set(existing_tables_before)
+                if new_tables:
+                    self.logger.info(f"New tables created: {new_tables}")
+                else:
+                    self.logger.info("No new tables created.")
+        finally:
+            # Lock release is automatic on fd close; be explicit for
+            # clarity. If acquire failed, lock_fd is None → safe skip.
+            if lock_fd is not None:
+                try:
+                    import fcntl as _fcntl
+                    _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                except (OSError, ValueError):
+                    pass
+                try:
+                    lock_fd.close()
+                except OSError:
+                    pass
 
     def _setup_instances(self):
         """Initialize application instances."""
@@ -272,9 +358,26 @@ class Akkountant(Flask):
         # when the daemon is down: 503 on single-symbol, SSE emits
         # ``reconnect_required`` + closes.
         self.kiteLtpEP = KiteLtpController()
+
+    def _setup_schedulers(self):
         """Set up background daemon threads (CronAgent, mail, snapshots).
         TaskScheduler is run separately via schedular.service.
-        Uses a file lock so only one gunicorn worker starts these threads."""
+        Uses a file lock so only one gunicorn worker starts these threads.
+
+        ak-htnb (2026-11-23): this method header was accidentally
+        dropped during the ak-vue6 Edit that inserted
+        `self.kiteLtpEP = KiteLtpController()` at the tail of
+        ``_setup_instances``. ``__init__`` line 87 calls
+        ``self._setup_schedulers()`` so the next app.service restart
+        would AttributeError — a P0 boot failure. Restored here with
+        the full prior method body unchanged. Belt-and-brace: this
+        comment makes the regression + cause greppable so a reviewer
+        running a future similar Edit catches it.
+
+        Discovered during the ak-htnb investigation (same class of
+        boot-time failure as the first-boot-DDL race that prompted
+        the bead); folded into this hotfix per lead directive.
+        """
         if os.getenv('ENV') == 'LOCAL':
             self.logger.info("Skipping schedulers in LOCAL environment.")
             return
