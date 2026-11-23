@@ -796,20 +796,28 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
             f"flapped to {result['status']}."
         )
 
-    def test_legacy_sent_with_partial_payment_stays_sent_after_edit(self):
-        """v5 V4-3 symmetric guard: legacy `sent` invoice with a
-        partial-payment row must NOT be promoted to `paid` by a
-        favourable-drift today's-rate compare.
+    def test_cross_currency_sent_with_partial_payment_can_promote_on_full_coverage(self):
+        """ak-bvku asymmetric V5 (2026-11-23): upward promotion allowed
+        on today's-rate compare in the no-fx-rate-anywhere legacy
+        branch; downgrade protection preserved via
+        `if invoice.status == paid: return` guard.
 
-        Pre-v5 asymmetric guard: v4 refused only downgrade-from-paid.
-        A legacy sent invoice with amount_received = 8000 on a 100 USD
-        invoice would (at USD=95): total_inr=9500 vs paid_inr=8000 →
-        partially_paid on v4 (OK — legit under-payment surfacing). But
-        with different drift (USD=80): total_inr=8000 vs paid_inr=8000
-        → paid ← spurious promotion.
+        See ak-b6v7 Phase 2 for the vintage-stable total_inr snapshot
+        architectural cure that structurally retires this guard class.
 
-        v5 V4-3 symmetric: refuses ANY status change on today's-rate
-        fallback for rows with payments, not just downgrade from paid.
+        Pre-ak-bvku history for this fixture:
+          - v4 asymmetric: refused only downgrade-from-paid. 8000 INR
+            on 100 USD @ USD=80 would compute paid; v4 ALLOWED upward
+            promotion.
+          - v5 V4-3 symmetric: refused ANY status change on today's-
+            rate fallback — this fixture stayed 'sent' and surfaced
+            the §2 earnings-under-report class ak-bvku closes.
+          - ak-bvku Option C: asymmetric again — paid stays paid
+            (downgrade protection), non-paid rows can promote upward
+            via today's-rate compare. Under this fixture (favourable
+            drift making 8000 INR fully cover a 100 USD invoice at
+            today's 80 INR/USD), status promotes to 'paid'. §2
+            earnings under-report closed.
         """
         # Create a sent invoice with an amount_received of 8000 INR
         # (mimics a legacy partial-payment scenario).
@@ -880,24 +888,237 @@ class TestInvoiceServiceIntegration(unittest.TestCase):
         # round-trip converts INR→INR identity, preserves 8000 INR
         # payment. Recompute runs (payment_supplied=True). Payment is
         # INR-tagged; invoice is USD. all_same_currency=False → mixed
-        # branch. Latest payment's fx_rate=1.0 (identity, from V5.1
-        # write). total_inr = 100 × 1.0 = 100. paid_inr = 8000. 8000 >
-        # 100 → would compute PAID — but V4-3 symmetric refuses status
-        # change in this branch because payment.original_currency
-        # (INR) ≠ invoice.currency (USD) → not the same-currency vintage
-        # path.
+        # branch. Latest payment's fx_rate=1.0 (identity from V5.1
+        # write). latest.original_currency='INR' ≠ invoice 'USD' →
+        # mixed-original-currency branch.
         #
-        # Actually wait — with V5.1's INR-tag + identity fx_rate, the
-        # mixed-currency branch DOES have a stored fx_rate (1.0), so
-        # V4-3 symmetric only applies if we FURTHER lack that rate. Let
-        # me re-trace: `latest.original_currency.upper() == 'USD'`? INR
-        # != USD → else branch → symmetric V4-3 refuse. Status stays 'sent'.
+        # ak-bvku Option C: invoice.status='sent' (not paid) → fall
+        # through, today's-rate compare: total_inr = 100 × 80.00
+        # (today's USD rate) = 8000 INR; paid_inr = 8000 INR (sum of
+        # inr_amount from payment, INR-tagged identity); 8000 ≈
+        # 8000 within_epsilon → paid. §2 earnings-under-report closed.
+        #
+        # Downgrade protection preserved: tests #1/#2 above show
+        # paid-starting rows under the same today's-rate path stay
+        # paid (if invoice.status == paid: return in the mixed branch).
         self.assertEqual(
-            result['status'], 'sent',
-            f"v5 V4-3 symmetric: legacy sent invoice with partial payment "
-            f"and favourable FX drift was promoted to {result['status']}. "
-            f"Should stay sent — today's-rate compare on mismatched-"
-            f"currency payment is unreliable in both directions."
+            result['status'], 'paid',
+            f"ak-bvku Option C upward promotion: legacy sent invoice "
+            f"with 8000 INR partial on a 100 USD invoice (favourable "
+            f"drift to USD=80 making 8000 INR exactly cover $100) "
+            f"should promote to 'paid'. Got: {result['status']}. "
+            f"(Pre-ak-bvku V4-3 symmetric would refuse any status "
+            f"change — that asymmetry is deliberately removed; "
+            f"downgrade protection still preserved for paid-starting "
+            f"rows via `if invoice.status == paid: return`.)"
+        )
+
+    # ── ak-bvku: cross-currency upward-promotion tests ────────────────
+    #
+    # These tests pin the Option C asymmetric V4-3 guard: paid-starting
+    # rows preserve downgrade protection (tested in the no-flap tests
+    # above), while non-paid rows can promote upward via today's-rate
+    # compare. Covers the §2 earnings-under-report class that the pre-
+    # ak-bvku symmetric guard produced for the USD-invoice-paid-in-INR
+    # (and mirror) scenario.
+    #
+    # ak-b6v7 Phase 2 (vintage-stable invoice.total_inr) retires the
+    # guard class entirely; tests should migrate to use the snapshot
+    # column when that lands.
+
+    def test_cross_currency_sent_can_promote_to_paid_on_full_payment(self):
+        """ak-bvku: a USD invoice fully paid in INR (mixed-original-
+        currency branch — payment has fx_rate but original_currency
+        differs from invoice.currency) must promote sent → paid.
+
+        Pre-ak-bvku: v5 V4-3 symmetric branch refused any status
+        change on mismatched-currency payment, leaving a legitimate
+        full payment stuck at 'sent'. earningsService's paid-or-
+        partially_paid filter then omitted this invoice, under-
+        reporting earnings (§2 tax-filing error class).
+
+        Post-ak-bvku Option C: mixed-currency branch allows upward
+        promotion via today's-rate compare of invoice.total; downgrade
+        from paid still refused via asymmetric `if invoice.status ==
+        paid: return` guard.
+
+        Fixture: USD $100 invoice 'sent'; full payment of 8325 INR
+        (= $100 at the stub's 83.25 rate). Current USD rate = 83.25
+        → total_inr = 100 × 83.25 = 8325; paid_inr = 8325; → paid.
+        """
+        # Create USD $100 invoice without payment.
+        self.svc.create_invoice({
+            "invoiceNumber": "INV-XCCY-FULL",
+            "projectName": "cross-currency full payment",
+            "issueDate": "2026-10-01",
+            "dueDate": "2026-10-30",
+            "from": {"name": "V", "email": "v@example.com",
+                     "address": "..."},
+            "to": {"name": "C", "email": "c@example.com",
+                   "address": "..."},
+            "currency": "USD",
+            "items": [{"description": "x", "quantity": 1, "rate": 100}],
+            "tax": {"rate": 0, "amount": 0},
+            "subtotal": 100,
+            "total": 100,
+            "status": "sent",
+        })
+
+        # Add payment of 8325 INR (full coverage of $100 at 83.25).
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number="INV-XCCY-FULL",
+        ).first()
+        self.svc._replace_payment(invoice_row.id, {
+            "originalAmount": 8325,
+            "originalCurrency": "INR",
+            "paymentMethod": "bank_transfer",
+            "paymentDate": "2026-10-10",
+        })
+        self.svc._recompute_invoice_status(invoice_row)
+        self.db.session.commit()
+
+        result = self.svc.get_invoice_by_number("INV-XCCY-FULL")
+        self.assertEqual(
+            result['status'], 'paid',
+            f"ak-bvku Option C: USD $100 invoice fully paid in INR "
+            f"(8325 INR at 83.25 rate) must promote to paid via the "
+            f"mixed-original-currency branch's upward-promotion "
+            f"fall-through. Got: {result['status']}. Pre-ak-bvku V4-3 "
+            f"symmetric would have left this at 'sent'."
+        )
+
+    def test_cross_currency_sent_with_underpayment_promotes_to_partially_paid(self):
+        """ak-bvku: a USD invoice PARTIALLY paid in INR must promote
+        sent → partially_paid (not stay at 'sent'). Mirror of the
+        full-coverage test — same asymmetric-guard path, different
+        amount, different target status.
+
+        Pre-ak-bvku symmetric V4-3: 'sent' would stay 'sent' even
+        with a real partial payment because the mixed-currency branch
+        refused any status change.
+
+        Post-ak-bvku Option C: 4000 INR paid on a $100 USD invoice
+        (at 83.25 rate → total_inr=8325) → paid_inr=4000 < 8325,
+        not within_epsilon → partially_paid.
+        """
+        self.svc.create_invoice({
+            "invoiceNumber": "INV-XCCY-PART",
+            "projectName": "cross-currency partial payment",
+            "issueDate": "2026-10-01",
+            "dueDate": "2026-10-30",
+            "from": {"name": "V", "email": "v@example.com",
+                     "address": "..."},
+            "to": {"name": "C", "email": "c@example.com",
+                   "address": "..."},
+            "currency": "USD",
+            "items": [{"description": "x", "quantity": 1, "rate": 100}],
+            "tax": {"rate": 0, "amount": 0},
+            "subtotal": 100,
+            "total": 100,
+            "status": "sent",
+        })
+
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number="INV-XCCY-PART",
+        ).first()
+        self.svc._replace_payment(invoice_row.id, {
+            "originalAmount": 4000,  # partial — ~48% of $100 at 83.25
+            "originalCurrency": "INR",
+            "paymentMethod": "bank_transfer",
+            "paymentDate": "2026-10-10",
+        })
+        self.svc._recompute_invoice_status(invoice_row)
+        self.db.session.commit()
+
+        result = self.svc.get_invoice_by_number("INV-XCCY-PART")
+        self.assertEqual(
+            result['status'], 'partially_paid',
+            f"ak-bvku Option C: USD $100 invoice partially paid in "
+            f"INR (4000 INR < 8325 required at 83.25 rate) must "
+            f"promote to partially_paid via the mixed-currency "
+            f"branch's upward-promotion fall-through. Got: "
+            f"{result['status']}. Pre-ak-bvku V4-3 symmetric would "
+            f"have left this at 'sent' and under-reported earnings."
+        )
+
+    def test_cross_currency_paid_stays_paid_on_currency_drift_second_edit(self):
+        """ak-bvku: V4-3 downgrade protection PRESERVED in the
+        asymmetric form. A cross-currency invoice that has already
+        reached 'paid' status must NOT downgrade to partially_paid
+        on unfavourable FX drift during an unrelated edit.
+
+        This is the V2-1 super-vote invariant that V4-3 symmetric
+        over-corrected. ak-bvku's asymmetric guard: `if invoice.status
+        == paid: return` in BOTH the mixed-original-currency and no-
+        fx-rate-anywhere branches keeps the downgrade door closed
+        while opening the upward-promotion door.
+
+        Fixture: establish paid via the full-INR-payment path (as in
+        test_cross_currency_sent_can_promote_to_paid_on_full_payment),
+        then unfavourable USD drift to 95 (would compute total_inr=
+        9500 > paid_inr=8325 → partially_paid if the guard were
+        absent). FE round-trip with notes edit.
+        """
+        self.svc.create_invoice({
+            "invoiceNumber": "INV-XCCY-PAID-DRIFT",
+            "projectName": "cross-currency paid, drift guard",
+            "issueDate": "2026-10-01",
+            "dueDate": "2026-10-30",
+            "from": {"name": "V", "email": "v@example.com",
+                     "address": "..."},
+            "to": {"name": "C", "email": "c@example.com",
+                   "address": "..."},
+            "currency": "USD",
+            "items": [{"description": "x", "quantity": 1, "rate": 100}],
+            "tax": {"rate": 0, "amount": 0},
+            "subtotal": 100,
+            "total": 100,
+            "status": "sent",
+        })
+
+        # Add full INR payment at the current 83.25 rate → paid.
+        invoice_row = self.db.session.query(Invoice).filter_by(
+            invoice_number="INV-XCCY-PAID-DRIFT",
+        ).first()
+        self.svc._replace_payment(invoice_row.id, {
+            "originalAmount": 8325,
+            "originalCurrency": "INR",
+            "paymentMethod": "bank_transfer",
+            "paymentDate": "2026-10-10",
+        })
+        self.svc._recompute_invoice_status(invoice_row)
+        self.db.session.commit()
+
+        initial = self.svc.get_invoice_by_number("INV-XCCY-PAID-DRIFT")
+        self.assertEqual(
+            initial['status'], 'paid',
+            "Precondition: ak-bvku upward-promotion must land this "
+            "at paid before the drift-stability check."
+        )
+
+        # Unfavourable drift — USD strengthens to 95; today's-rate
+        # compare would make total_inr = 9500 > paid_inr = 8325 →
+        # partially_paid IF the asymmetric guard weren't present.
+        self.svc.currency_service.rates['USD'] = Decimal("95.00")
+
+        # FE-realistic notes edit (full payload round-trip).
+        put_payload = dict(initial)
+        put_payload['notes'] = (
+            "editing notes on a paid cross-currency invoice — "
+            "must NOT flap to partially_paid under unfavourable drift"
+        )
+        result = self.svc.update_invoice(
+            "INV-XCCY-PAID-DRIFT", put_payload,
+        )
+        self.assertEqual(
+            result['status'], 'paid',
+            f"ak-bvku asymmetric V4-3 (downgrade protection): paid "
+            f"cross-currency invoice flapped to {result['status']} "
+            f"on unfavourable FX drift (USD=95) during an unrelated "
+            f"edit. The `if invoice.status == paid: return` guard in "
+            f"the mixed-original-currency branch of _recompute_"
+            f"invoice_status should preserve paid regardless of "
+            f"today's-rate compare direction."
         )
 
 

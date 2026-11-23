@@ -1099,61 +1099,101 @@ class InvoiceService(BaseService):
                 if latest.original_currency.upper() == invoice_currency_str:
                     total_inr = money(invoice.total) * money(latest.fx_rate)
                 else:
-                    # Mixed-original-currencies genuinely need today's
-                    # rate. v4 policy refused downgrade-from-paid only.
-                    # v5 V4-3 (both reviewers' MINOR): symmetric — refuse
-                    # ANY status change on this unreliable path when
-                    # payments exist. A legacy `sent`/`partially_paid`
-                    # non-INR row shouldn't be promoted to `paid` by
-                    # favourable-drift today's-rate compare any more
-                    # than a `paid` row should be downgraded.
+                    # ── ak-bvku asymmetric V5 (2026-11-23) ───────────
+                    # Previously v5 V4-3 made this guard SYMMETRIC:
+                    # refuse ANY status change on today's-rate compare.
+                    # That symmetric form also blocked legitimate
+                    # sent→paid promotion for cross-currency invoices
+                    # (e.g. USD invoice paid in INR), which is the
+                    # §2 earnings-under-report class ak-bvku closes.
+                    #
+                    # Asymmetric guard: preserve the V4-3 super-vote's
+                    # protected class (paid row doesn't flap on
+                    # unrelated edits via today's-rate drift) by
+                    # refusing ONLY the paid→partially_paid/sent
+                    # downgrade direction. Allow upward promotion —
+                    # the earnings-under-report class is a genuine
+                    # bug, accept the symmetric trade (favourable-
+                    # drift upward flap is possible until ak-b6v7
+                    # ships the vintage-stable total_inr snapshot).
+                    #
+                    # ak-b6v7 (Phase 2) retires this guard structurally
+                    # by moving invoice.total_inr to a stored field at
+                    # invoice-issue-time vintage.
+                    if invoice.status == InvoiceStatusEnum.paid:
+                        self.logger.info(
+                            f"ak-bvku asymmetric V4-3: "
+                            f"{invoice.invoice_number} has mixed-"
+                            f"original-currency payments; refusing "
+                            f"downgrade from paid (today's-rate "
+                            f"unreliable for downgrade decisions). "
+                            f"ak-b6v7 Phase 2 retires this via "
+                            f"vintage-stable total_inr."
+                        )
+                        return
+                    # Upward promotion — today's-rate compare of
+                    # invoice.total converted to INR via
+                    # currency_service. Fail-open on FX outage
+                    # (preserve existing status, log reason).
+                    try:
+                        fx_result = self.currency_service.convert_to_inr_with_source(
+                            money(invoice.total), invoice_currency_str,
+                            allow_fallback=True,
+                        )
+                        total_inr = fx_result["inr_amount"]
+                    except Exception as exc:
+                        self.logger.info(
+                            f"ak-bvku: FX unavailable converting "
+                            f"{invoice.invoice_number} total to INR "
+                            f"for upward-promotion check "
+                            f"({type(exc).__name__}); preserving "
+                            f"{invoice.status}"
+                        )
+                        return
+            else:
+                # ── ak-bvku asymmetric V5: no-fx-rate-anywhere ───────
+                # Originally ak-lvu v4 anti-flap: pre-migration
+                # legacy rows (NULL fx_rate on all payments). v5
+                # V4-3 made it symmetric; ak-bvku makes it asymmetric
+                # for the same §2 earnings-under-report class rationale
+                # as the mixed-currency branch above.
+                #
+                # Paid row stays paid (downgrade protection intact —
+                # Overseer's legit paid non-INR invoices won't flap
+                # on unrelated edits via today's-rate drift). Non-
+                # paid rows (sent / partially_paid / overdue) can
+                # promote upward via today's-rate compare of
+                # invoice.total.
+                #
+                # ak-b6v7 Phase 2 retires this guard (vintage-stable
+                # invoice.total_inr makes today's-rate irrelevant).
+                if invoice.status == InvoiceStatusEnum.paid:
                     self.logger.info(
-                        f"ak-lvu v5 V4-3 anti-flap (symmetric): "
-                        f"{invoice.invoice_number} has mixed-original-"
-                        f"currency payments; refusing today's-rate "
-                        f"status change (was {invoice.status})"
+                        f"ak-bvku asymmetric V4-3: "
+                        f"{invoice.invoice_number} is legacy non-"
+                        f"INR with no vintage fx_rate on any "
+                        f"payment; refusing downgrade from paid "
+                        f"(today's-rate unreliable for downgrade "
+                        f"decisions). ak-b6v7 Phase 2 retires "
+                        f"this via vintage-stable total_inr."
                     )
                     return
-            else:
-                # ── ak-lvu v4 anti-flap: conservative-on-legacy ────────
-                # No fx_rate on any payment (pre-migration legacy row).
-                # The today's-rate fallback compare is UNRELIABLE for
-                # status derivation — any FX drift between the historical
-                # payment and today can flip an accurately-paid legacy
-                # row spuriously to partially_paid. Reviewer super-vote
-                # V2-1 caught this: Overseer's real paid non-INR invoices
-                # would flap on every unrelated edit after merge day one.
-                #
-                # v3 introduced a recompute-gate in update_invoice that
-                # SKIPS recompute on notes-only edits — but the FE
-                # always sends the full invoice on PUT (payment section
-                # included), so payment_supplied=True fires the gate
-                # even on effectively-metadata-only edits. That's the
-                # gap Lead's mutation-testing pass surfaced.
-                #
-                # Defense: when we're FORCED onto the today's-rate
-                # fallback path (no vintage fx_rate on any payment),
-                # refuse to change status. Preserve the historical
-                # decision.
-                #
-                # v5 V4-3 (both reviewers' MINOR): symmetric guard —
-                # this branch used to guard only downgrade-from-paid,
-                # but the underlying "today's-rate compare is unreliable
-                # for status derivation" invariant is direction-agnostic.
-                # A legacy `sent`/`partially_paid` non-INR row can
-                # equally spuriously flip UP to `paid` on favourable
-                # drift. Both directions closed.
-                #
-                # A genuine status change requires a real payment
-                # mutation that lands with fresh FX metadata — not a
-                # phantom today's-rate compare.
-                self.logger.info(
-                    f"ak-lvu v5 V4-3 anti-flap (symmetric): "
-                    f"{invoice.invoice_number} is legacy non-INR with "
-                    f"no vintage fx_rate on any payment; refusing "
-                    f"today's-rate status change (stays {invoice.status})"
-                )
-                return
+                # Upward promotion — today's-rate compare.
+                try:
+                    fx_result = self.currency_service.convert_to_inr_with_source(
+                        money(invoice.total), invoice_currency_str,
+                        allow_fallback=True,
+                    )
+                    total_inr = fx_result["inr_amount"]
+                except Exception as exc:
+                    self.logger.info(
+                        f"ak-bvku: FX unavailable converting "
+                        f"{invoice.invoice_number} total to INR "
+                        f"for upward-promotion check "
+                        f"({type(exc).__name__}); preserving "
+                        f"{invoice.status}"
+                    )
+                    return
 
         if paid_inr <= Decimal("0"):
             if invoice.due_date and invoice.due_date < datetime.now().date():
