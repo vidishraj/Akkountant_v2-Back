@@ -2706,20 +2706,93 @@ class MailProcessorService:
                 f"Focus on extracting all financial data from the pages.\n"
             )
 
+        # ak-u949 (ak-tik Option 4 structural cure): BOTH the text-
+        # embedding branch (below) AND the image-mode branches
+        # (further below) re-state the ak-8l5 dedup-field schema
+        # (bank_reference_id + line_position) in-prompt. Pre-ak-u949
+        # the text branch had no [Ln] annotations AND neither per-
+        # call prompt mentioned the dedup fields — image-mode rows
+        # fell to the no-position fallback hash → degraded_dedup_
+        # rows++. PDF_SYSTEM_PROMPT already instructs the schema,
+        # but belt-and-suspenders in the per-call prompt is cheaper
+        # than a system-prompt reliance for a structural cure.
+        #
+        # For pure-image PDFs (unusable text — image-mode genuinely
+        # fires on OCR cases), `line_position` is approximated by
+        # the LLM counting rows from pixel data; less reliable than
+        # text mode's [Ln] markers but still beats the batch-local
+        # idx collapse. Rows the LLM can't ground to a stable line
+        # position legitimately fall to the ak-tik Option 1 mitigation
+        # path (degraded_dedup_rows banner).
+
+        # Shared instruction block — re-states the ak-8l5 schema
+        # that PDF_SYSTEM_PROMPT already covers. Repeated per-call
+        # so a system-prompt refactor doesn't quietly drop these.
+        _ak8l5_schema_instructions = (
+            f"\n### ak-8l5 per-row dedup fields (REQUIRED per transaction)\n"
+            f"\n"
+            f"- `bank_reference_id` (string or null): per-tx bank-"
+            f"native identifier from the narration. UPI ref, IMPS "
+            f"ref, NEFT UTR, BOI MBSF number, cheque number, etc. "
+            f"Return null for genuinely ref-less rows (cash deposit, "
+            f"interest post, bank fee) — never guess. Chunk re-reads "
+            f"of the same tx MUST produce the same ref so dedup "
+            f"collapses correctly.\n"
+            f"- `line_position` (integer): 1-indexed line offset in "
+            f"the RAW statement text. For chunked inputs, ADD the "
+            f"chunk's base offset so the position is stable across "
+            f"chunks — a tx that visually straddles pages 3-4 must "
+            f"emit the SAME line_position no matter which chunk "
+            f"sees it.\n"
+            f"\n"
+            f"Emitting BOTH fields correctly lets the dedup engine "
+            f"collapse chunk re-reads via (bank, ref, amount) when "
+            f"the ref is present, or (bank, file, line_position, "
+            f"date, amount, desc) via positional fallback when the "
+            f"ref is null.\n"
+        )
+
         # For text mode: extract text and embed directly in the prompt
         # so the agent only needs to call insert_batch_transactions (one tool call)
         # Keep extracted_text accessible for the follow-up prompt if needed
         extracted_text = None
         if processing_mode == "text":
+            # ak-u949: dead-code-defensive fix. This branch is
+            # unreachable today (outer flow routes text →
+            # _run_text_chunk at mailProcessorService.py:1748-1762),
+            # but the [Ln] annotation + schema-instruction shape
+            # here MIRRORS _run_text_chunk so a future caller that
+            # does reach this path doesn't silently regress the
+            # chunk-overlap dedup. See ak-u949 bead for the full
+            # scope rationale.
             import fitz as _fitz
             doc = _fitz.open(pdf_path)
             if doc.needs_pass and password:
                 doc.authenticate(password)
+            # Compute file-level line offsets so `line_position`
+            # is file-stable (same pattern as _run_text_chunk).
+            page_start_line = {}
+            line_ptr = 1
+            for pn in range(1, doc.page_count + 1):
+                page_start_line[pn] = line_ptr
+                raw_page_text = doc[pn - 1].get_text("text")
+                line_ptr += raw_page_text.count("\n") + 1
+
             page_texts = []
             for pn in range(page_start, page_end + 1):
                 page = doc[pn - 1]
                 text = page.get_text("text")
-                page_texts.append(f"--- Page {pn} ---\n{text}")
+                # Annotate each line with its file-level number so
+                # the LLM can echo the [Ln] marker as line_position.
+                annotated_lines = []
+                local_line = 0
+                for raw_line in text.split("\n"):
+                    file_line = page_start_line[pn] + local_line
+                    annotated_lines.append(f"[L{file_line}] {raw_line}")
+                    local_line += 1
+                page_texts.append(
+                    f"--- Page {pn} ---\n" + "\n".join(annotated_lines)
+                )
             doc.close()
             extracted_text = "\n\n".join(page_texts)
 
@@ -2735,17 +2808,21 @@ class MailProcessorService:
 
             prompt_text += (
                 f"\nBelow is the extracted text from pages {page_start}-{page_end} of {total_pages} total pages.\n"
+                f"Every line carries a `[Ln]` prefix — echo that number "
+                f"as `line_position` on each transaction you extract.\n"
                 f"Parse the text and extract ALL transactions.\n\n"
                 f"```\n{extracted_text}\n```\n\n"
             )
             if bank_rules:
                 prompt_text += f"{bank_rules}\n"
+            prompt_text += _ak8l5_schema_instructions
             prompt_text += (
                 f"Call insert_batch_transactions with all transactions you found.\n"
                 f"{file_id_instruction}"
                 f"{period_instruction}"
                 f"Use source=\"Statement\", gmail_message_id=\"{email.get('gmail_id', '')}\".\n"
-                f"Format each transaction as {{date: \"DD/MM/YYYY\", description: \"...\", amount: N}} "
+                f"Format each transaction as {{date: \"DD/MM/YYYY\", description: \"...\", amount: N, "
+                f"bank_reference_id: \"...\" or null, line_position: N}} "
                 f"where positive=debit, negative=credit.\n"
                 f"After inserting, call report_result with the outcome.\n"
                 f"\nCRITICAL RULES:\n"
@@ -2755,6 +2832,23 @@ class MailProcessorService:
             )
         # Image mode: agent needs to call get_pdf_pages tool first
         elif page_start == 1 and page_end == total_pages:
+            # ak-u949 image-mode single-chunk: re-state the ak-8l5
+            # schema so the vision-based LLM has the per-row
+            # contract in-prompt. PDF_SYSTEM_PROMPT already covers
+            # it but a per-call repetition is the structural lever
+            # that keeps degraded_dedup_rows near-zero on text-
+            # extractable PDFs that fall to image mode (edge case:
+            # _pdf_has_usable_text returns False despite extractable
+            # text).
+            #
+            # Note on pure-image / OCR PDFs: when there's genuinely
+            # no text layer, the LLM counts lines from the rendered
+            # pixel data to populate line_position — less reliable
+            # than text-mode's [Ln] markers but still beats the
+            # batch-local idx collapse. Rows the LLM can't ground
+            # legitimately fall to the ak-tik Option 1 mitigation
+            # path (degraded_dedup_rows > 0 → FE banner). This is
+            # accepted.
             # Single chunk — process everything
             prompt_text += (
                 f"\nPlease:\n"
@@ -2765,7 +2859,12 @@ class MailProcessorService:
                 f"5. Call report_result with the outcome\n"
                 f"\nYou MUST call insert_batch_transactions — do NOT just describe the data in text.\n"
             )
+            prompt_text += _ak8l5_schema_instructions
         else:
+            # ak-u949 image-mode chunked: same schema restatement as
+            # the single-chunk branch above. See that block's
+            # comment for the pure-image / OCR accepted-limitation
+            # note.
             # Chunked — process specific page range
             prompt_text += (
                 f"\nYou are processing pages {page_start}-{page_end} of a {total_pages}-page document.\n"
@@ -2800,6 +2899,7 @@ class MailProcessorService:
                 f"\nCRITICAL: You MUST call insert_batch_transactions as a tool call.\n"
                 f"Do NOT just describe the transactions in text — you must call the tool.\n"
             )
+            prompt_text += _ak8l5_schema_instructions
 
         # Health probe (hq-wisp-wzagg): mirrors text-mode site at ~L1675
         # for cross-mode comparison.
