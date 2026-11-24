@@ -6,11 +6,21 @@ from models.freelance_management import Invoice, Customer, InvoiceStatusEnum, In
 from services.Base_Service import BaseService
 from services.earningsService import (
     get_earnings_in_inr, get_earnings_by_month, get_earnings_by_client,
-    _sum_inr_payments,
+    _sum_inr_payments, get_unpaid_by_currency,
 )
 from services.money_utils import money, q2
 from utils.logger import Logger
 from datetime import datetime, timedelta
+
+
+def _f(value):
+    """ak-0wny: Decimal -> float, None stays None (unknown)."""
+    return None if value is None else float(value)
+
+
+def _iso_utc(dt):
+    """ak-0wny: UTC-naive datetime -> ISO-8601 'Z' string, or None."""
+    return None if dt is None else dt.replace(microsecond=0).isoformat() + "Z"
 
 
 class DashboardService(BaseService):
@@ -181,53 +191,37 @@ class DashboardService(BaseService):
                     "date": invoice.issue_date.strftime('%Y-%m-%d') if invoice.issue_date else ""
                 })
 
-            # ak-lvu v2 F-11: unpaid-by-currency includes partially_paid
-            # OUTSTANDING balances too (a 10%-paid invoice shouldn't
-            # vanish from the "unpaid by currency" view). For a
-            # partially_paid invoice the outstanding portion is
-            # `invoice.total - paid_in_invoice_currency`; if the payment
-            # currency doesn't match, we approximate by subtracting
-            # `Σ payment.original_amount` (same-currency case common).
-            unpaid_invoices = session.query(Invoice).options(
-                joinedload(Invoice.payments),
-            ).filter(
-                Invoice.user_id == user_id,
-                Invoice.status.in_((
-                    InvoiceStatusEnum.sent,
-                    InvoiceStatusEnum.overdue,
-                    InvoiceStatusEnum.partially_paid,
-                )),
-            ).all()
-            unpaid_by_currency: dict = {}
-            for invoice in unpaid_invoices:
-                currency = invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency)
-                if currency not in unpaid_by_currency:
-                    unpaid_by_currency[currency] = {"amount": Decimal("0"), "count": 0}
-                # v2 F-11: for partially_paid, subtract same-currency
-                # payments from invoice.total to get the outstanding.
-                if invoice.status == InvoiceStatusEnum.partially_paid:
-                    same_currency_paid = sum(
-                        (money(p.original_amount) for p in invoice.payments
-                         if p.original_amount is not None
-                         and (p.original_currency or '').upper() == currency),
-                        Decimal("0"),
-                    )
-                    outstanding = money(invoice.total) - same_currency_paid
-                    if outstanding < Decimal("0"):
-                        outstanding = Decimal("0")
-                    unpaid_by_currency[currency]["amount"] += outstanding
-                else:
-                    unpaid_by_currency[currency]["amount"] += money(invoice.total)
-                unpaid_by_currency[currency]["count"] += 1
-
+            # ak-0wny: unpaid-by-currency + its INR equivalent are computed
+            # by earningsService (BE-authoritative FX, provenance, unknown
+            # instead of a guess). Native amounts unchanged (ak-lvu v2 F-11
+            # partially_paid outstanding). Additive fields only.
+            unpaid = get_unpaid_by_currency(
+                session, user_id, currency_service=currency_service,
+            )
             unpaid_by_currency_formatted = [
                 {
-                    "currency": currency,
-                    "amount": float(q2(data["amount"])),
-                    "count": data["count"]
+                    "currency": row["currency"],
+                    # null only when the currency has no rate AND an
+                    # invoice has cross-currency / legacy payments.
+                    "amount": _f(row["amount"]),
+                    "count": row["count"],
+                    "inrAmount": _f(row["inr_amount"]),
+                    "fxRate": _f(row["fx_rate"]),
+                    "fxRateSource": row["fx_rate_source"],
+                    "rateAsOf": _iso_utc(row["rate_as_of"]),
+                    "approximate": row["approximate"],
                 }
-                for currency, data in unpaid_by_currency.items()
+                for row in unpaid["rows"]
             ]
+            ut = unpaid["total"]
+            unpaid_total_inr = {
+                "total": _f(ut["total"]),
+                "knownTotal": float(ut["known_total"]),
+                "unconvertedCurrencies": ut["unconverted_currencies"],
+                "approximate": ut["approximate"],
+                "rateVintage": ut["rate_vintage"],
+                "rateAsOf": _iso_utc(ut["rate_as_of"]),
+            }
 
             # ak-lvu A.5: no int() truncation on top-level totals.
             return {
@@ -246,7 +240,8 @@ class DashboardService(BaseService):
                 "earningsByClientCombined": earnings_by_client_combined,
                 "earningsByClientCombinedFx": earnings_by_client_combined_fx,
                 "recentInvoices": recent_invoices_formatted,
-                "unpaidByCurrency": unpaid_by_currency_formatted
+                "unpaidByCurrency": unpaid_by_currency_formatted,
+                "unpaidTotalInr": unpaid_total_inr,  # ak-0wny
             }
 
         except Exception as e:

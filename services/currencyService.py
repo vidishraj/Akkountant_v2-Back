@@ -226,6 +226,8 @@ class CurrencyService:
             rate_meta = {
                 "fx_rate": q4(inr_per_from),
                 "fx_rate_source": source_tag,
+                # ak-0wny: rate FETCHED at (UTC-naive) = now - cache age.
+                "rate_as_of": now - timedelta(hours=float(cache_age_hours or 0)),
             }
         except Exception as exc:
             self.logger.warning(
@@ -247,6 +249,7 @@ class CurrencyService:
             rate_meta = {
                 "fx_rate": q4(money(fallback_rate)),
                 "fx_rate_source": f"fallback:{_FALLBACK_VINTAGE}",
+                "rate_as_of": None,  # dated by the vintage in the source tag
             }
 
         inr_amount = q2(amount_d * rate_meta["fx_rate"])
@@ -255,6 +258,10 @@ class CurrencyService:
             "fx_rate": rate_meta["fx_rate"],
             "fx_rate_source": rate_meta["fx_rate_source"],
             "converted_at": now,
+            # ak-0wny (additive): when the rate was FETCHED from the rate
+            # API (UTC-naive; the cache age is subtracted for cached rates).
+            # None for the dated fallback (and absent for INR identity).
+            "rate_as_of": rate_meta["rate_as_of"],
         }
 
     def _get_usd_rates_with_age(self) -> tuple:

@@ -39,6 +39,12 @@ from utils.logger import Logger
 
 logger = Logger(__name__).get_logger()
 
+# Invoices with money still owed (ak-lvu / ak-0wny).
+_UNPAID_STATUSES = (
+    InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue,
+    InvoiceStatusEnum.partially_paid,
+)
+
 
 def get_earnings_in_inr(
     session,
@@ -147,24 +153,30 @@ def _invoice_currency(inv) -> str:
             else str(inv.currency)).upper()
 
 
+def _invoice_fx(inv, currency_service, allow_fallback=True):
+    """(fx dict, None) for invoice.total -> INR, or (None, reason) when it
+    can't be converted. INR is identity. Shared by the earnings paths and
+    ak-0wny's unpaid-by-currency so both convert per invoice the same way."""
+    currency_str = _invoice_currency(inv)
+    if currency_str == 'INR':
+        return {"inr_amount": money(inv.total), "fx_rate": Decimal("1.0000"),
+                "fx_rate_source": "identity", "rate_as_of": None}, None
+    if currency_service is None:
+        return None, "no_currency_service"
+    try:
+        return currency_service.convert_to_inr_with_source(
+            money(inv.total), currency_str, allow_fallback=allow_fallback,
+        ), None
+    except Exception as exc:
+        return None, type(exc).__name__
+
+
 def _invoice_total_inr(inv, currency_service, acc) -> Optional[Decimal]:
     """invoice.total in INR, or None (recorded in acc) when it can't be
     converted. ak-nzed: never a silent skip. A vintage fallback rate is
     used (read path) but flagged as approximate."""
     currency_str = _invoice_currency(inv)
-    if currency_str == 'INR':
-        return money(inv.total)
-    if currency_service is None:
-        reason = "no_currency_service"
-        fx = None
-    else:
-        try:
-            fx = currency_service.convert_to_inr_with_source(
-                money(inv.total), currency_str, allow_fallback=True,
-            )
-            reason = None
-        except Exception as exc:
-            fx, reason = None, type(exc).__name__
+    fx, reason = _invoice_fx(inv, currency_service, allow_fallback=True)
     if fx is None:
         acc["unconverted"].append(currency_str)
         logger.warning(
@@ -178,21 +190,29 @@ def _invoice_total_inr(inv, currency_service, acc) -> Optional[Decimal]:
     return fx["inr_amount"]
 
 
+def _outstanding_given_total(inv, total_inr: Decimal, paid_sum: Decimal) -> Decimal:
+    """Outstanding INR of an invoice given its total in INR and the INR
+    already received: the full total for sent / overdue, total - received
+    (floored at 0) for partially_paid, 0 otherwise. The ONE formula both
+    _outstanding_inr and get_unpaid_by_currency use (ak-0wny review)."""
+    if inv.status in (InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue):
+        return total_inr
+    if inv.status == InvoiceStatusEnum.partially_paid:
+        remaining = total_inr - paid_sum
+        return remaining if remaining > Decimal("0") else Decimal("0")
+    return Decimal("0")
+
+
 def _outstanding_inr(inv, paid_sum, currency_service, acc) -> Decimal:
     """The unpaid part of a sent / overdue / partially_paid invoice in
     INR; Decimal 0 for other statuses or when unconvertible (then acc
     records it, so the caller's total becomes unknown)."""
-    if inv.status in (InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue):
-        total_inr = _invoice_total_inr(inv, currency_service, acc)
-        return total_inr if total_inr is not None else Decimal("0")
-    if inv.status == InvoiceStatusEnum.partially_paid:
-        # Outstanding = total_inr - already-received INR.
-        total_inr = _invoice_total_inr(inv, currency_service, acc)
-        if total_inr is None:
-            return Decimal("0")
-        remaining = total_inr - paid_sum
-        return remaining if remaining > Decimal("0") else Decimal("0")
-    return Decimal("0")
+    if inv.status not in _UNPAID_STATUSES:
+        return Decimal("0")
+    total_inr = _invoice_total_inr(inv, currency_service, acc)
+    if total_inr is None:
+        return Decimal("0")
+    return _outstanding_given_total(inv, total_inr, paid_sum)
 
 
 def _with_fx_meta(out, acc):
@@ -319,3 +339,160 @@ def get_earnings_by_client(
             "rate_vintage": row["rate_vintage"],
         })
     return out
+
+
+# ── ak-0wny: unpaid-by-currency with BE-authoritative INR ─────────────
+#
+# The Freelance "Unpaid by currency" card (and Home's freelance tile) used
+# to convert native unpaid sums to INR on the FE with its own rate table
+# (static fallback USD 88 vs this BE's 83.25), so the two could disagree
+# and a stale/fallback rate misstated the total. The BE now converts once
+# per currency per response and reports provenance; a total that can't be
+# fully converted is UNKNOWN (None), never silently smaller (ak-nzed).
+
+# SWITCH (Overseer decision pending; lead chose (a) 2026-11-24), env
+# AK_UNPAID_FX_ALLOW_FALLBACK, read per call:
+#   unset / "1" / "true"  = (a) when live/cached FX is unavailable, use the
+#                           dated fallback table, flagged approximate + its
+#                           vintage (ak-nzed parity)            [default]
+#   "0" / "false" / "no"  = (b) treat it as no rate -> that currency's INR
+#                           is unknown
+UNPAID_FX_FALLBACK_ENV = "AK_UNPAID_FX_ALLOW_FALLBACK"
+
+
+def unpaid_fx_allow_fallback() -> bool:
+    import os
+    raw = os.getenv(UNPAID_FX_FALLBACK_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _same_currency_native_outstanding(inv, currency: str):
+    """Native outstanding when EVERY payment is recorded in the invoice's
+    own currency (original_amount set), else None. Payments in another
+    currency or legacy rows (original_amount NULL, INR in
+    amount_received) can't be netted in native terms."""
+    paid = Decimal("0")
+    for p in inv.payments:
+        if p.original_amount is None or (p.original_currency or '').upper() != currency:
+            return None
+        paid += money(p.original_amount)
+    if inv.status in (InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue):
+        return money(inv.total)
+    remaining = money(inv.total) - paid
+    return remaining if remaining > Decimal("0") else Decimal("0")
+
+
+def _unpaid_invoice(inv, currency_service, allow_fallback) -> dict:
+    """One unpaid invoice: outstanding INR by the SAME formula as
+    _outstanding_inr (invoice total converted, minus INR received), plus
+    its native outstanding and FX provenance. inr None = no rate."""
+    currency = _invoice_currency(inv)
+    paid_inr = _sum_inr_payments(inv.payments)
+    fx, reason = _invoice_fx(inv, currency_service, allow_fallback=allow_fallback)
+    if fx is None:
+        logger.warning(
+            f"[ak-0wny] unpaid invoice in {currency} not convertible to INR "
+            f"({reason}); reported as unknown"
+        )
+        native = _same_currency_native_outstanding(inv, currency)
+        return {"currency": currency, "inr": None, "native": native, "fx": None}
+    inr = q2(_outstanding_given_total(inv, money(fx["inr_amount"]), paid_inr))
+    native = _same_currency_native_outstanding(inv, currency)
+    rate = money(fx.get("fx_rate") or 0)
+    if native is None:
+        # Cross-currency / legacy payments: native = INR outstanding at
+        # today's rate (the INR figure is the authoritative one).
+        native = q2(inr / rate) if rate > 0 else None
+    return {"currency": currency, "inr": inr, "native": native, "fx": fx}
+
+
+def get_unpaid_by_currency(session, user_id: str, *, currency_service=None) -> dict:
+    """ak-0wny: unpaid (sent / overdue / partially_paid) invoices grouped
+    by currency, INR computed by the BE PER INVOICE with the same formula
+    as get_earnings_in_inr's outstanding (_outstanding_inr), then summed, so
+    the dashboard's unpaid figures always reconcile to the paisa.
+
+    Returns {
+      "rows": [{"currency", "amount" (native outstanding, 2dp | None when a
+                rate is missing AND payments aren't all in that currency),
+                "count", "inr_amount" (Decimal | None: None if ANY invoice of
+                that currency is unconvertible), "fx_rate", "fx_rate_source",
+                "rate_as_of" (when the rate was FETCHED, UTC | None),
+                "approximate"}],  sorted by currency
+      "total": {"total" (Decimal | None: None if ANY row is unknown),
+                "known_total", "unconverted_currencies", "approximate",
+                "rate_vintage", "rate_as_of" (oldest converted rate)},
+    }
+    No unpaid invoices -> rows [] and total 0 (known, not unknown).
+    """
+    if not user_id:
+        raise ValueError("get_unpaid_by_currency: user_id is required")
+    allow_fallback = unpaid_fx_allow_fallback()
+    invoices = session.query(Invoice).options(joinedload(Invoice.payments)).filter(
+        Invoice.user_id == user_id,
+        Invoice.status.in_(_UNPAID_STATUSES),
+    ).all()
+
+    groups: dict = {}
+    for inv in invoices:
+        item = _unpaid_invoice(inv, currency_service, allow_fallback)
+        g = groups.setdefault(item["currency"], {
+            "native": Decimal("0"), "native_known": True, "count": 0,
+            "inr": Decimal("0"), "inr_known": True, "fx": None,
+            "approximate": False, "as_ofs": [],
+        })
+        g["count"] += 1
+        if item["native"] is None:
+            g["native_known"] = False
+        else:
+            g["native"] += item["native"]
+        if item["inr"] is None:
+            g["inr_known"] = False
+            continue
+        g["inr"] += item["inr"]
+        fx = item["fx"]
+        g["fx"] = g["fx"] or fx
+        source = str(fx.get("fx_rate_source") or "")
+        if source.startswith("fallback:"):
+            g["approximate"] = True
+            g["vintage"] = source.split(":", 1)[1]
+        if fx.get("rate_as_of") is not None:
+            g["as_ofs"].append(fx["rate_as_of"])
+
+    rows, known, unconverted, vintages, as_ofs = [], Decimal("0"), [], set(), []
+    for currency in sorted(groups):
+        g = groups[currency]
+        fx = g["fx"] or {}
+        inr = q2(g["inr"]) if g["inr_known"] else None
+        rows.append({
+            "currency": currency,
+            "amount": q2(g["native"]) if g["native_known"] else None,
+            "count": g["count"],
+            "inr_amount": inr,
+            "fx_rate": fx.get("fx_rate") if inr is not None else None,
+            "fx_rate_source": (fx.get("fx_rate_source") or None) if inr is not None else None,
+            "rate_as_of": min(g["as_ofs"]) if (inr is not None and g["as_ofs"]) else None,
+            "approximate": g["approximate"] if inr is not None else False,
+        })
+        if inr is None:
+            unconverted.append(currency)
+            continue
+        known += inr
+        if g["approximate"]:
+            vintages.add(g["vintage"])
+        as_ofs.extend(g["as_ofs"])
+
+    known = q2(known)
+    return {
+        "rows": rows,
+        "total": {
+            "total": None if unconverted else known,
+            "known_total": known,
+            "unconverted_currencies": unconverted,
+            "approximate": bool(vintages),
+            "rate_vintage": ", ".join(sorted(vintages)) or None,
+            "rate_as_of": min(as_ofs) if as_ofs else None,
+        },
+    }
