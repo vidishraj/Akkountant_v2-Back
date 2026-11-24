@@ -241,7 +241,8 @@ def try_unlock_pdf(pdf_path, password_candidates):
         return None
 
     except Exception as e:
-        logger.error(f"Error trying to unlock PDF: {e}")
+        # ak-67q4: type only — never risk a candidate password in the log.
+        logger.error(f"Error trying to unlock PDF ({type(e).__name__})")
         return None
 
 

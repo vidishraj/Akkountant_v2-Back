@@ -733,9 +733,11 @@ class TransactionService(BaseService):
         except Exception as e:
             self.logger.error(
                 f"ak-ex2 strip: could not read PDF at {pdf_path!r} "
-                f"for fileID={fileId!r}: {e}"
+                f"for fileID={fileId!r} ({type(e).__name__})"
             )
-            return _err(f"PDF read failed: {e}", pdf_path=pdf_path)
+            # ak-67q4: this block authenticates with the caller's PDF
+            # password — type name only, never str(e).
+            return _err(f"PDF read failed ({type(e).__name__})", pdf_path=pdf_path)
 
         raw_text = "\n".join(raw_lines)
         spans = detect_hdfc_sections(raw_text)

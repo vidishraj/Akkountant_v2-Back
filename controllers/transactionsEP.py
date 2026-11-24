@@ -551,7 +551,10 @@ class TransactionController:
 
             return jsonify({"message": "Opted banks updated successfully"}), 200
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            # ak-67q4: never str(e) — a SQLAlchemy error carries the bound
+            # params, i.e. the statement-PDF passwords. Type name only.
+            self.logger.error(f"setOptedBanks failed ({type(e).__name__})")
+            return jsonify({"error": "Failed to update opted banks"}), 500
 
     def getStatementPasswords(self):
         """GET /statementPasswords (ak-3rwh): per-bank status only
@@ -647,8 +650,9 @@ class TransactionController:
             status = 200 if result.get("status") != "error" else 500
             return jsonify(result), status
         except Exception as e:
-            self.logger.error(f"ak-ex2 strip endpoint error: {e}")
-            return jsonify({"error": str(e)}), 500
+            # ak-67q4: body carries an optional PDF password; no str(e).
+            self.logger.error(f"ak-ex2 strip endpoint error ({type(e).__name__})")
+            return jsonify({"error": "Strip request failed"}), 500
 
     @Logger.standardLogger
     def getProcessingStats(self):
@@ -701,7 +705,10 @@ class TransactionController:
             return jsonify({"message": "Personal info updated successfully"}), 200
         except Exception as e:
             g.db.session.rollback()
-            return jsonify({"error": str(e)}), 500
+            # ak-67q4: personal info is PDF-password material (DOB, PAN,
+            # phone); a DB error's str() would echo it. Type name only.
+            self.logger.error(f"updatePersonalInfo failed ({type(e).__name__})")
+            return jsonify({"error": "Failed to update personal info"}), 500
 
     @Logger.standardLogger
     def getPersonalInfo(self):
@@ -775,11 +782,17 @@ class TransactionController:
         if not self.mail_processor:
             return jsonify({"error": "Mail processor not configured"}), 500
 
-        result = self.mail_processor.reprocess_pdf(
-            user_id, gmail_id, pdf_path=pdf_path,
-            password=password, processing_mode=processing_mode,
-            bank=bank, only_chunks=only_chunks,
-        )
+        try:
+            result = self.mail_processor.reprocess_pdf(
+                user_id, gmail_id, pdf_path=pdf_path,
+                password=password, processing_mode=processing_mode,
+                bank=bank, only_chunks=only_chunks,
+            )
+        except Exception as e:
+            # ak-67q4: handled here so @standardLogger's str(e) never
+            # sees an error raised around the supplied PDF password.
+            self.logger.error(f"reprocessPdf failed ({type(e).__name__})")
+            return jsonify({"error": "Reprocess failed"}), 500
         return jsonify(result), 200
 
     # ── Reconciliation Endpoints ─────────────────────────────────────

@@ -235,8 +235,10 @@ class MailProcessorService:
         try:
             pdf_path = resolve_reprocess_pdf(user_id, gmail_id, pdf_path)
         except ToolPathRejected as exc:
-            self.logger.warning(f"reprocess_pdf refused gmail_id={gmail_id!r}: {exc}")
-            return {"error": f"PDF rejected: {exc}"}
+            # ak-67q4: type only, fixed message (password-touching path).
+            self.logger.warning(
+                f"reprocess_pdf refused gmail_id={gmail_id!r} ({type(exc).__name__})")
+            return {"error": "PDF rejected: not an allowed saved statement PDF for this email"}
         self.logger.info(f"Resolved PDF: {pdf_path}")
 
         # 2. Try password if needed
@@ -263,7 +265,7 @@ class MailProcessorService:
                     )
             except Exception as e:
                 self.logger.warning(
-                    f"ak-nyd per-file password lookup failed: {e}"
+                    f"ak-nyd per-file password lookup failed ({type(e).__name__})"
                 )
                 password = None
 
@@ -272,7 +274,7 @@ class MailProcessorService:
                 try:
                     password = self._try_personal_info_passwords(user_id, pdf_path)
                 except Exception as e:
-                    self.logger.warning(f"Password lookup failed: {e}")
+                    self.logger.warning(f"Password lookup failed ({type(e).__name__})")
                     password = None
             if not password:
                 return {"error": "PDF is password-protected and no password could be determined"}
@@ -1511,7 +1513,7 @@ class MailProcessorService:
             return pdf_path
 
         except Exception as e:
-            self.logger.warning(f"Failed to pre-unlock PDF: {e}")
+            self.logger.warning(f"Failed to pre-unlock PDF ({type(e).__name__})")
             return None
 
     # ── Link-based PDF extraction (HDFC Smart Statements, etc.) ──────
@@ -1881,7 +1883,7 @@ class MailProcessorService:
                     self.logger.debug(f"Found Smart Statement password for bank {bank_name}")
                     return pw.password_hash
         except Exception as e:
-            self.logger.debug(f"Could not look up Smart Statement password: {e}")
+            self.logger.debug(f"Could not look up Smart Statement password ({type(e).__name__})")
         return None
 
     def _get_statement_password(self, user_id, email, pdf_path=None, hint_tags=None):
@@ -1921,7 +1923,7 @@ class MailProcessorService:
                 if pw and pw.password_hash:
                     explicit_passwords.append(pw.password_hash)
         except Exception as e:
-            self.logger.debug(f"Error fetching explicit passwords: {e}")
+            self.logger.debug(f"Error fetching explicit passwords ({type(e).__name__})")
 
         if explicit_passwords and pdf_path:
             password = try_unlock_pdf(pdf_path, explicit_passwords)
@@ -1971,7 +1973,7 @@ class MailProcessorService:
             return password
 
         except Exception as e:
-            self.logger.debug(f"Personal info password attempt failed: {e}")
+            self.logger.debug(f"Personal info password attempt failed ({type(e).__name__})")
             return None
 
     # Maximum pages per chunk — keeps image context small per query.
