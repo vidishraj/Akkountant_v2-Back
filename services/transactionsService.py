@@ -1284,8 +1284,11 @@ class TransactionService(BaseService):
         # attempt is older than the retry window. The sweep no longer
         # retries them, so they're listed here rather than going silent.
         from utils import retry_sweep
-        failed = self.db.session.query(ProcessedEmails).filter_by(
-            user_id=userId, status="failed", processing_type="pdf").all()
+        # ak-6k35: same coarse prefilter as the sweep, so rows the sweep
+        # gave up on (N unanswered sweeps) are listed too.
+        failed = self.db.session.query(ProcessedEmails).filter(
+            ProcessedEmails.user_id == userId,
+            retry_sweep.sql_prefilter(ProcessedEmails)).all()
         aged_ids = set(retry_sweep.aged_out_ids(
             [(r.gmail_id, r.status, r.processing_type, r.processed_at, r.extraction_summary)
              for r in failed]))

@@ -54,6 +54,10 @@ from utils.PdfPasswordUtil import generate_password_candidates, try_unlock_pdf, 
 from utils.logger import Logger
 from utils.sdk_runner import run_query_collect
 
+# ak-6k35: per-run temp dir (ContextVar: concurrent runs never share it).
+from contextvars import ContextVar as _ContextVar
+_RUN_TMP_DIR = _ContextVar("ak_6k35_run_tmp_dir", default=None)
+
 MCP_SERVER_NAME = "mail_processor_tools"
 SAVED_EMAILS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_emails")
 MAX_TURNS = 50  # Higher than interactive agent — autonomous processing needs more turns
@@ -370,6 +374,11 @@ class MailProcessorService:
                     pass
 
         pdf_emails = []
+        # ak-6k35: a per-run temp subdir, so two concurrent runs (scheduled
+        # + manual) for the same email can't overwrite or delete each
+        # other's downloaded PDFs (same file names).
+        run_tmp = os.path.join(os.getcwd(), "tmp", f"run_{secrets.token_hex(6)}")
+        run_tmp_token = _RUN_TMP_DIR.set(run_tmp)
         try:
             # 1. Fetch Gmail token
             report({"stage": "fetching_emails", "status": "processing"})
@@ -457,6 +466,9 @@ class MailProcessorService:
             # still present. Persisted copies (claude_statements/) are
             # separate and untouched.
             self._cleanup_local_pdfs(pdf_emails)
+            _RUN_TMP_DIR.reset(run_tmp_token)
+            # The run's own subdir only (never the shared tmp/).
+            shutil.rmtree(run_tmp, ignore_errors=True)
 
         self.logger.info(f"Mail processing complete: {summary}")
         return summary
@@ -780,6 +792,12 @@ class MailProcessorService:
         except Exception as e:
             self.logger.error(f"Failed to save emails to disk: {e}", exc_info=True)
 
+    @staticmethod
+    def _tmp_dir():
+        """Where downloaded PDFs go: this run's subdir (ak-6k35) inside a
+        process_emails run, else the shared <cwd>/tmp (reprocess paths)."""
+        return _RUN_TMP_DIR.get() or os.path.join(os.getcwd(), "tmp")
+
     def _cleanup_local_pdfs(self, emails):
         """Remove leftover temp PDFs from `_local_pdf_paths`; never raises."""
         removed = 0
@@ -803,14 +821,18 @@ class MailProcessorService:
         from utils import retry_sweep
         try:
             # Review minor 2: the window keys on the LAST attempt (in
-            # extraction_summary), so it can't be a processed_at SQL filter.
+            # extraction_summary), so the exact window can't be SQL.
+            # ak-6k35 coarse prefilter (exact rules applied in Python):
+            # failed PDF rows (any age; they can be revived) + pending rows
+            # first stamped inside the window. This drops the ~2.7k legacy
+            # March 'pending' rows and text failures from every cycle.
             rows = self.transaction_service.db.session.query(
                 ProcessedEmails.gmail_id, ProcessedEmails.status,
                 ProcessedEmails.processing_type, ProcessedEmails.processed_at,
                 ProcessedEmails.extraction_summary,
             ).filter(
                 ProcessedEmails.user_id == user_id,
-                ProcessedEmails.status.in_(retry_sweep.SWEEP_STATUSES),
+                retry_sweep.sql_prefilter(ProcessedEmails),
             ).all()
         except Exception as e:
             self.logger.warning(f"[ak-i3tc] retry sweep lookup failed: {type(e).__name__}")
@@ -822,7 +844,34 @@ class MailProcessorService:
                 f"{retry_sweep.RETRY_WINDOW_DAYS}-day retry window; no longer retried "
                 f"automatically (listed in GET /statementAttention agedOut)"
             )
-        return retry_sweep.select_retry_ids(rows, exclude=exclude)
+        picked = retry_sweep.select_retry_ids(rows, exclude=exclude)
+        if picked:
+            self._mark_swept(user_id, picked)
+        return picked
+
+    def _mark_swept(self, user_id, gmail_ids):
+        """ak-6k35: stamp the sweep pick (misses + 1, last_swept_at = now)
+        BEFORE fetching. A real processing stamp later in the run replaces
+        the summary (clearing it); an unfetchable or classifier-dropped id
+        keeps it, so it moves to the back and is skipped after N misses.
+        Never raises."""
+        from models.processedEmails import ProcessedEmails
+        from utils import retry_sweep
+        session = self.transaction_service.db.session
+        try:
+            rows = session.query(ProcessedEmails).filter(
+                ProcessedEmails.user_id == user_id,
+                ProcessedEmails.gmail_id.in_(list(gmail_ids)),
+            ).all()
+            for row in rows:
+                row.extraction_summary = retry_sweep.mark_swept(row.extraction_summary)
+            session.commit()
+        except Exception as e:
+            self.logger.warning(f"[ak-6k35] sweep stamp failed ({type(e).__name__})")
+            try:
+                session.rollback()
+            except Exception:
+                pass
 
     def _filter_already_processed(self, emails, user_id):
         """Remove emails that have already been successfully processed.
@@ -1419,7 +1468,7 @@ class MailProcessorService:
                     continue
 
                 # Save to temp
-                tmp_dir = os.path.join(os.getcwd(), "tmp")
+                tmp_dir = self._tmp_dir()
                 os.makedirs(tmp_dir, exist_ok=True)
                 safe_name = f"mail_pipeline_{gmail_id}_{i}.pdf"
                 pdf_path = os.path.join(tmp_dir, safe_name)
@@ -1797,7 +1846,7 @@ class MailProcessorService:
             return None
 
         # Save to temp
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        tmp_dir = self._tmp_dir()
         os.makedirs(tmp_dir, exist_ok=True)
         safe_name = f"smart_statement_{gmail_id}.pdf"
         pdf_path = os.path.join(tmp_dir, safe_name)
