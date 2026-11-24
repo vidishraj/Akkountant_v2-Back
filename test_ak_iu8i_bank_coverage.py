@@ -291,10 +291,30 @@ class TestNotFinancialRecorded(unittest.TestCase):
         self.assertEqual(stamped, ["b"])
 
     def test_failed_classifier_batch_records_nothing(self):
+        # ak-4scl: when every batch fails the classifier now RAISES (a
+        # loud pipeline failure, not "No financial emails"), and a failed
+        # batch still records NOTHING, so the emails stay unprocessed and
+        # are fetched again next cycle.
         svc = self._svc()
         with mock.patch.object(svc, "_run_classification_batch", side_effect=RuntimeError("x")):
-            self.assertEqual(svc._classify_emails([dict(e) for e in self.EMAILS], user_id="u"), [])
+            with self.assertRaises(MPS.ClassificationFailed):
+                svc._classify_emails([dict(e) for e in self.EMAILS], user_id="u")
         svc._stamp_processed_email.assert_not_called()
+
+    def test_partially_failed_classification_records_only_the_good_batch(self):
+        svc = self._svc()
+        calls = {"n": 0}
+
+        def batch(b):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            return []
+        with mock.patch.object(MPS, "CLASSIFICATION_BATCH_SIZE", 2), \
+                mock.patch.object(svc, "_run_classification_batch", side_effect=batch):
+            self.assertEqual(svc._classify_emails([dict(e) for e in self.EMAILS], user_id="u"), [])
+        stamped = {c.args[0]["gmail_id"] for c in svc._stamp_processed_email.call_args_list}
+        self.assertEqual(stamped, {"c"})      # batch 1 (a, b) failed → not recorded
 
 
 @unittest.skipUnless(_HAVE_APP, "app deps not installed")

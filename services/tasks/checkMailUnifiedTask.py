@@ -98,6 +98,12 @@ class CheckMailUnifiedTask:
                     g.firebase_id = user_id
                     self.logger.info(f"Running unified mail processing for user {user_id}")
                     result = self.mail_processor.process_emails(user_id, date_from, date_to)
+                    if result.get("errors"):
+                        # ak-4scl: a failed run must not read as a quiet one.
+                        self.logger.error(
+                            f"Mail processing for user {user_id} reported errors: "
+                            f"{result['errors'][:3]}"
+                        )
                     self.logger.info(
                         f"User {user_id} mail processing complete: "
                         f"fetched={result.get('total_emails_fetched', 0)}, "

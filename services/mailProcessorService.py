@@ -59,6 +59,19 @@ from utils.sdk_runner import run_query_collect
 from contextvars import ContextVar as _ContextVar
 _RUN_TMP_DIR = _ContextVar("ak_6k35_run_tmp_dir", default=None)
 
+class ClassificationFailed(RuntimeError):
+    """ak-4scl: the classifier failed for every batch of a run."""
+
+
+# ak-4scl: per-run classifier failures {"batches": [type-only text],
+# "ids": [gmail ids in failed batches]} (set by process_emails, so
+# _classify_emails keeps its signature).
+_CLASSIFY_FAILURES = _ContextVar("ak_4scl_classify_failures", default=None)
+# ak-4scl review MAJOR 1: the sweep marks THIS run actually committed
+# {gmail_id: (previous _sweep marker, stamped marker)}, so an outage undoes
+# exactly those and never an earlier cycle's.
+_SWEEP_MARKS = _ContextVar("ak_4scl_sweep_marks", default=None)
+
 MCP_SERVER_NAME = "mail_processor_tools"
 SAVED_EMAILS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_emails")
 MAX_TURNS = 50  # Higher than interactive agent — autonomous processing needs more turns
@@ -391,6 +404,8 @@ class MailProcessorService:
         # other's downloaded PDFs (same file names).
         run_tmp = os.path.join(os.getcwd(), "tmp", f"run_{secrets.token_hex(6)}")
         run_tmp_token = _RUN_TMP_DIR.set(run_tmp)
+        sweep_marks = {}
+        sweep_marks_token = _SWEEP_MARKS.set(sweep_marks)
         try:
             # 1. Fetch Gmail token
             report({"stage": "fetching_emails", "status": "processing"})
@@ -432,7 +447,29 @@ class MailProcessorService:
 
             # 3. Classify remaining emails via Claude (Agent-1)
             report({"stage": "classifying", "status": "processing"})
-            financial_emails = self._classify_emails(unprocessed, user_id=user_id)
+            # ak-4scl: collect per-batch classifier failures for this run
+            # (a ContextVar, so _classify_emails keeps its signature).
+            classify_failures = {"batches": [], "ids": []}
+            _cf_token = _CLASSIFY_FAILURES.set(classify_failures)
+            try:
+                financial_emails = self._classify_emails(unprocessed, user_id=user_id)
+            except ClassificationFailed:
+                # A classifier outage is not an unanswered email: undo the
+                # sweep marks (ak-6k35) this run committed, so swept ids
+                # aren't pushed toward agedOut by an outage.
+                self._unmark_swept(user_id, sweep_marks)
+                raise
+            finally:
+                _CLASSIFY_FAILURES.reset(_cf_token)
+            if classify_failures["batches"]:
+                # A partial classifier failure is reported, not hidden
+                # behind the batches that worked; its swept ids weren't
+                # answered by the email either (review minor 2).
+                self._unmark_swept(user_id, {
+                    g: sweep_marks[g] for g in classify_failures["ids"] if g in sweep_marks})
+                summary["errors"].append(
+                    f"classification failed for {len(classify_failures['batches'])} batch(es): "
+                    f"{'; '.join(classify_failures['batches'][:3])}")
             summary["financial_emails"] = len(financial_emails)
             self.logger.info(f"Agent-1 classified {len(financial_emails)} financial emails")
             report({"stage": "classified", "emails_classified": len(financial_emails)})
@@ -482,6 +519,7 @@ class MailProcessorService:
             # separate and untouched.
             self._cleanup_local_pdfs(pdf_emails)
             _RUN_TMP_DIR.reset(run_tmp_token)
+            _SWEEP_MARKS.reset(sweep_marks_token)
             # The run's own subdir only (never the shared tmp/).
             shutil.rmtree(run_tmp, ignore_errors=True)
 
@@ -553,6 +591,8 @@ class MailProcessorService:
                 email_lookup[gid] = e
 
         financial_emails = []
+        failed_batches, failed_ids = [], []
+        n_batches = (len(all_emails) + CLASSIFICATION_BATCH_SIZE - 1) // CLASSIFICATION_BATCH_SIZE
 
         for i in range(0, len(all_emails), CLASSIFICATION_BATCH_SIZE):
             batch = all_emails[i:i + CLASSIFICATION_BATCH_SIZE]
@@ -582,10 +622,30 @@ class MailProcessorService:
                     if gid and gid not in returned:
                         self._record_not_financial(e, user_id)
             except Exception as e:
+                # Review minor 1 / ak-ouu2: type + frames only; the
+                # summary text goes to the client.
+                import traceback as _tb
                 self.logger.error(
-                    f"Classification batch {batch_num} failed: {e}", exc_info=True
-                )
+                    f"Classification batch {batch_num} failed ({type(e).__name__})\n"
+                    + "".join(_tb.format_tb(e.__traceback__)))
+                failed_batches.append(f"batch {batch_num}: {type(e).__name__}")
+                failed_ids.extend(
+                    g for g in (x.get("gmail_id") or x.get("message_id") for x in batch) if g)
 
+        holder = _CLASSIFY_FAILURES.get()
+        if holder is not None:
+            holder["batches"].extend(failed_batches)
+            holder["ids"].extend(failed_ids)
+        # ak-4scl: when EVERY batch failed (e.g. the agent can't even be
+        # constructed, ak-1m97), raise. This used to return [] and the run
+        # logged "No financial emails found in the date range" while mail
+        # aged out of the 24h window unprocessed. A failed batch still
+        # records NOTHING (no processedEmails row), so its emails stay
+        # unprocessed and are fetched again next cycle.
+        if failed_batches and len(failed_batches) == n_batches:
+            raise ClassificationFailed(
+                f"email classification failed for all {n_batches} batch(es); "
+                f"first: {failed_batches[0]}")      # type-only (review minor 1)
         return financial_emails
 
     def _record_not_financial(self, email, user_id):
@@ -864,6 +924,34 @@ class MailProcessorService:
             self._mark_swept(user_id, picked)
         return picked
 
+    def _unmark_swept(self, user_id, marks):
+        """ak-4scl: undo the sweep marks this run committed. marks is
+        {gmail_id: (previous marker, stamped marker)} from _mark_swept; a
+        mark that failed isn't in it, so nothing earlier is undone. Each
+        row gets its previous marker back (misses AND last_swept_at), only
+        while it still carries this run's stamp. Never raises."""
+        from models.processedEmails import ProcessedEmails
+        from utils import retry_sweep
+        if not marks:
+            return
+        session = self.transaction_service.db.session
+        try:
+            rows = session.query(ProcessedEmails).filter(
+                ProcessedEmails.user_id == user_id,
+                ProcessedEmails.gmail_id.in_(list(marks)),
+            ).all()
+            for row in rows:
+                previous, stamped = marks[row.gmail_id]
+                row.extraction_summary = retry_sweep.restore_sweep(
+                    row.extraction_summary, previous, stamped)
+            session.commit()
+        except Exception as e:
+            self.logger.warning(f"[ak-4scl] sweep unmark failed ({type(e).__name__})")
+            try:
+                session.rollback()
+            except Exception:
+                pass
+
     def _mark_swept(self, user_id, gmail_ids):
         """ak-6k35: stamp the sweep pick (misses + 1, last_swept_at = now)
         BEFORE fetching. A real processing stamp later in the run replaces
@@ -878,9 +966,18 @@ class MailProcessorService:
                 ProcessedEmails.user_id == user_id,
                 ProcessedEmails.gmail_id.in_(list(gmail_ids)),
             ).all()
+            staged = {}
             for row in rows:
-                row.extraction_summary = retry_sweep.mark_swept(row.extraction_summary)
+                before = row.extraction_summary
+                row.extraction_summary = retry_sweep.mark_swept(before)
+                staged[row.gmail_id] = (
+                    before.get(retry_sweep.SWEEP_KEY) if isinstance(before, dict) else None,
+                    row.extraction_summary[retry_sweep.SWEEP_KEY])
             session.commit()
+            # ak-4scl review MAJOR 1: only marks that actually committed.
+            holder = _SWEEP_MARKS.get()
+            if holder is not None:
+                holder.update(staged)
         except Exception as e:
             self.logger.warning(f"[ak-6k35] sweep stamp failed ({type(e).__name__})")
             try:

@@ -109,6 +109,22 @@ def mark_swept(summary, now=None):
     return out
 
 
+def restore_sweep(summary, previous, stamped):
+    """ak-4scl: undo one mark_swept. Used when classification failed for
+    the batch holding the row (a pipeline outage, not an unanswered email,
+    so it mustn't count as a miss). Puts back the PREVIOUS marker (misses
+    and last_swept_at), or drops it if there was none, but only while the
+    row still carries the marker this run stamped (anything newer wins)."""
+    if not isinstance(summary, dict) or summary.get(SWEEP_KEY) != stamped:
+        return summary
+    out = dict(summary)
+    if isinstance(previous, dict):
+        out[SWEEP_KEY] = dict(previous)
+    else:
+        out.pop(SWEEP_KEY, None)
+    return out
+
+
 def _rows_with_last(rows):
     """(gid, status, ptype, queue_key, misses, last_attempt)."""
     for row in rows:
