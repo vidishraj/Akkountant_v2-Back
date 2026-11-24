@@ -55,6 +55,7 @@ def _ast_lift_delimiter_helpers():
         "_HEADER",
         "_NOTABLE_MOVE_THRESHOLD",
         "_SNAPSHOT_LOOKBACK_DAYS",
+        "_DIGEST_RESEARCH_TOOL_BUDGET",  # ak-lwed budget line
     }
     want_funcs = {
         "_make_user_data_tags",

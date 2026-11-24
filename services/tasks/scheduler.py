@@ -112,6 +112,11 @@ def get_task_class(title):
     return TASK_MAPPING.get(title)
 
 
+
+# ak-lwed: consecutive-failure count at which a recurring job starts
+# emitting `job_failure_alert` ERROR lines (rescheduling stops at 10).
+JOB_FAILURE_ALERT_THRESHOLD = 3
+
 class TaskScheduler:
     def __init__(self, db_url, flask_app=None):
         self.logger = Logger(__name__).get_logger()
@@ -242,6 +247,17 @@ class TaskScheduler:
                     job.failures = min(job.failures + 1, 10)
                     if job.failures == 10:
                         self.logger.error(f"Reached failure limit for job {job.title}, will not reschedule")
+                    elif job.failures >= JOB_FAILURE_ALERT_THRESHOLD:
+                        # ak-lwed: make a dying recurring chain LOUD
+                        # long before it silently stops at 10 (the
+                        # Aug digest chain died unnoticed). Stable
+                        # grep token for journald alerting; title +
+                        # counts only, never job results.
+                        self.logger.error(
+                            f"job_failure_alert job={job.title} "
+                            f"failures={job.failures}/10 "
+                            f"remaining_before_stop={10 - job.failures}"
+                        )
                 else:
                     job.failures = 0
 

@@ -28,6 +28,7 @@ from claude_agent_sdk import (
     query as sdk_query,
     AssistantMessage,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
 )
@@ -60,7 +61,8 @@ def _make_sdk_stderr_logger(agent):
 def emit_agent_run(*, agent, model, turns, tools_called, latency_ms,
                    status, error_class=None,
                    user_id=None, tool_names=None,
-                   input_tokens=None, output_tokens=None):
+                   input_tokens=None, output_tokens=None,
+                   result_subtype=None):
     """Emit one structured `agent_run` log line.
 
     Format (space-separated key=value, grep-friendly):
@@ -95,6 +97,11 @@ def emit_agent_run(*, agent, model, turns, tools_called, latency_ms,
     ]
     if error_class:
         parts.append(f"error_class={error_class}")
+    # ak-lwed: a non-success ResultMessage subtype (e.g.
+    # error_max_turns) arrives with is_error=False on older SDKs, so
+    # status stays "ok"; surface the subtype so the line isn't a lie.
+    if result_subtype and result_subtype != "success":
+        parts.append(f"result_subtype={result_subtype}")
     if user_id is not None:
         parts.append(f"user={user_id}")
     if tool_names:
@@ -115,9 +122,20 @@ class SdkRunResult:
     latency_ms: int
     error: str | None
     error_class: str | None
+    # ak-lwed: ResultMessage.subtype ("success", "error_max_turns",
+    # "error_max_structured_output_retries", ...). On claude-agent-sdk
+    # 0.1.x a turn-budget exhaustion arrives as subtype=error_max_turns
+    # with is_error=False and structured_output=None, so callers that
+    # need structured output must check this, not just `error`.
+    subtype: str | None = None
+    # ak-lwed review: tool NAMES the CLI offered at init (from the
+    # init SystemMessage), so a caller can prove what the model could
+    # call. None if no init message was seen.
+    init_tools: list | None = None
 
 
-async def run_query_collect(*, agent, options, prompt, user_id=None):
+async def run_query_collect(*, agent, options, prompt, user_id=None,
+                            log_init_tools=False):
     """Run sdk_query, collect TextBlocks + structured_output, emit log line.
 
     `prompt` may be a string or an AsyncIterable per the SDK contract.
@@ -128,6 +146,11 @@ async def run_query_collect(*, agent, options, prompt, user_id=None):
     line for per-turn observability. ``user_id`` is a new optional
     kwarg the caller can pass to associate the turn with a Firebase
     user id in logs.
+
+    ak-lwed review: ``log_init_tools=True`` logs the tool NAMES the CLI
+    offered in its init SystemMessage (names only, never inputs) as an
+    ``agent_init`` line; the names are always returned on
+    ``SdkRunResult.init_tools``.
     """
     start = time.monotonic()
     text_parts = []
@@ -139,6 +162,8 @@ async def run_query_collect(*, agent, options, prompt, user_id=None):
     error_class = None
     input_tokens = None
     output_tokens = None
+    subtype = None
+    init_tools = None
 
     # Auto-wire stderr capture if the caller didn't supply one. This covers
     # every run_query_collect call site (rate.*, mailProcessor extract paths,
@@ -149,7 +174,19 @@ async def run_query_collect(*, agent, options, prompt, user_id=None):
 
     try:
         async for message in sdk_query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
+            if (isinstance(message, SystemMessage)
+                    and getattr(message, "subtype", None) == "init"):
+                data = getattr(message, "data", None) or {}
+                names = data.get("tools") if isinstance(data, dict) else None
+                if isinstance(names, list):
+                    init_tools = [str(n) for n in names]
+                    if log_init_tools:
+                        _logger.info(
+                            f"agent_init agent={agent} "
+                            f"tools_offered={len(init_tools)} "
+                            f"tool_names={','.join(sorted(init_tools))}"
+                        )
+            elif isinstance(message, AssistantMessage):
                 turns += 1
                 if getattr(message, "error", None):
                     error_msg = f"Assistant error: {message.error}"
@@ -167,6 +204,7 @@ async def run_query_collect(*, agent, options, prompt, user_id=None):
                         if name:
                             tool_names.append(str(name))
             elif isinstance(message, ResultMessage):
+                subtype = getattr(message, "subtype", None)
                 if getattr(message, "is_error", False):
                     error_msg = message.result or "Query failed"
                     error_class = "result_error"
@@ -204,6 +242,7 @@ async def run_query_collect(*, agent, options, prompt, user_id=None):
         tool_names=tool_names,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        result_subtype=subtype,
     )
 
     return SdkRunResult(
@@ -214,4 +253,6 @@ async def run_query_collect(*, agent, options, prompt, user_id=None):
         latency_ms=latency_ms,
         error=error_msg,
         error_class=error_class,
+        subtype=subtype,
+        init_tools=init_tools,
     )
