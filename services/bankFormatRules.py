@@ -4,6 +4,9 @@ Bank-specific format rules for PDF statement parsing.
 Maps sender domains to bank identifiers and provides bank-specific
 parsing instructions that get injected into the Claude agent's prompt.
 """
+import html
+import re
+from email.utils import parseaddr
 
 # Maps sender email domain → bank identifier
 DOMAIN_TO_BANK = {
@@ -30,7 +33,50 @@ DOMAIN_TO_BANK = {
     "kotak.com": "KOTAK",
     # SBI
     "sbi.co.in": "SBI",
+    # ak-iu8i (2026-11-24): measured gaps. Every bank's RBI `.bank.in`
+    # domain (a registry only RBI-regulated banks can register in, so
+    # these can't be squatted), Bank of Baroda (never mapped: 0/26
+    # statements ever ingested), Paytm Payments Bank, SBI Card.
+    "icicibank.bank.in": "ICICI_AMAZON_PAY",
+    "yes.bank.in": "YES_BANK_DEBIT",       # Yes Bank's .bank.in switch (regression)
+    "yesbank.bank.in": "YES_BANK_DEBIT",
+    "axisbank.bank.in": "AXIS",
+    "axis.bank.in": "AXIS",
+    "kotak.bank.in": "KOTAK",
+    "kotakbank.bank.in": "KOTAK",
+    "sbi.bank.in": "SBI",
+    "onlinesbi.sbi": "SBI",
+    "bankofbaroda.com": "BOB",
+    "bankofbaroda.co.in": "BOB",
+    "bankofbaroda.in": "BOB",
+    "bankofbaroda.bank.in": "BOB",
+    "bobfinancial.com": "BOB",            # BoB credit cards
+    "paytmbank.com": "PAYTM",             # Payments Bank only, NOT paytm.com
+    "paytmbank.bank.in": "PAYTM",
+    "sbicard.com": "SBI_CARD",
 }
+
+_ADDR_RE = re.compile(r"[\w.+'-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+
+
+def sender_domain(sender):
+    """ak-iu8i: the lower-cased domain of a From header, or "".
+
+    Handles what the raw split('@') missed: HTML-escaped headers
+    (`&quot;HDFC&quot; &lt;alerts@hdfcbank.net&gt;`), display names
+    containing '@', trailing dots and angle brackets. A display-name-only
+    sender ("HDFC Bank") has NO domain: the name is attacker-chosen, so it
+    is never used to guess a bank.
+    """
+    if not sender:
+        return ""
+    text = html.unescape(str(sender)).strip()
+    _name, addr = parseaddr(text)
+    domain = addr.rsplit("@", 1)[1] if "@" in addr else ""
+    if not domain:
+        m = _ADDR_RE.search(text)
+        domain = m.group(1) if m else ""
+    return domain.strip().strip("<>").rstrip(".").lower()
 
 # Bank-specific parsing instructions injected into the chunk prompt.
 # These describe the column format and sign/date rules for each bank.
@@ -95,9 +141,9 @@ def get_bank_from_sender(sender_email):
     hint got injected into the LLM prompt ("Use bank=\"UNKNOWN\"...")
     and stamped onto fileDetails.bank — the visible ak-x6p symptom.
     """
-    if "@" not in sender_email:
+    domain = sender_domain(sender_email)
+    if not domain:
         return "UNKNOWN"
-    domain = sender_email.split("@")[-1].strip().rstrip(">").lower()
     # Exact match — preserves prior behavior for senders whose
     # domain IS the canonical key (e.g. `noreply@hdfcbank.net`).
     if domain in DOMAIN_TO_BANK:
@@ -135,7 +181,7 @@ def get_banks_for_domain(sender_domain):
     """
     if not sender_domain:
         return []
-    domain = sender_domain.strip().rstrip(">").lower()
+    domain = str(sender_domain).strip().strip("<>").rstrip(".").lower()
     if not domain:
         return []
     matched = []

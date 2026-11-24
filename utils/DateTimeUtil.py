@@ -72,6 +72,46 @@ datetime_formats = [
 ]
 
 
+# ak-iu8i: formats that can't be read two ways.
+_ISO_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+_MONTH_NAME_FORMATS = (
+    "%d %b %Y %H:%M:%S", "%d %B %Y %H:%M:%S", "%d %b %Y", "%d %B %Y",
+    "%b %d, %Y", "%d-%b-%Y", "%d-%b-%y", "%d-%B-%Y", "%d %b %y",
+)
+# Day-first numeric: unambiguous ONLY when day > 12 or day == month, and
+# only with a 4-digit year: '26-11-24' is DD-MM-YY or YY-MM-DD.
+_DAY_FIRST_NUMERIC_FORMATS = (
+    "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+    "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y",
+)
+
+
+def parse_unambiguous_date(date_str):
+    """datetime, or None when the string is unparseable OR ambiguous.
+
+    Accepts ISO yyyy-mm-dd, month-name dates (24-Nov-2026, 24 Nov 2026,
+    Nov 24, 2026) and day-first numeric dates with a 4-digit year whose
+    day > 12 (or equals the month). Rejects e.g. '05/06/2026' (5 June or
+    6 May) and any 2-digit-year numeric date ('26-11-24' is DD-MM-YY or
+    YY-MM-DD).
+    """
+    if not isinstance(date_str, str) or not date_str.strip():
+        return None
+    s = date_str.strip()
+    for fmt in _ISO_FORMATS + _MONTH_NAME_FORMATS:
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    for fmt in _DAY_FIRST_NUMERIC_FORMATS:
+        try:
+            d = datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        return d if (d.day > 12 or d.day == d.month) else None
+    return None
+
+
 class DateTimeUtil:
 
     @staticmethod
@@ -101,27 +141,39 @@ class DateTimeUtil:
         return first_day_formatted, last_day_formatted
 
     def convert_to_sql_datetime(self, date_str, bank):
-        # Try format and return the correctly parsed datetime in SQL format
-        try:
-            parsed_date = datetime.datetime.strptime(date_str, getattr(DateStatementEnum, bank).value)
-            return parsed_date.strftime("%Y-%m-%d %H:%M:%S")  # SQL datetime format
-        except ValueError:
-            possible_format = self.find_matching_format(date_str)
-            if possible_format is not None:
-                parsed_date = datetime.datetime.strptime(date_str, possible_format)
-                return parsed_date.strftime("%Y-%m-%d %H:%M:%S")  # SQL datetime format
-            raise ValueError(f"Date format of '{date_str}' is not recognized.")
+        """Parsed date in SQL datetime format (see _parse_for_bank)."""
+        return self._parse_for_bank(date_str, bank).strftime("%Y-%m-%d %H:%M:%S")
 
     def convert_to_sql_datetime_date(self, date_str, bank):
-        # Try each format and return the correctly parsed datetime object
+        """Parsed datetime object (see _parse_for_bank)."""
+        return self._parse_for_bank(date_str, bank)
+
+    def _parse_for_bank(self, date_str, bank):
+        """Known bank (a DateStatementEnum member): its format, then the
+        app's day-first fallback list (unchanged behaviour).
+
+        ak-iu8i: an UNKNOWN bank used to raise AttributeError on every
+        row. It now gets ONLY unambiguous parses (parse_unambiguous_date).
+        A numeric date that could be dd/mm or mm/dd is REJECTED, never
+        guessed: a day/month swap silently books a transaction on the
+        wrong date, a critical accounting error. The row then fails
+        loudly and the email is retried.
+        """
+        member = getattr(DateStatementEnum, bank, None) if isinstance(bank, str) else None
+        if member is None:
+            parsed = parse_unambiguous_date(date_str)
+            if parsed is None:
+                raise ValueError(
+                    f"date is ambiguous or unrecognised for unknown bank {bank!r}; "
+                    f"day/month order is not guessed"
+                )
+            return parsed
         try:
-            parsed_date = datetime.datetime.strptime(date_str, getattr(DateStatementEnum, bank).value)
-            return parsed_date
+            return datetime.datetime.strptime(date_str, member.value)
         except ValueError:
             possible_format = self.find_matching_format(date_str)
             if possible_format is not None:
-                parsed_date = datetime.datetime.strptime(date_str, possible_format)
-                return parsed_date  # Return datetime object for consistency
+                return datetime.datetime.strptime(date_str, possible_format)
             raise ValueError(f"Date format of '{date_str}' is not recognized.")
 
     def getMonthYearRange(self, date1, date2, bank) -> str:

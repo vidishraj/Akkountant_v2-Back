@@ -16,6 +16,10 @@ from utils.firebase_id_validator import (
 from utils.logger import Logger
 
 
+class TransactionInsertError(RuntimeError):
+    """ak-iu8i: insertTransactions wrote nothing (not a duplicate)."""
+
+
 class TransactionService(BaseService):
     _instance = None
 
@@ -358,9 +362,19 @@ class TransactionService(BaseService):
                     self.logger.info(f"Skipped {len(conflicts)} duplicate conflicts")
                     
         except Exception as e:
-            self.logger.error(f"Error in batch insert: {str(e)}")
+            # ak-iu8i: this used to log and return integrityErrors (0),
+            # so a batch where NO row was written (e.g. every date failed
+            # to parse) reported "all inserted" and the statement was
+            # stamped processed with zero rows. Fail loudly instead; the
+            # mail tool reports an error, its chunk fails and the email
+            # is retried. Only the exception type is logged (row values
+            # are personal financial data).
+            self.logger.error(f"Error in batch insert ({type(e).__name__}); nothing was written")
             self.db.session.rollback()
-            
+            raise TransactionInsertError(
+                f"transaction insert failed ({type(e).__name__}); nothing was written"
+            ) from e
+
         return integrityErrors
 
     def _insert_transactions_individually(self, transaction_objects):

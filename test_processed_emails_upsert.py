@@ -109,11 +109,15 @@ class TestStatusMap(unittest.TestCase):
     def test_error_maps_to_failed(self):
         self.assertEqual(map_tool_status_to_db("error"), "failed")
 
-    def test_none_defaults_to_processed(self):
-        self.assertEqual(map_tool_status_to_db(None), "processed")
+    # ak-iu8i: fail-safe. An unknown/missing status used to become
+    # 'processed' (never retried); it is now 'failed' (retried).
+    def test_none_defaults_to_failed(self):
+        self.assertEqual(map_tool_status_to_db(None), "failed")
+        self.assertEqual(map_tool_status_to_db(""), "failed")
 
-    def test_unknown_defaults_to_processed(self):
-        self.assertEqual(map_tool_status_to_db("foo"), "processed")
+    def test_unknown_defaults_to_failed(self):
+        self.assertEqual(map_tool_status_to_db("foo"), "failed")
+        self.assertEqual(map_tool_status_to_db("partial"), "failed")
 
 
 # ── upsert: insert path ─────────────────────────────────────────────

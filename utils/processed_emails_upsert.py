@@ -132,11 +132,15 @@ def _merge_retry_counter(old_summary, new_summary, db_status):
 
 
 def map_tool_status_to_db(tool_status: Optional[str]) -> str:
-    """Public tool-status → DB-status map. Unknown / missing → 'processed'
-    (matches pre-ak-bwe fallback in _handle_report_result)."""
+    """Public tool-status → DB-status map.
+
+    ak-iu8i: unknown / missing → 'failed' (fail-safe). It used to default
+    to 'processed', so any unexpected status permanently skipped the
+    email; 'failed' is retried next run.
+    """
     if not tool_status:
-        return "processed"
-    return _STATUS_MAP.get(tool_status, "processed")
+        return "failed"
+    return _STATUS_MAP.get(tool_status, "failed")
 
 
 def upsert_processed_email(

@@ -412,7 +412,7 @@ class MailProcessorService:
 
             # 3. Classify remaining emails via Claude (Agent-1)
             report({"stage": "classifying", "status": "processing"})
-            financial_emails = self._classify_emails(unprocessed)
+            financial_emails = self._classify_emails(unprocessed, user_id=user_id)
             summary["financial_emails"] = len(financial_emails)
             self.logger.info(f"Agent-1 classified {len(financial_emails)} financial emails")
             report({"stage": "classified", "emails_classified": len(financial_emails)})
@@ -464,13 +464,13 @@ class MailProcessorService:
 
     @staticmethod
     def _extract_domain(sender):
-        """Extract domain from sender string like 'Bank <noreply@hdfcbank.net>'."""
-        if "@" in sender:
-            # Handle "Name <email@domain>" format
-            at_part = sender.split("@")[-1]
-            # Remove any trailing > or whitespace
-            return at_part.strip().rstrip(">").lower()
-        return ""
+        """Extract domain from sender string like 'Bank <noreply@hdfcbank.net>'.
+
+        ak-iu8i: the shared normaliser (HTML-unescape + parseaddr), so
+        escaped headers resolve the same way the bank map does.
+        """
+        from services.bankFormatRules import sender_domain
+        return sender_domain(sender)
 
     @staticmethod
     def _lookup_domain_map(domain_map, sender_domain):
@@ -511,7 +511,7 @@ class MailProcessorService:
 
     # ── Agent-1: Claude-powered classification ─────────────────────
 
-    def _classify_emails(self, all_emails):
+    def _classify_emails(self, all_emails, user_id=None):
         """
         Agent-1: Classify ALL emails via Claude haiku (no tools, pure text→JSON).
         Returns only the emails classified as financial, with '_category' attached.
@@ -537,6 +537,7 @@ class MailProcessorService:
 
             try:
                 classified = self._run_classification_batch(batch)
+                returned = set()
                 for item in classified:
                     gid = item.get("gmail_id")
                     category = item.get("category", "unknown")
@@ -544,12 +545,52 @@ class MailProcessorService:
                         email = email_lookup[gid]
                         email["_category"] = category
                         financial_emails.append(email)
+                        returned.add(gid)
+                # ak-iu8i: emails the classifier left out (non-financial)
+                # used to leave NO processedEmails row, so a dropped
+                # statement was invisible. Record them as skipped /
+                # 'not_financial' (only for a batch that classified
+                # successfully; a failed batch records nothing).
+                for e in batch:
+                    gid = e.get("gmail_id") or e.get("message_id")
+                    if gid and gid not in returned:
+                        self._record_not_financial(e, user_id)
             except Exception as e:
                 self.logger.error(
                     f"Classification batch {batch_num} failed: {e}", exc_info=True
                 )
 
         return financial_emails
+
+    def _record_not_financial(self, email, user_id):
+        """ak-iu8i: stamp a classifier-dropped email skipped/not_financial,
+        and WARN when a known bank sent it with a PDF (a likely dropped
+        statement)."""
+        from services.bankFormatRules import get_bank_from_sender, sender_domain
+        gid = email.get("gmail_id") or email.get("message_id")
+        if get_bank_from_sender(email.get("sender") or "") != "UNKNOWN" and email.get("_has_pdf"):
+            self.logger.warning(
+                f"[ak-iu8i] known-bank PDF email classified NON-financial: "
+                f"gmail_id={gid!r} domain={sender_domain(email.get('sender'))!r}; "
+                f"recorded as skipped/not_financial"
+            )
+        if not user_id:
+            return
+        # Never overwrite a real outcome: an existing 'failed' row (with
+        # its reason in error_message) or any non-skipped row is kept.
+        try:
+            from models.processedEmails import ProcessedEmails
+            row = self.transaction_service.db.session.query(ProcessedEmails).filter_by(
+                gmail_id=gid, user_id=user_id).first()
+            if row is not None and row.status != "skipped":
+                return
+        except Exception as e:
+            self.logger.warning(f"[ak-iu8i] not_financial lookup failed ({type(e).__name__}); not stamping")
+            return
+        self._stamp_processed_email(
+            dict(email, _processing_type="pdf" if email.get("_has_pdf") else "text"),
+            user_id, category="not_financial", status="skipped",
+        )
 
     def _run_classification_batch(self, batch):
         """
@@ -1814,6 +1855,10 @@ class MailProcessorService:
             "icicibank.co.in": ["ICICI_AMAZON_PAY"],
             "yesbank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
             "yesbank.co.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+            # ak-iu8i: Yes / ICICI .bank.in switch.
+            "yes.bank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+            "yesbank.bank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+            "icicibank.bank.in": ["ICICI_AMAZON_PAY"],
             "bankofindia.co.in": ["BOI"],
             "bankofindia.com": ["BOI"],
             # ak-2ql: 2026-03-07 RBI-mandated `.bank.in` TLD migration
@@ -1830,6 +1875,12 @@ class MailProcessorService:
             # `noreply-estatement@alerts.bankofindia.bank.in` still
             # resolve to the BOI password candidates.
             bank_names = self._lookup_domain_map(domain_to_bank, domain)
+            if not bank_names:
+                # ak-iu8i: banks without an order hint here (SBI, BoB,
+                # Paytm, Axis, Kotak, SBI Card) use the shared map, so a
+                # stored password for them is actually tried.
+                from services.bankFormatRules import get_banks_for_domain
+                bank_names = get_banks_for_domain(domain)
             for bank_name in bank_names:
                 pw = self.transaction_service.db.session.query(StatementPasswords).filter_by(
                     user=user_id, bank=bank_name
