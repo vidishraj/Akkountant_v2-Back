@@ -1652,6 +1652,10 @@ class TransactionService(BaseService):
                 "sender": row.sender,
                 "subject": row.subject,
                 "has_pdf": has_pdf,
+                # ak-vheo: "pdf" | "text" | None (legacy rows). has_pdf only
+                # says the file is on disk; a failed PDF often has none, so
+                # the FE needs this to offer Retry on failed TEXT rows (ak-788j).
+                "processing_type": row.processing_type,
                 "user": userId,
                 "period_start": period_record.period_start.isoformat() if period_record and period_record.period_start else None,
                 "period_end": period_record.period_end.isoformat() if period_record and period_record.period_end else None,
