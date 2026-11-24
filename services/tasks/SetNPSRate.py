@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal
 from datetime import timedelta
 
@@ -5,7 +6,8 @@ import pandas as pd
 
 from services.tasks.BaseRateTask import BaseRateTask
 from services.tasks.npsSchemeDownload import (
-    DEAD_SCHEME_IDS, OK, DownloadTally, download_scheme_tsv, scheme_ids,
+    DEAD_SCHEME_IDS, OK, DownloadTally, download_scheme_tsv, full_probe_due,
+    scheme_ids,
 )
 from utils.logger import Logger
 
@@ -28,8 +30,15 @@ _NPS_MIN_SUCCESS_RATIO = 0.05
 _NPS_COVERAGE_HARD_FLOOR = 0.05
 
 
+# ak-vibs: injectable probe clock (see SetNPSDetails).
+_now = time.time
+
+
 class SetNPSRate(BaseRateTask):
     _instance = None
+    # ak-vibs: rates also re-probe the dead ids at most daily, so a revived
+    # scheme gets a rate (it used to be skipped forever).
+    _last_full_probe = 0.0
 
     # ak-2r8: BaseRateTask contract.
     _rate_filename = 'NPSRATE.json'
@@ -91,12 +100,16 @@ class SetNPSRate(BaseRateTask):
         all_rates = []
         total_hist_upserted = 0
         hist_errors = 0
-        # ak-4caa: rates skip the known-dead ids every run (SetNPSDetails
-        # re-probes them daily and WARNs if one revives).
-        tally = DownloadTally(skipped_dead=len(DEAD_SCHEME_IDS))
+        # ak-4caa: skip the known-dead ids; ak-vibs: except on a full probe
+        # at most daily, so a revived scheme gets its rate (+ a WARN).
+        now = _now()
+        full_probe = full_probe_due(self._last_full_probe, now)
+        if full_probe:
+            self._last_full_probe = now
+        tally = DownloadTally(skipped_dead=0 if full_probe else len(DEAD_SCHEME_IDS))
 
         # 14 PFMs x 16 schemes (ak-4caa: shared, classified download).
-        for pfm_id, scheme_id in scheme_ids():
+        for pfm_id, scheme_id in scheme_ids(include_dead=full_probe):
             try:
                 excel_data, outcome, reason = download_scheme_tsv(
                     pfm_id, scheme_id, self.logger)

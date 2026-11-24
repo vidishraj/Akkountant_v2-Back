@@ -50,6 +50,10 @@ DEAD_SCHEME_IDS = frozenset({
     "SM012014", "SM012015", "SM012016",
 })
 FULL_PROBE_INTERVAL_S = 24 * 3600
+# ak-vibs: refuse to replace the scheme list when it would shrink below
+# this fraction of the previous list (a source-side wipe can look like
+# "absent" empty bodies, which aren't errors).
+MIN_KEEP_RATIO = 0.8
 
 
 def scheme_ids(include_dead=False):
@@ -61,6 +65,52 @@ def scheme_ids(include_dead=False):
             scheme_id = f"SM0{pfm_num:02d}{scheme_num:03d}"
             if include_dead or scheme_id not in DEAD_SCHEME_IDS:
                 yield pfm_id, scheme_id
+
+
+def full_probe_due(last_probe, now):
+    """True when the dead ids should be probed this run (at most every
+    FULL_PROBE_INTERVAL_S; 0/None = never probed → due)."""
+    return now - (last_probe or 0.0) >= FULL_PROBE_INTERVAL_S
+
+
+def merge_scheme_lists(new_schemes, previous_schemes, error_ids=(), error_pfms=(),
+                       absent_ids=(), accept_shrink=False):
+    """ak-vibs: the scheme list to publish, or (None, reason) to keep the
+    previous file.
+
+    * Carry-over is TARGETED (review minor 1): a previous entry missing
+      from the new list is kept only if this run couldn't see it, i.e.
+      its own id ERRORED, or its PFM had a request ERROR and the id
+      wasn't confirmed absent this run. (Entries can be successor ids that
+      arrive inside another scheme's file, so the PFM is the unit for
+      them.) A scheme removed upstream is therefore dropped as soon as its
+      PFM answers cleanly; one chronically failing scheme pins only its
+      own PFM's entries, never the whole list.
+    * A result smaller than MIN_KEEP_RATIO x the previous list is refused
+      (an outage or format change is far likelier than mass closures),
+      unless accept_shrink (operator override for a genuine restructure).
+    Returns (schemes | None, carried_over_count, reason | None).
+    """
+    prev = [s for s in (previous_schemes or []) if isinstance(s, dict) and s.get("id")]
+    merged = list(new_schemes)
+    carried = 0
+    error_ids, error_pfms, absent_ids = set(error_ids), set(error_pfms), set(absent_ids)
+    if prev and (error_ids or error_pfms):
+        have = {s.get("id") for s in merged}
+        for s in prev:
+            sid = s["id"]
+            if sid in have:
+                continue
+            unseen = sid in error_ids or (
+                s.get("pfm_id") in error_pfms and sid not in absent_ids)
+            if unseen:
+                merged.append(s)
+                have.add(sid)
+                carried += 1
+    if prev and not accept_shrink and len(merged) < MIN_KEEP_RATIO * len(prev):
+        return None, carried, (f"scheme list would shrink from {len(prev)} to "
+                               f"{len(merged)} (< {int(MIN_KEEP_RATIO * 100)}%)")
+    return merged, carried, None
 
 
 def download_scheme_tsv(pfm_id, scheme_id, logger, get=requests.get):
@@ -104,11 +154,19 @@ class DownloadTally:
     def __init__(self, skipped_dead=0):
         self.counts = {OK: 0, ABSENT: 0, ERROR: 0}
         self.errors = []
+        self.error_ids = set()
+        self.error_pfms = set()
+        self.absent_ids = set()
         self.revived = []
         self.skipped_dead = skipped_dead
 
     def add(self, pfm_id, scheme_id, outcome, reason):
         self.counts[outcome] += 1
+        if outcome == ERROR:
+            self.error_ids.add(scheme_id)
+            self.error_pfms.add(pfm_id)
+        elif outcome == ABSENT:
+            self.absent_ids.add(scheme_id)
         if outcome == ERROR and len(self.errors) < 5:
             self.errors.append(f"{pfm_id}/{scheme_id}: {reason}")
         if outcome == OK and scheme_id in DEAD_SCHEME_IDS:

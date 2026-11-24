@@ -4,8 +4,8 @@ from services.tasks.baseTask import BaseTask
 import time
 
 from services.tasks.npsSchemeDownload import (
-    DEAD_SCHEME_IDS, FULL_PROBE_INTERVAL_S, OK, DownloadTally,
-    download_scheme_tsv, scheme_ids,
+    DEAD_SCHEME_IDS, OK, DownloadTally, download_scheme_tsv,
+    full_probe_due, merge_scheme_lists, scheme_ids,
 )
 from utils.logger import Logger
 
@@ -45,6 +45,34 @@ class SetNPSDetails(BaseTask):
                 self.logger.error(f"[ak-4caa] SetNPSDetails: {msg}")
                 return msg, "Failed", self.interval
 
+            # ak-vibs: a partial outage (some downloads ERROR'd) must not
+            # shrink the published list. Carry previous entries over for
+            # it, and refuse any big shrink outright.
+            accept_shrink = os.environ.get("NPS_ACCEPT_SHRINK") == "1"
+            schemes, carried, refuse = merge_scheme_lists(
+                jsonData["data"], self._previous_schemes(),
+                error_ids=jsonData.get("download_error_ids") or (),
+                error_pfms=jsonData.get("download_error_pfms") or (),
+                absent_ids=jsonData.get("download_absent_ids") or (),
+                accept_shrink=accept_shrink)
+            if refuse:
+                # Review minor 2: "Completed", not "Failed". Repeated
+                # Failed stops the scheduler rescheduling the job, which
+                # would kill it on a genuine NPS restructure. Keep the
+                # previous list, log ERROR; an operator accepts a real
+                # restructure once with NPS_ACCEPT_SHRINK=1.
+                msg = (f"{refuse}: kept the previous list (set NPS_ACCEPT_SHRINK=1 for one "
+                       f"run to accept a genuine restructure). {jsonData.get('download_summary', '')}")
+                self.logger.error(f"[ak-vibs] SetNPSDetails: {msg}")
+                return msg, "Completed", self.interval
+            if accept_shrink:
+                self.logger.warning("[ak-vibs] SetNPSDetails: NPS_ACCEPT_SHRINK=1 set; shrink guard bypassed")
+            if carried:
+                self.logger.warning(
+                    f"[ak-vibs] SetNPSDetails: {carried} scheme(s) kept from the previous "
+                    f"list because some downloads failed this run")
+            jsonData = dict(jsonData, data=schemes, total_schemes=len(schemes))
+
             filePath = os.path.join(self.tmp_dir, 'NPSDetails.json')
             try:
                 os.remove(filePath)
@@ -59,6 +87,15 @@ class SetNPSDetails(BaseTask):
         except Exception as ex:
             return ex.__str__(), "Failed", self.interval
 
+    def _previous_schemes(self):
+        """The currently published scheme list, or [] (never raises)."""
+        try:
+            data = self.jsonService.getNPSList()
+            return data.get("data", []) if isinstance(data, dict) else []
+        except Exception as e:
+            self.logger.warning(f"[ak-vibs] previous NPS list unreadable ({type(e).__name__})")
+            return []
+
     def fetchNPSDetailsFromExcel(self):
         """
         Fetch NPS scheme details by downloading Excel files from npstrust.org.in
@@ -70,7 +107,7 @@ class SetNPSDetails(BaseTask):
         # at most once per FULL_PROBE_INTERVAL_S, so a revived scheme is
         # still discovered (tally WARNs to drop it from the list).
         now = _now()
-        full_probe = now - (self._last_full_probe or 0.0) >= FULL_PROBE_INTERVAL_S
+        full_probe = full_probe_due(self._last_full_probe, now)
         if full_probe:
             self._last_full_probe = now
         tally = DownloadTally(skipped_dead=0 if full_probe else len(DEAD_SCHEME_IDS))
@@ -127,6 +164,10 @@ class SetNPSDetails(BaseTask):
             "total_schemes": len(unique_schemes),
             "successful_pfms": successful_downloads,
             "download_summary": tally.summary(),
+            "download_errors": len(tally.error_ids),
+            "download_error_ids": sorted(tally.error_ids),
+            "download_error_pfms": sorted(tally.error_pfms),
+            "download_absent_ids": sorted(tally.absent_ids),
         }
     
     def extractSchemesFromExcel(self, excel_data, pfm_id):

@@ -211,6 +211,9 @@ class TestSetNPSRate(unittest.TestCase):
         t.logger = LOG
         t.db = mock.MagicMock()
         t._persist_historical_rows = mock.MagicMock(return_value=0)
+        # Singleton: pin "probed just now", so a run skips the dead ids
+        # (ak-vibs added an at-most-daily full probe to the rate task).
+        t._last_full_probe = RATE._now()
         return t
 
     def test_rates_from_real_schemes_and_loud_when_none(self):
