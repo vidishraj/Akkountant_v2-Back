@@ -941,20 +941,67 @@ class TestWealthDigestGrounding(unittest.TestCase):
                 f"_DIGEST_ALLOWED_TOOLS missing wrapper: {wrapper}"
             ))
 
-    def test_digest_max_turns_bumped_to_6(self):
-        """Pre-ak-p8ix was max_turns=3; bumped to 6 for the web-
-        lookup loop + synthesis + schema-error retry headroom."""
-        self.assertIn("max_turns=6", self.src)
-        # Negative: the pre-ak-p8ix literal must be gone from the
-        # options block (may still appear in comments describing
-        # the bump).
-        m = re.search(
-            r"options\s*=\s*ClaudeAgentOptions\((.*?)\)",
-            self.src, re.DOTALL,
-        )
-        self.assertIsNotNone(m)
-        options_block = m.group(1)
-        self.assertNotIn("max_turns=3", options_block)
+    def test_digest_turn_budget_and_synthesis_shape(self):
+        """ak-p8ix bumped max_turns 3 -> 6; ak-lwed found 6 was spent
+        entirely on research tools (StructuredOutput is itself a turn),
+        so the research run now gets _DIGEST_RESEARCH_TOOL_BUDGET + 8
+        = 18 turns and a tool-free synthesis fallback runs with 4.
+        AST-based (no regex over call text) so formatting/comments can't
+        fake a pass: finds the TWO ClaudeAgentOptions(...) calls inside
+        _invoke_agent's build_options() and evaluates the budget
+        constants."""
+        tree = ast.parse(self.src)
+        consts = {}
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id.startswith("_DIGEST_")
+                    and node.targets[0].id.endswith(("_BUDGET", "_TURNS"))):
+                consts[node.targets[0].id] = eval(
+                    compile(ast.Expression(node.value), "<c>", "eval"),
+                    {}, dict(consts))
+        self.assertEqual(consts.get("_DIGEST_MAX_TURNS"), 18, consts)
+        self.assertEqual(consts.get("_DIGEST_SYNTHESIS_MAX_TURNS"), 4, consts)
+        self.assertGreaterEqual(
+            consts["_DIGEST_MAX_TURNS"],
+            consts["_DIGEST_RESEARCH_TOOL_BUDGET"] + 4)
+
+        build = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "build_options")
+        calls = [
+            n for n in ast.walk(build)
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "id", None) == "ClaudeAgentOptions"
+        ]
+        self.assertEqual(len(calls), 2, "expected research + synthesis options")
+
+        def kw(call):
+            return {k.arg: k.value for k in call.keywords if k.arg}
+
+        def restricted_arg(call):
+            star = [k.value for k in call.keywords if k.arg is None]
+            self.assertEqual(len(star), 1)
+            self.assertEqual(getattr(star[0].func, "id", None),
+                             "restricted_tool_options")
+            return ast.unparse(star[0].args[0])
+
+        by_turns = {ast.unparse(kw(c)["max_turns"]): c for c in calls}
+        self.assertEqual(set(by_turns),
+                         {"_DIGEST_MAX_TURNS", "_DIGEST_SYNTHESIS_MAX_TURNS"})
+        research = by_turns["_DIGEST_MAX_TURNS"]
+        synth = by_turns["_DIGEST_SYNTHESIS_MAX_TURNS"]
+        # Research: MCP wrappers + exactly the digest allowlist.
+        self.assertIn("mcp_servers", kw(research))
+        self.assertEqual(restricted_arg(research), "_DIGEST_ALLOWED_TOOLS")
+        self.assertIn("output_format", kw(research))
+        # Synthesis: no MCP servers, no tools, still structured output.
+        self.assertEqual(ast.unparse(kw(synth)["mcp_servers"]), "{}")
+        self.assertEqual(restricted_arg(synth), "[]")
+        self.assertIn("output_format", kw(synth))
+        # The pre-ak-lwed literal budgets must not be used in options.
+        for c in calls:
+            self.assertNotIsInstance(kw(c)["max_turns"], ast.Constant)
 
     def test_digest_registers_mcp_server(self):
         """The 5 wrappers can only reach the model via an MCP server;
