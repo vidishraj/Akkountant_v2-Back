@@ -12,6 +12,9 @@ from models.savedTags import SavedTags
 # db.create_all() on next boot.
 from models.transactionNote import TransactionNote
 from models.statementPasswords import StatementPasswords
+# ak-erkm: cross-worker confirm-token single-use state. New table:
+# created by db.create_all() on next boot, no ALTER prereq.
+from models.confirmTokenState import ConfirmTokenState
 from models.googleTokens import UserToken
 from models.securities import SoldSecurities
 from models.depositSecurities import DepositSecurities

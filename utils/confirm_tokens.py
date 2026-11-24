@@ -33,12 +33,12 @@ Fail-closed invariants:
     just downgraded to the pre-ak-dixt shape. Loud WARN on both
     issue + verify so operator sees the missing-config state.
   * Any parse/signature/user/args/expiry mismatch → False.
-  * One-time-use: verified tokens register in an in-process LRU-
-    bounded dict keyed on a token-digest; replay within TTL fails.
-    Gunicorn multi-worker caveat: a replay that hits a different
-    worker bypasses the dedup — residual risk mitigated by the 300s
-    TTL. Follow-up ak-TBD files a DB-backed durable dedup if we
-    ever need multi-user hardening.
+  * One-time-use (ak-erkm): a verified or revoked token's payload
+    nonce is recorded with ONE atomic INSERT into the confirmTokenStates
+    table (unique nonce; utils/confirm_token_store.py), so a replay
+    fails in EVERY gunicorn worker. DB error -> refused (fail-closed).
+    Outside a Flask app context (unit tests / CLI) the in-process
+    LRU-bounded dict below is used instead.
 
 Related: §23 #5 destructive-gate (confirm-id echo pattern).
 Precedent: ak-x74g WARN→verify_only Firebase migration dual-accept
@@ -164,6 +164,35 @@ def _prune_consumed_locked(now: int) -> None:
         _consumed.popitem(last=False)
 
 
+def _mark_used(nonce: str, uid: str, tool: str, exp: int, state: str) -> bool:
+    """ak-erkm: atomically move a token from live to used. True iff THIS
+    call did it. With an app context the state lives in the DB
+    (confirmTokenStates, unique nonce) so it holds across gunicorn
+    workers; outside one (unit tests / CLI) the in-process set is used."""
+    from utils.confirm_token_store import current_store
+    store = current_store()
+    if store is not None:
+        return store.mark(nonce, uid, tool, exp, state)
+    now = int(time.time())
+    with _consumed_lock:
+        _prune_consumed_locked(now)
+        if nonce in _consumed:
+            return False
+        _consumed[nonce] = exp
+    return True
+
+
+def _is_used(nonce: str):
+    """ak-erkm: True / False, or None if the shared store can't be read."""
+    from utils.confirm_token_store import current_store
+    store = current_store()
+    if store is not None:
+        return store.is_used(nonce)
+    with _consumed_lock:
+        _prune_consumed_locked(int(time.time()))
+        return nonce in _consumed
+
+
 def verify_confirm_token(
     token: str,
     expected_tool: str,
@@ -254,12 +283,8 @@ def verify_confirm_token(
     nonce = payload.get("nonce")
     if not isinstance(nonce, str) or not nonce:
         return False
-    with _consumed_lock:
-        _prune_consumed_locked(now)
-        if nonce in _consumed:
-            return False
-        _consumed[nonce] = exp
-    return True
+    # ak-erkm: atomic, cross-worker (DB) check-and-mark.
+    return _mark_used(nonce, user_id, expected_tool, exp, "consumed")
 
 
 def _decode_live(token, user_id):
@@ -286,10 +311,12 @@ def _decode_live(token, user_id):
         now = int(time.time())
         if exp <= now:
             return None
-        with _consumed_lock:
-            _prune_consumed_locked(now)
-            if nonce in _consumed:
-                return None
+        used = _is_used(nonce)
+        if used:
+            return None
+        # used is None: the shared store couldn't be read. Report the
+        # token as live (peek -> the bound-args gate still applies;
+        # revoke -> its own mark fails closed).
         return tool, nonce, exp
     except Exception:
         return None
@@ -313,20 +340,15 @@ def revoke_confirm_token(token: str, user_id: str) -> Optional[str]:
     args: the caller doesn't have them). Returns the token's tool name
     on success, None otherwise. Never raises.
 
-    LIMIT (ak-erkm): like one-time-use itself, the consumed set is
-    in-process. With several gunicorn workers a revoked token re-sent
-    to ANOTHER worker within its TTL is still live there. Revocation is
-    therefore best-effort until ak-erkm moves the set to the DB; the FE
-    never re-sends a cancelled confirm_id.
+    ak-erkm: revocation and one-time-use share the DB-backed state, so a
+    revoked token is dead in EVERY gunicorn worker.
     """
     live = _decode_live(token, user_id)
     if not live:
         return None
     tool, nonce, exp = live
-    with _consumed_lock:
-        if nonce in _consumed:
-            return None
-        _consumed[nonce] = exp
+    if not _mark_used(nonce, user_id, tool, exp, "revoked"):
+        return None
     return tool
 
 
