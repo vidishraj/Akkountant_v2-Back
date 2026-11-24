@@ -36,6 +36,28 @@ NO_ROWS = "no_rows"
 # SDK's in-process tool handlers inherit the same dict.
 LANDED_ROWS: ContextVar = ContextVar("ak_fc7z_landed_rows", default=None)
 
+# ak-zejx: referenceIDs written for the statement being ingested RIGHT NOW
+# (set by _process_single_pdf_email / reprocess_pdf around one email). Rows
+# of the same statement that are NOT in it came from an EARLIER run, so the
+# batch insert can recognise a re-ingest copy independently of the bank id
+# (the referenceID hash folds the bank in; see
+# mailProcessorToolExecutor._drop_previous_run_copies).
+STATEMENT_RUN_REFS: ContextVar = ContextVar("ak_zejx_statement_run_refs", default=None)
+# Earlier-run rows a skipped incoming row already matched are recorded in
+# the same set as (_CONSUMED, referenceID) markers, so every chunk / call
+# sharing the run sees them (tuples never collide with string refs).
+_CONSUMED = "ak_zejx_consumed_prior"
+
+
+def consumed_prior_refs(run_refs):
+    """Earlier-run referenceIDs already matched in this run."""
+    return {e[1] for e in (run_refs or ()) if isinstance(e, tuple) and e[:1] == (_CONSUMED,)}
+
+
+def mark_prior_consumed(run_refs, refs):
+    if run_refs is not None:
+        run_refs.update((_CONSUMED, r) for r in refs if r)
+
 
 def add_landed(result):
     """Count an insert result's landed rows into the current email."""

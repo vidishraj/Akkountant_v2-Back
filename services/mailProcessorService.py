@@ -306,10 +306,19 @@ class MailProcessorService:
         # that ak-1rh (this fix) now consumes to build a structured
         # return.
         self.logger.info(f"Reprocessing PDF {gmail_id} in {processing_mode} mode: {pdf_path}")
-        analysis_summary = self._run_pdf_analysis(
-            pdf_path, email, user_id, password=password,
-            processing_mode=processing_mode, only_chunks=only_chunks,
-        )
+        # ak-zejx: same bank-agnostic re-ingest dedup for a manual reprocess,
+        # but only when ALL chunks run. With only_chunks the other chunks
+        # aren't re-read, so their earlier rows could wrongly absorb an
+        # identical (date, amount, description) row in the retried chunk.
+        _run_refs_token = ingest_outcome.STATEMENT_RUN_REFS.set(
+            set() if not only_chunks else None)
+        try:
+            analysis_summary = self._run_pdf_analysis(
+                pdf_path, email, user_id, password=password,
+                processing_mode=processing_mode, only_chunks=only_chunks,
+            )
+        finally:
+            ingest_outcome.STATEMENT_RUN_REFS.reset(_run_refs_token)
 
         # 5. Check results — find the actual file_id from inserted transactions
         from models.transactions import Transactions
@@ -1214,10 +1223,14 @@ class MailProcessorService:
         landed = {"rows": 0, "recorded": 0}
         _report_token = PDF_REPORT.set(report)
         _landed_token = ingest_outcome.LANDED_ROWS.set(landed)
+        # ak-zejx: refs written by THIS ingest of the statement, so the
+        # batch insert can tell an earlier run's rows (any bank id) apart.
+        _run_refs_token = ingest_outcome.STATEMENT_RUN_REFS.set(set())
         try:
             failures, persisted = self._process_pdf_items(
                 email, user_id, processing_mode, pdf_items, hint_tags, gmail_id)
         finally:
+            ingest_outcome.STATEMENT_RUN_REFS.reset(_run_refs_token)
             ingest_outcome.LANDED_ROWS.reset(_landed_token)
             PDF_REPORT.reset(_report_token)
 

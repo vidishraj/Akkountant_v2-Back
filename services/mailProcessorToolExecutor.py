@@ -96,6 +96,119 @@ def _get_db_session(transaction_service):
     return None
 
 
+def _statement_file_ids(session, user_id, file_id, gmail_id):
+    """The fileIDs of one statement: the resolved file_id plus every
+    fileDetails row recorded for its gmail id (exact join) plus, review
+    minor, the fileIDs on transactions with the anchored ingest shape
+    mail_pipeline_<user>_<BANK>_<gmail_id> (only the bank segment is a
+    wildcard; _ / % escaped), the same linkage the backfill uses."""
+    from models.fileDetails import FileDetails
+    from models.transactions import Transactions
+    ids = {file_id} if file_id else set()
+    if gmail_id:
+        ids |= {r.fileID for r in session.query(FileDetails.fileID).filter(
+            FileDetails.user == user_id, FileDetails.gmail_message_id == gmail_id).all()}
+
+        def esc(v):
+            return str(v).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"mail\\_pipeline\\_{esc(user_id)}\\_%\\_{esc(gmail_id)}"
+        ids |= {r.fileID for r in session.query(Transactions.fileID).filter(
+            Transactions.user == user_id,
+            Transactions.fileID.like(pattern, escape="\\")).distinct().all()}
+    return ids
+
+
+def _drop_previous_run_copies(transaction_service, user_id, bank, file_id, gmail_id, transactions):
+    """ak-zejx: drop incoming statement rows that an EARLIER ingest of the
+    same statement already wrote, whatever bank id either run used.
+
+    The referenceID hash folds the bank in, so re-ingesting a statement
+    under a corrected bank (BOI -> BOB) mints new referenceIDs and the PK
+    dedup misses: the ledger would double-count. Rule, per statement
+    (same gmail id / file):
+      * rows already written in THIS run (statement_ingest_outcome.
+        STATEMENT_RUN_REFS) are not "previous": chunks of one run never
+        dedup against each other, so legit identical rows on different
+        pages stay distinct;
+      * the previous-run rows form a MULTISET of (date, amount,
+        normalised description); an incoming row whose referenceID is
+        not already present consumes a matching slot and is skipped (a
+        previous copy). Two identical previous rows absorb exactly two
+        incoming ones, so legit same-day duplicates are preserved. A
+        consumed slot stays consumed for the whole run (recorded in the
+        run state), so a later chunk can't match the same earlier row;
+      * an incoming row whose referenceID already exists keeps the
+        normal PK path (and uses up its own slot).
+    Only active inside a statement ingest (the ContextVar is set).
+    Returns (rows_to_insert, skipped_count).
+    """
+    from collections import defaultdict
+    from decimal import Decimal as _D
+    from models.transactions import Transactions
+    from utils.reference_id import normalize_description_for_backstop
+    from utils.statement_ingest_outcome import (
+        STATEMENT_RUN_REFS, consumed_prior_refs, mark_prior_consumed)
+
+    run_refs = STATEMENT_RUN_REFS.get()
+    session = _get_db_session(transaction_service)
+    if run_refs is None or session is None or not transactions:
+        return transactions, 0
+    file_ids = _statement_file_ids(session, user_id, file_id, gmail_id)
+    if not file_ids:
+        return transactions, 0
+    existing = session.query(Transactions).filter(
+        Transactions.user == user_id, Transactions.fileID.in_(list(file_ids))).all()
+
+    def key(date_value, amount, description):
+        try:
+            if isinstance(date_value, str):
+                date_value = transaction_service.dateTimeUtil.convert_to_sql_datetime(date_value, bank)
+            day = str(date_value)[:10]
+            amt = _D(str(amount)).quantize(_D("0.01"))
+        except Exception:
+            return None
+        return day, amt, normalize_description_for_backstop(description or "")
+
+    existing_refs = {r.referenceID for r in existing}
+    # Review MAJOR (2nd round): an earlier row a skipped incoming row
+    # consumed stays consumed for the rest of the run (later chunks / calls
+    # rebuild the slots from the DB, so it must be remembered in run state),
+    # else it would absorb a genuine second identical row in a later chunk.
+    consumed = consumed_prior_refs(run_refs)
+    available = defaultdict(list)          # key -> earlier refs not yet consumed
+    key_of_ref = {}
+    for r in existing:
+        if r.referenceID in run_refs or r.referenceID in consumed:
+            continue
+        k = key(r.date, r.amount, r.details)
+        if k is not None:
+            available[k].append(r.referenceID)
+            key_of_ref[r.referenceID] = k
+    keep, skipped, newly_consumed = [], 0, set()
+    for txn in transactions:
+        k = key(txn.get("date"), txn.get("amount"), txn.get("description"))
+        ref = txn.get("reference")
+        if ref in existing_refs:
+            own = key_of_ref.get(ref)
+            if own is not None and ref in available[own]:
+                available[own].remove(ref)    # the PK path handles it; its own slot
+                newly_consumed.add(ref)
+            keep.append(txn)
+        elif k is not None and available.get(k):
+            newly_consumed.add(available[k].pop())
+            skipped += 1
+        else:
+            keep.append(txn)
+    run_refs.update(t.get("reference") for t in keep if t.get("reference"))
+    mark_prior_consumed(run_refs, newly_consumed)
+    if skipped:
+        logger.info(
+            f"[ak-zejx] {skipped} statement row(s) already ingested by an earlier run "
+            f"(bank-agnostic match); skipped as duplicates"
+        )
+    return keep, skipped
+
+
 def _find_existing_file_details(transaction_service, gmail_message_id):
     """Look up an existing fileDetails entry by gmail_message_id. Returns file_id or None.
     If the record was soft-deleted, un-deletes it for reuse."""
@@ -618,6 +731,12 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
             f"replaced {email_replaced} email txns, {stmt_replaced} overlapping statement txns"
         )
 
+    # ak-zejx: bank-agnostic re-ingest dedup (statement ingest only).
+    prior_copies = 0
+    if source == "Statement":
+        transactions, prior_copies = _drop_previous_run_copies(
+            transaction_service, user_id, bank, file_id, gmail_id, transactions)
+
     logger.info(f"insert_batch_transactions: inserting {len(transactions)} txns for {bank} (file_id={file_id})")
     # DEBUG: Log every transaction being inserted so we can trace hallucinations
     for idx, txn in enumerate(transactions):
@@ -691,7 +810,7 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
         "result": "success",
         "total": len(transactions),
         "inserted": inserted,
-        "duplicates": errors,
+        "duplicates": errors + prior_copies,
         "file_id": file_id,
         # ak-tik mitigation surface — see comment above.
         "degraded_dedup_rows": fallback_hash_count,
