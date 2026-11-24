@@ -170,16 +170,20 @@ class TestErrorTypeClassification(unittest.TestCase):
 
 class TestExceptionHandling(unittest.TestCase):
     def test_exception_populates_message_and_traceback(self):
+        # Built at runtime so the traceback's source line doesn't
+        # contain the literal (frames show code, never values).
+        msg = "bo" + "om"
         try:
-            raise ValueError("boom")
+            raise ValueError(msg)
         except ValueError as e:
             payload = build_pipeline_event(
                 "chunk_error", exception=e,
             )
-        self.assertIn("boom", payload["message"])
+        # ak-xjjo: message is `Type[label]`, never the exception text.
+        self.assertEqual(payload["message"], "ValueError[unknown]")
+        self.assertNotIn("boom", payload["message"])
         self.assertIn("traceback", payload)
-        # Traceback should mention ValueError somewhere.
-        self.assertIn("ValueError", payload["traceback"])
+        self.assertNotIn("boom", payload["traceback"])          # frames only
 
     def test_no_exception_no_traceback_field(self):
         payload = build_pipeline_event(

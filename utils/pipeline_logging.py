@@ -30,9 +30,10 @@ FIX:
                         stream, rate_limit, timeout,
                         analysis_exception,
                         unknown_chunk_result_shape, unknown).
-    - message       — free-form (typically str(exception))
-    - traceback     — best-effort exception trace when the caller
-                       hands us the BaseException object
+    - message       — caller's free-form text, or `Type[label]` from an
+                       exception (never the exception text; ak-xjjo)
+    - traceback     — frames only (no messages) of the exception and its
+                       cause chain, when the caller hands us the object
     - Any additional caller-supplied `extra` fields spread at top
       level so a per-event schema addition is one dict key away.
 
@@ -50,7 +51,6 @@ from __future__ import annotations
 
 import json
 import logging
-import traceback as _tb
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -58,6 +58,7 @@ from typing import Any, Optional
 # reprocess_pdf's summary and every chunk-error log line agree
 # byte-for-byte on the label taxonomy.
 from utils.reprocess_status import _classify_reason
+from utils.safe_errors import error_frames, error_label, error_tag
 
 
 # Canonical event names. Not enforced; documented so a future
@@ -78,19 +79,24 @@ def _iso_utc_now() -> str:
 
 
 def _serialize_exception(exc: Optional[BaseException]) -> tuple[Optional[str], Optional[str]]:
-    """Return (message, traceback_str) for a caught exception.
-    Both None if `exc` is None. Falls back to str(exc) if a
-    formatter fails."""
+    """Return (message, traceback_str) for a caught exception, under the
+    ONE error-text policy (utils.safe_errors, ak-q9c8 / ak-xjjo):
+
+      * message   = error_tag(exc), i.e. `Type[label]` with the closed-set
+                    label classified server-side; NEVER str(exc), which can
+                    carry bound SQL params or email / statement text
+      * traceback = error_frames(exc): frames of exc and its cause /
+                    context chain, types only, no messages
+
+    Both None if `exc` is None. Never raises."""
     if exc is None:
         return None, None
     try:
-        message = str(exc)
+        message = error_tag(exc)
     except Exception:
-        message = repr(exc)
+        message = type(exc).__name__
     try:
-        tb = "".join(
-            _tb.format_exception(type(exc), exc, exc.__traceback__)
-        )
+        tb = error_frames(exc)
     except Exception:
         tb = None
     return message, tb
@@ -118,12 +124,12 @@ def build_pipeline_event(
       - `event` is required and stamped verbatim (no case
         normalization — this is the grep key).
       - `timestamp` is stamped automatically (UTC ISO-8601).
-      - `error_type` is auto-classified from `message` or
-        `str(exception)` if the caller didn't supply one and either
-        is present. Falls back to 'unknown'.
-      - `message` is populated from `exception` if the caller
-        didn't supply one.
-      - `exception` (if provided) adds a `traceback` field.
+      - `error_type` is auto-classified from `message`, or from the
+        exception server-side (error_label), if the caller didn't supply
+        one. Falls back to 'unknown'.
+      - `message` is populated from `exception` as `Type[label]` (never
+        the exception text, ak-xjjo) if the caller didn't supply one.
+      - `exception` (if provided) adds a `traceback` field: frames only.
       - `extra` values are spread at TOP LEVEL to keep the JSON
         flat — a caller adding {"retry_attempt": 2} produces
         `"retry_attempt": 2` next to the mandatory fields, not
@@ -152,10 +158,16 @@ def build_pipeline_event(
         payload["message"] = resolved_message
 
     if error_type is None:
-        # Auto-classify from the message the caller supplied OR
-        # the exception's str. Falls back to 'unknown' via
-        # _classify_reason's own default.
-        error_type = _classify_reason(resolved_message or "")
+        # Auto-classify from the message the caller supplied; else from
+        # the exception itself, server-side (ak-xjjo: error_label reads
+        # the message internally but returns only the closed-set label).
+        if message is None and exception is not None:
+            try:
+                error_type = error_label(exception)
+            except Exception:
+                error_type = "unknown"
+        else:
+            error_type = _classify_reason(resolved_message or "")
     payload["error_type"] = error_type
 
     if exc_tb is not None:
