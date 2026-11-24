@@ -53,6 +53,17 @@ untrusted-input guidance).
 
 from __future__ import annotations
 
+import os  # noqa: E402
+# ak-n3lf: importing app builds the app at import time (create_all DDL,
+# seed job rows, scheduler threads that write to prod). A one-off script
+# needs none of that: both gates are set before ANY project import (only
+# when run as a script, so importing it in a test leaks nothing).
+# Usage: on a NEW database, start app.service once first (it creates the
+# tables); this script never runs schema setup.
+if __name__ == "__main__":
+    os.environ["AK_SKIP_SCHEDULERS"] = "1"
+    os.environ["AK_SKIP_DB_INIT"] = "1"
+
 import argparse
 import csv
 import json
@@ -217,48 +228,61 @@ def main():
         )
         return 0
 
-    # Commit path: boot a minimal Flask app context + UPSERT.
+    # Commit path: a bare engine from DATABASE_URL + UPSERT (ak-n3lf: no
+    # app boot, so no create_all DDL, seed jobs or scheduler threads).
     try:
-        from app import flask_app
         from models.goldHistoricalRate import GoldHistoricalRate
+        from sqlalchemy import create_engine
         from sqlalchemy.dialects.mysql import insert as mysql_insert
+        from sqlalchemy.orm import Session
     except Exception as exc:
         print(
             f"[load_gold_historical_rates] import chain failed: "
-            f"{exc}",
+            f"{type(exc).__name__}",
             file=sys.stderr,
         )
         return 4
+    try:
+        from dotenv import load_dotenv     # same .env the app reads
+        load_dotenv()
+    except ImportError:
+        pass
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        print("[load_gold_historical_rates] DATABASE_URL is not set", file=sys.stderr)
+        return 4
 
-    with flask_app.app_context():
-        from flask import g
-        g.db = flask_app.db
-        payload = [
-            {
-                "date": date_val,
-                "rate_per_gram": rate_val,
-                "source": source_val,
-            }
-            for date_val, rate_val, source_val in valid_rows
-        ]
-        stmt = mysql_insert(GoldHistoricalRate).values(payload)
-        # On conflict: refresh rate_per_gram + source (operator-
-        # supplied label may have changed).
-        upsert = stmt.on_duplicate_key_update(
-            rate_per_gram=stmt.inserted.rate_per_gram,
-            source=stmt.inserted.source,
-        )
-        try:
-            flask_app.db.session.execute(upsert)
-            flask_app.db.session.commit()
-        except Exception as exc:
-            flask_app.db.session.rollback()
-            print(
-                f"[load_gold_historical_rates] UPSERT failed; "
-                f"rolled back: {exc}",
-                file=sys.stderr,
-            )
-            return 5
+    payload = [
+        {
+            "date": date_val,
+            "rate_per_gram": rate_val,
+            "source": source_val,
+        }
+        for date_val, rate_val, source_val in valid_rows
+    ]
+    stmt = mysql_insert(GoldHistoricalRate).values(payload)
+    # On conflict: refresh rate_per_gram + source (operator-
+    # supplied label may have changed).
+    upsert = stmt.on_duplicate_key_update(
+        rate_per_gram=stmt.inserted.rate_per_gram,
+        source=stmt.inserted.source,
+    )
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        with Session(engine) as session:
+            try:
+                session.execute(upsert)
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                print(
+                    f"[load_gold_historical_rates] UPSERT failed; "
+                    f"rolled back: {type(exc).__name__}",
+                    file=sys.stderr,
+                )
+                return 5
+    finally:
+        engine.dispose()
 
     print(
         f"[load_gold_historical_rates] COMMITTED: "

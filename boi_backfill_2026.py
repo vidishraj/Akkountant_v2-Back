@@ -55,6 +55,17 @@ dispatched_by: akkountant/crew/akkountant_lead (hq-wisp-31r3e)
 bead: ak-5oi
 """
 
+import os  # noqa: E402
+# ak-n3lf: importing app builds the app at import time (create_all DDL,
+# seed job rows, scheduler threads that write to prod). A one-off script
+# needs none of that: both gates are set before ANY project import (only
+# when run as a script, so importing it in a test leaks nothing).
+# Usage: on a NEW database, start app.service once first (it creates the
+# tables); this script never runs schema setup.
+if __name__ == "__main__":
+    os.environ["AK_SKIP_SCHEDULERS"] = "1"
+    os.environ["AK_SKIP_DB_INIT"] = "1"
+
 import argparse
 import os
 import sys

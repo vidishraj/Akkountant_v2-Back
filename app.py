@@ -206,6 +206,27 @@ class Akkountant(Flask):
         comment for the preload-app validation plan.
         """
         self.db = SQLAlchemy(self, model_class=models.Base)
+        # ak-n3lf: one-off scripts import this module only for the app
+        # context / services. They must not run DDL (create_all) or seed
+        # job rows on prod; app.service does that at its own startup.
+        # Scripts set AK_SKIP_DB_INIT=1 (with AK_SKIP_SCHEDULERS=1) before
+        # importing app. Default off: the server is unchanged.
+        if os.getenv('AK_SKIP_DB_INIT') == '1':
+            import sys as _sys
+            under_gunicorn = ('gunicorn' in _sys.modules
+                              or os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn'))
+            if under_gunicorn:
+                # Review minor 1: load_dotenv() runs before this, so a stray
+                # flag in the server .env must never disable schema setup on
+                # prod (new tables would silently be missing).
+                self.logger.error(
+                    "AK_SKIP_DB_INIT ignored under gunicorn: the server always "
+                    "runs schema setup")
+            else:
+                self.logger.info(
+                    "Skipping DB init (create_all + initial jobs): AK_SKIP_DB_INIT=1 "
+                    "(one-off script; app.service owns schema setup).")
+                return
         lock_fd = None
         try:
             # Acquire the DDL lock BEFORE entering app_context so a
