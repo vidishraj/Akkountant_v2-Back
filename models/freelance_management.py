@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DECIMAL, Integer, DateTime, Boolean, Enum, ForeignKey, JSON, Date, func
+from sqlalchemy import UniqueConstraint, Column, String, Text, DECIMAL, Integer, DateTime, Boolean, Enum, ForeignKey, JSON, Date, func
 from sqlalchemy.dialects.mysql import CHAR, MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from .Base import Base
@@ -190,6 +190,20 @@ class InvoicePayment(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     invoice = relationship('Invoice', back_populates='payments')
+
+
+class InvoicePaymentNonce(Base):
+    """ak-dxh0: one row per client nonce of POST /invoices/<id>/payments.
+    UNIQUE(invoice_id, nonce) makes a retried submit a no-op at the DB level
+    (a new table, created by create_all; no ALTER of existing tables)."""
+    __tablename__ = 'invoice_payment_nonces'
+    __table_args__ = (UniqueConstraint('invoice_id', 'nonce', name='uq_invoice_payment_nonce'),)
+    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
+    invoice_id = Column(CHAR(36), ForeignKey('invoices.id', ondelete='CASCADE'), nullable=False)
+    payment_id = Column(CHAR(36), ForeignKey('invoice_payments.id', ondelete='SET NULL'), nullable=True)
+    nonce = Column(String(100), nullable=False)
+    fingerprint = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=func.now())
 
 
 class PendingPaymentClaim(Base):

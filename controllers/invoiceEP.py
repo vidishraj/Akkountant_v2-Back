@@ -1,5 +1,5 @@
 from flask import request, jsonify
-from services.invoiceService import InvoiceService
+from services.invoiceService import InvoiceService, PaymentError
 from utils.logger import Logger
 
 
@@ -123,10 +123,29 @@ class InvoiceController:
             
             return jsonify({"invoice": invoice}), 200  # Already formatted in service
 
+        except PaymentError as e:
+            # ak-dxh0: typed payment errors keep their status (409, not 404).
+            return jsonify({"error": str(e), "error_code": e.code}), e.status
         except ValueError as e:
             return jsonify({"error": str(e)}), 404
         except Exception as e:
             self.logger.error(f"Error in update_invoice: {str(e)}")
+            return jsonify({"error": "Internal server error"}), 500
+
+    @Logger.standardLogger
+    def record_payment(self, invoiceId):
+        """ak-dxh0: POST /freelance/invoices/<invoiceId>/payments."""
+        from services.invoiceService import PaymentError
+        try:
+            if not invoiceId:
+                return jsonify({"error": "Invoice id is required", "error_code": "VALIDATION"}), 400
+            data = request.get_json(force=True, silent=True)
+            body, status = self.invoice_service.record_payment(invoiceId, data)
+            return jsonify(body), status
+        except PaymentError as e:
+            return jsonify({"error": str(e), "error_code": e.code}), e.status
+        except Exception as e:
+            self.logger.error(f"Error in record_payment ({type(e).__name__})")
             return jsonify({"error": "Internal server error"}), 500
 
     @Logger.standardLogger

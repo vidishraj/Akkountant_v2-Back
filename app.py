@@ -677,6 +677,7 @@ class Akkountant(Flask):
             ('/freelance/invoices/<invoice_number>', 'GET', self.invoiceEP.get_invoice_by_id),
             ('/freelance/invoices/<invoiceId>', 'PUT', self.invoiceEP.update_invoice),
             ('/freelance/invoices/<invoiceId>', 'DELETE', self.invoiceEP.delete_invoice),
+            ('/freelance/invoices/<invoiceId>/payments', 'POST', self.invoiceEP.record_payment),
         ]
 
         # PDF generation endpoints

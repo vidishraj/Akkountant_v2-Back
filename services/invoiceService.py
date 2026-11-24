@@ -5,7 +5,7 @@ from sqlalchemy import func, desc, asc, or_
 from sqlalchemy.orm import joinedload
 from models.freelance_management import (
     Invoice, InvoiceItem, Customer, InvoicePayment, CurrencyEnum,
-    InvoiceStatusEnum, InvoiceCustomField,
+    InvoiceStatusEnum, InvoiceCustomField, InvoicePaymentNonce,
 )
 from services.Base_Service import BaseService
 from services.currencyService import CurrencyService, CurrencyUnavailableError
@@ -15,6 +15,31 @@ from services.money_utils import (
 )
 from utils.logger import Logger
 from datetime import datetime
+
+
+class PaymentError(ValueError):
+    """ak-dxh0: a Record-payment request the API answers with a typed error
+    (code -> HTTP status in InvoiceController.record_payment)."""
+
+    def __init__(self, code, message, status):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+APPROX_TAG = "approx"
+
+
+def _merge_breakdown(stored, incoming):
+    """ak-dxh0 review MAJOR: a client never sees `_`-prefixed (internal)
+    breakdown keys, so its echo must not erase them."""
+    internal = {k: v for k, v in (stored or {}).items() if str(k).startswith("_")} \
+        if isinstance(stored, dict) else {}
+    public = {k: v for k, v in (incoming or {}).items() if not str(k).startswith("_")} \
+        if isinstance(incoming, dict) else {}
+    if not internal:
+        return incoming                     # nothing internal stored: unchanged behaviour
+    return dict(public, **internal)
 
 
 class InvoiceService(BaseService):
@@ -608,11 +633,12 @@ class InvoiceService(BaseService):
                 "originalCurrency": fx["original_currency"],
                 "inrAmount": fx["inr_amount"],
                 "fxRate": fx["fx_rate"],
-                "fxRateSource": fx["fx_rate_source"],
+                "fxRateSource": (fx["fx_rate_source"] or "").split("|")[0] or None,
                 "convertedAt": fx["converted_at"],
                 # Legacy alias (kept for pre-ak-awp FE builds):
                 "amountReceived": fx["inr_amount"] if fx["inr_amount"] is not None else float(single_payment.amount_received or 0),
-                "breakdown": single_payment.breakdown or {},
+                "breakdown": {k: v for k, v in (single_payment.breakdown or {}).items()
+                              if not str(k).startswith("_")},
                 "paymentDate": single_payment.payment_date.strftime('%Y-%m-%d') if single_payment.payment_date else None,
                 "notes": single_payment.notes
             }
@@ -679,6 +705,13 @@ class InvoiceService(BaseService):
             "balanceDueINR": balance_due_inr,
             "currency": invoice.currency.value if hasattr(invoice.currency, 'value') else str(invoice.currency),
             "payment": payment,
+            # ak-dxh0: every recorded payment, oldest first (additive).
+            "payments": [
+                self._format_payment(p) for p in sorted(
+                    invoice.payments or [],
+                    key=lambda p: (p.payment_date or datetime.min.date(),
+                                   p.created_at or datetime.min))
+            ],
             "notes": invoice.notes,
             "terms": invoice.terms,
             "status": invoice.status.value if hasattr(invoice.status, 'value') else str(invoice.status),
@@ -759,6 +792,230 @@ class InvoiceService(BaseService):
                 result["original_currency"] = "INR"
         return result
 
+    # ── ak-dxh0: dedicated Record-payment ─────────────────────────────
+    def record_payment(self, invoice_ref, data):
+        """POST /freelance/invoices/<id>/payments. APPENDS one payment (never
+        replaces), uid-scoped, idempotent per client nonce, then recomputes
+        the status server-side (_recompute_invoice_status: same-currency
+        compare, else the ak-bvku cross-currency rules).
+
+        data: {amount, currency, receivedDate (YYYY-MM-DD), inrAmount?,
+               method?, note?, nonce}
+        INR amount: currency INR -> the amount; else an explicit inrAmount
+        (what the bank credited; effective rate = inrAmount / amount,
+        source 'user-supplied'); else converted at TODAY's rate. No
+        historical FX source exists, so a today-rate conversion for an
+        earlier receivedDate is flagged approximate. FX outage -> fail
+        closed (FX_UNAVAILABLE), never a stale vintage rate.
+        Returns (body, http_status)."""
+        from datetime import date as _date
+        user_id = g.get('firebase_id')
+        if not user_id:
+            raise PaymentError("UNAUTHENTICATED", "User not authenticated", 401)
+        if not isinstance(data, dict):
+            raise PaymentError("VALIDATION", "JSON body required", 400)
+
+        nonce = data.get("nonce")
+        if not isinstance(nonce, str) or not (8 <= len(nonce.strip()) <= 100):
+            raise PaymentError("VALIDATION", "nonce (8-100 chars) is required", 400)
+        nonce = nonce.strip()
+        try:
+            amount = q2(money(data.get("amount")))
+        except (MoneyError, TypeError, ValueError):
+            raise PaymentError("VALIDATION", "amount must be a number", 400)
+        if amount <= Decimal("0"):
+            raise PaymentError("VALIDATION", "amount must be greater than 0", 400)
+        currency = data.get("currency")
+        if not isinstance(currency, str) or len(currency.strip()) != 3 or not currency.strip().isalpha():
+            raise PaymentError("VALIDATION", "currency must be a 3-letter code", 400)
+        currency = currency.strip().upper()
+        try:
+            received = datetime.strptime(str(data.get("receivedDate") or ""), "%Y-%m-%d").date()
+        except ValueError:
+            raise PaymentError("VALIDATION", "receivedDate must be YYYY-MM-DD", 400)
+        today = datetime.utcnow().date()
+        if received > today:
+            raise PaymentError("VALIDATION", "receivedDate cannot be in the future", 400)
+        inr_explicit = None
+        if data.get("inrAmount") is not None:
+            try:
+                inr_explicit = q2(money(data.get("inrAmount")))
+            except (MoneyError, TypeError, ValueError):
+                raise PaymentError("VALIDATION", "inrAmount must be a number", 400)
+            if inr_explicit <= Decimal("0"):
+                raise PaymentError("VALIDATION", "inrAmount must be greater than 0", 400)
+            if currency == "INR" and inr_explicit != amount:
+                raise PaymentError("VALIDATION", "inrAmount must equal amount for an INR payment", 400)
+        method = data.get("method")
+        note = data.get("note")
+        if method is not None and (not isinstance(method, str) or len(method) > 100):
+            raise PaymentError("VALIDATION", "method must be text (max 100)", 400)
+        if note is not None and (not isinstance(note, str) or len(note) > 2000):
+            raise PaymentError("VALIDATION", "note must be text (max 2000)", 400)
+
+        fingerprint = "|".join([str(amount), currency, received.isoformat(),
+                                str(inr_explicit) if inr_explicit is not None else ""])
+        session = self.db.session
+        try:
+            # uid-scoped; by id, else by invoice number. Row lock serialises
+            # concurrent submits of one invoice (nonce check + insert).
+            q = session.query(Invoice).filter(
+                Invoice.user_id == user_id,
+                or_(Invoice.id == str(invoice_ref), Invoice.invoice_number == str(invoice_ref)))
+            invoice = q.with_for_update().first()
+            if invoice is None:
+                raise PaymentError("NOT_FOUND", "Invoice not found", 404)
+
+            seen = session.query(InvoicePaymentNonce).filter_by(
+                invoice_id=invoice.id, nonce=nonce).first()
+            if seen is not None:
+                return self._replay_nonce(session, invoice.id, seen, fingerprint)
+
+            if currency == "INR":
+                inr_amount, fx_rate, source = amount, q4(Decimal("1")), "identity"
+            elif inr_explicit is not None:
+                inr_amount, fx_rate, source = inr_explicit, q4(inr_explicit / amount), "user-supplied"
+            else:
+                try:
+                    fx = self.currency_service.convert_to_inr_with_source(
+                        amount, currency, allow_fallback=False)
+                except CurrencyUnavailableError:
+                    raise PaymentError(
+                        "FX_UNAVAILABLE",
+                        "Exchange rate unavailable; retry later or enter the INR amount received",
+                        503)
+                except ValueError:
+                    raise PaymentError("VALIDATION", f"Currency {currency} is not supported", 400)
+                inr_amount, fx_rate, source = fx["inr_amount"], fx["fx_rate"], fx["fx_rate_source"]
+                if received != today:
+                    source = f"{source}|{APPROX_TAG}:rate={today.isoformat()}"[:100]
+
+            payment = InvoicePayment(
+                invoice_id=invoice.id,
+                payment_method=method,
+                amount_received=inr_amount,
+                inr_amount=inr_amount,
+                original_amount=amount,
+                original_currency=currency,
+                fx_rate=fx_rate,
+                fx_rate_source=source,
+                converted_at=datetime.utcnow(),
+                payment_date=received,
+                notes=note,
+            )
+            session.add(payment)
+            session.flush()
+            session.add(InvoicePaymentNonce(invoice_id=invoice.id, payment_id=payment.id,
+                                            nonce=nonce, fingerprint=fingerprint))
+            try:
+                session.flush()
+            except IntegrityError:
+                # A concurrent submit of the same nonce won the UNIQUE key.
+                session.rollback()
+                seen = session.query(InvoicePaymentNonce).filter_by(
+                    invoice_id=invoice.id, nonce=nonce).first()
+                if seen is None:
+                    raise
+                return self._replay_nonce(session, invoice.id, seen, fingerprint)
+            # Server-side status: a draft that receives money is sent first
+            # (same rule as create/update-with-payment), then recomputed.
+            if invoice.status == InvoiceStatusEnum.draft:
+                invoice.status = InvoiceStatusEnum.sent
+            self._recompute_invoice_status(invoice)
+            session.commit()
+            self.logger.info(
+                f"[ak-dxh0] payment recorded on {invoice.invoice_number} "
+                f"({currency}, source={source.split('|')[0]}); status={invoice.status.value}")
+            fresh = session.query(Invoice).filter_by(id=invoice.id).first()
+            return {"duplicate": False,
+                    "payment": self._format_payment(payment),
+                    "invoice": self._format_invoice(fresh)}, 201
+        except PaymentError:
+            session.rollback()
+            raise
+        except Exception:
+            session.rollback()
+            raise
+
+    def _replay_nonce(self, session, invoice_id, seen, fingerprint):
+        """ak-dxh0: answer a retried nonce from its stored record."""
+        session.rollback()
+        if seen.fingerprint != fingerprint:
+            raise PaymentError(
+                "NONCE_REUSED", "This nonce was already used for a different payment", 409)
+        p = session.query(InvoicePayment).filter_by(id=seen.payment_id).first() \
+            if seen.payment_id else None
+        fresh = session.query(Invoice).filter_by(id=invoice_id).first()
+        return {"duplicate": True,
+                "payment": self._format_payment(p) if p is not None else None,
+                "invoice": self._format_invoice(fresh)}, 200
+
+    def _echoes_stored_payment(self, payment_data, payments):
+        """ak-dxh0: the stored payment a PUT's legacy `payment` is the read
+        shape of (same id when given, same original amount + currency, or the
+        legacy INR alias equal to its inr_amount with no conflicting
+        currency), else None."""
+        if not isinstance(payment_data, dict):
+            return None
+        pid = payment_data.get("id")
+        candidates = [p for p in payments if p.id == pid] if pid else payments
+        for p in candidates:
+            fx = self._safe_read_payment_fx(p)
+            try:
+                oa = payment_data.get("originalAmount")
+                if oa is not None and fx["original_amount"] is not None:
+                    cur = (payment_data.get("originalCurrency") or fx["original_currency"] or "").upper()
+                    if (within_epsilon(money(oa), money(fx["original_amount"]))
+                            and cur == (fx["original_currency"] or "").upper()):
+                        return p
+                    continue
+                given_cur = payment_data.get("originalCurrency")
+                if given_cur and str(given_cur).upper() != (fx["original_currency"] or "").upper():
+                    continue
+                ar = payment_data.get("amountReceived", payment_data.get("inrAmount"))
+                if ar is not None and fx["inr_amount"] is not None and within_epsilon(
+                        money(ar), money(fx["inr_amount"])):
+                    return p
+            except (MoneyError, TypeError, ValueError):
+                return None
+        return None
+
+    def _echo_changes_details(self, payment_data, p):
+        """ak-dxh0 review minor 1: does an amount-matching echo also try to
+        change the payment's date / method / notes / public breakdown?"""
+        if 'paymentMethod' in payment_data and (payment_data['paymentMethod'] or None) != (p.payment_method or None):
+            return True
+        if 'paymentDate' in payment_data:
+            stored = p.payment_date.strftime('%Y-%m-%d') if p.payment_date else None
+            if (payment_data['paymentDate'] or None) != stored:
+                return True
+        if 'notes' in payment_data and (payment_data['notes'] or None) != (p.notes or None):
+            return True
+        if 'breakdown' in payment_data:
+            public = {k: v for k, v in (p.breakdown or {}).items() if not str(k).startswith("_")}
+            if (payment_data['breakdown'] or {}) != public:
+                return True
+        return False
+
+    def _format_payment(self, p):
+        """ak-dxh0: one payment for the API (internal breakdown keys hidden)."""
+        fx = self._safe_read_payment_fx(p)
+        source = fx.get("fx_rate_source") or ""
+        bd = p.breakdown if isinstance(p.breakdown, dict) else {}
+        return {
+            "id": p.id,
+            "amount": fx["original_amount"],
+            "currency": fx["original_currency"],
+            "inrAmount": fx["inr_amount"],
+            "fxRate": fx["fx_rate"],
+            "fxRateSource": source.split("|")[0] or None,
+            "fxApproximate": f"|{APPROX_TAG}:" in source,
+            "receivedDate": p.payment_date.strftime('%Y-%m-%d') if p.payment_date else None,
+            "method": p.payment_method,
+            "note": p.notes,
+            "breakdown": {k: v for k, v in bd.items() if not str(k).startswith("_")},
+        }
+
     def _replace_payment(self, invoice_id, payment_data):
         """ak-lvu A.1 — idempotent payment replacement.
 
@@ -783,6 +1040,25 @@ class InvoiceService(BaseService):
         existing_payment = self.db.session.query(InvoicePayment).filter_by(
             invoice_id=invoice_id
         ).first()
+        # ak-dxh0: this legacy path replaces THE (single) payment. Once
+        # several payments are recorded (POST .../payments) it would delete
+        # one of them. The FE PUTs the whole invoice, echoing the read
+        # shape's legacy `payment` back on every save / status change, so an
+        # echo of a STORED payment is a no-op; only a real change is refused.
+        all_payments = self.db.session.query(InvoicePayment).filter_by(
+            invoice_id=invoice_id).all()
+        if len(all_payments) > 1:
+            matched = self._echoes_stored_payment(payment_data, all_payments)
+            if matched is not None and not self._echo_changes_details(payment_data, matched):
+                self.logger.info(
+                    "ak-dxh0: legacy `payment` echo on PUT matches a stored payment; "
+                    "ignored (invoice has several payments)")
+                return None
+            raise PaymentError(
+                "PAYMENTS_EDIT_CONFLICT",
+                "This invoice has several recorded payments; edit payments individually "
+                "(record new ones with POST /freelance/invoices/<id>/payments) instead of "
+                "`payment` on PUT", 409)
 
         # Parse payload.
         payload_id = payment_data.get('id')
@@ -880,7 +1156,8 @@ class InvoiceService(BaseService):
                 if 'notes' in payment_data:
                     existing_payment.notes = payment_data['notes']
                 if 'breakdown' in payment_data:
-                    existing_payment.breakdown = payment_data['breakdown']
+                    existing_payment.breakdown = _merge_breakdown(
+                        existing_payment.breakdown, payment_data['breakdown'])
                 return existing_payment
             elif payload_inr is not None:
                 # Value differs from stored INR-side but caller only sent
@@ -965,7 +1242,8 @@ class InvoiceService(BaseService):
                 if 'notes' in payment_data:
                     existing_payment.notes = payment_data['notes']
                 if 'breakdown' in payment_data:
-                    existing_payment.breakdown = payment_data['breakdown']
+                    existing_payment.breakdown = _merge_breakdown(
+                        existing_payment.breakdown, payment_data['breakdown'])
                 return existing_payment
 
         # ── normal path: delete existing (if any) + write fresh row ──
