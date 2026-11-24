@@ -8,7 +8,7 @@ from enums.MsnEnum import MSNENUM
 from services.InvestmentService import InvestmentService
 from services.KiteService import KiteAuthError
 from utils.logger import Logger
-from flask import request, jsonify, g
+from flask import request, jsonify, g, Response
 
 
 # ak-k9d8: result of the delete-all confirm check.
@@ -42,6 +42,14 @@ def check_delete_all_confirm(service_type_param, body):
     return CONFIRM_MISMATCH
 
 
+
+def _bad_request(message):
+    """ak-xfrt: a 400 error as a single Response object (never a tuple,
+    so it can't be mistaken for getUserIdServiceType's success value)."""
+    resp = jsonify({"error": message})
+    resp.status_code = 400
+    return resp
+
 class InvestmentController:
     InvestmentService: InvestmentService
 
@@ -51,13 +59,22 @@ class InvestmentController:
 
     @staticmethod
     def getUserIdServiceType(service_type_param):
+        """Return ``(user_id, service_type)`` on success, or a Flask
+        ``Response`` (status 400) on invalid input.
+
+        ak-xfrt: errors used to be returned as a ``(response, 400)`` TUPLE
+        while every caller tested ``not isinstance(params, tuple)``, so
+        the error tuple was unpacked as ``(user_id, service_type)`` and
+        the request crashed with a 500. Contract now: callers test
+        ``isinstance(params, Response)`` for the error case.
+        """
         user_id = g.get('firebase_id')
         if not user_id:
-            return jsonify({"error": "User ID not found"}), 400
+            return _bad_request("User ID not found")
         # Validate and get the serviceType from query parameter
         if not service_type_param or (service_type_param not in MSNENUM.__members__ and
                                       service_type_param not in EPGEnum.__members__):
-            return jsonify({"error": "Invalid or missing serviceType parameter"}), 400
+            return _bad_request("Invalid or missing serviceType parameter")
         try:
             service_type = MSNENUM[service_type_param]
         except KeyError:
@@ -69,7 +86,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error during validation
             return params
         user_id, service_type = params
@@ -84,7 +101,7 @@ class InvestmentController:
         params = self.getUserIdServiceType(service_type_param)
         if not schemeCode:
             return jsonify({"error": "Scheme code missing"}), 400
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -96,7 +113,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -132,7 +149,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -144,7 +161,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -156,7 +173,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -168,7 +185,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -180,7 +197,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -193,7 +210,7 @@ class InvestmentController:
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
 
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -210,7 +227,7 @@ class InvestmentController:
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
 
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -277,7 +294,7 @@ class InvestmentController:
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
 
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -290,7 +307,7 @@ class InvestmentController:
         """Fetch realized profit/loss and historical closed trades"""
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             return params
         user_id, service_type = params
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
@@ -317,7 +334,7 @@ class InvestmentController:
         # Get user ID from context
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params
@@ -352,7 +369,7 @@ class InvestmentController:
         service_type_param = request.args.get('serviceType')
         params = self.getUserIdServiceType(service_type_param)
 
-        if not isinstance(params, tuple):
+        if isinstance(params, Response):
             # Error has happened during validation
             return params
         user_id, service_type = params

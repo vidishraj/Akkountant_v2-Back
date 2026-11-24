@@ -131,6 +131,8 @@ class TestEndpoint(unittest.TestCase):
             body, status = resp[0], resp[1]
             data = body.get_json() if hasattr(body, "get_json") else body
             return status, data
+        if isinstance(resp, flask.Response):  # ak-xfrt: 400 as a Response
+            return resp.status_code, resp.get_json()
         return 200, resp
 
     def test_match_deletes_that_asset(self):
