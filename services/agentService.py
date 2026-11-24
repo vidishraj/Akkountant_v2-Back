@@ -35,6 +35,8 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
+from utils.sdk_tools import restricted_tool_options
+from utils.sdk_runner import log_init_tools
 
 MCP_SERVER_NAME = "agent_tools"
 
@@ -916,14 +918,19 @@ class AgentService(BaseService):
                 permission_mode="bypassPermissions",
                 max_turns=MAX_TURNS,
                 model=AGENT_MODEL_ID,
-                allowed_tools=mcp_tool_names,
+                # ak-m0f6: tools= = only the built-ins in this list
+                # (WebSearch/WebFetch for the investment agent, none
+                # otherwise) + --strict-mcp-config. allowed_tools alone
+                # restricted nothing.
+                **restricted_tool_options(
+                    mcp_tool_names, extra_args={"debug-to-stderr": None},
+                ),
                 # Stderr capture for cross-family diagnosis (hq-wisp-l2jfz,
                 # hq-wisp-wzagg). v3.4: extra_args adds --debug-to-stderr so
                 # CLI emits resolved model_id + request_id even on fast-fail
                 # paths where the stderr buffer might otherwise be empty by
                 # the time the SDK reaps the subprocess.
                 stderr=_make_sdk_stderr_logger(f"chat.{agent_type}"),
-                extra_args={"debug-to-stderr": None},
             )
             # ak-1x4 pass 2: can_use_tool is NOT set. The earlier scope
             # gate approach was architecturally inert under bypass mode
@@ -963,6 +970,8 @@ class AgentService(BaseService):
                     }
 
                 async for message in query(prompt=make_prompt(), options=options):
+                    # ak-m0f6: record the EFFECTIVE tool set (names only).
+                    log_init_tools(f"chat.{agent_type}", message)
                     if isinstance(message, AssistantMessage):
                         turns += 1
                         if message.error:

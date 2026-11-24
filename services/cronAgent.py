@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     SdkMcpTool,
     create_sdk_mcp_server,
 )
+from utils.sdk_tools import restricted_tool_options
 from collections import deque
 from utils.logger import Logger
 from utils.sdk_runner import run_query_collect
@@ -151,9 +152,12 @@ class CronAgent:
                 mcp_servers={MCP_SERVER_NAME: mcp_server},
                 permission_mode="bypassPermissions",
                 # MCP tool names listed explicitly (defensive — see doc §7.2)
-                allowed_tools=[
+                # ak-m0f6: effective tool set = only these (built-ins
+                # via tools=, MCP via mcp_servers=) + --strict-mcp-config;
+                # allowed_tools alone restricted nothing.
+                **restricted_tool_options([
                     f"mcp__{MCP_SERVER_NAME}__{t.name}" for t in sdk_tools
-                ],
+                ]),
             )
 
             prompt_text = self._build_prompt_with_history()

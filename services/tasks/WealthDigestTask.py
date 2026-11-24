@@ -48,6 +48,7 @@ from claude_agent_sdk import (
     SdkMcpTool,
     create_sdk_mcp_server,
 )
+from utils.sdk_tools import restricted_tool_options
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from services.agentConversationService import (
@@ -981,9 +982,8 @@ class WealthDigestTask(BaseTask):
                     output_format={"type": "json_schema", "schema": _DIGEST_OUTPUT_SCHEMA},
                     max_turns=_DIGEST_SYNTHESIS_MAX_TURNS,
                     permission_mode="default",
-                    tools=[],
                     mcp_servers={},
-                    extra_args={"strict-mcp-config": None},
+                    **restricted_tool_options([]),
                 )
             return ClaudeAgentOptions(
                 model=_MODEL,
@@ -1006,7 +1006,9 @@ class WealthDigestTask(BaseTask):
                 # ak-p8ix Bead C: WebSearch + WebFetch + the 5 Bead-B
                 # domain wrappers so `news` can cite real sources. No
                 # MUTATION tools exposed.
-                allowed_tools=_DIGEST_ALLOWED_TOOLS,
+                # ak-m0f6: effective tools = exactly WebSearch + WebFetch
+                # (built-ins) + the MCP wrappers; --strict-mcp-config.
+                **restricted_tool_options(_DIGEST_ALLOWED_TOOLS),
             )
 
         # ak-3eo H2 + ak-amo (2026-11-22): wrap the entire user-

@@ -89,6 +89,12 @@ def _read_source(rel_path):
 # ─── Per-site source-grep ─────────────────────────────────────
 
 
+def _code_only(body):
+    """Strip comment lines so a pin can't be satisfied by a comment."""
+    return "\n".join(l for l in body.splitlines()
+                     if not l.strip().startswith("#"))
+
+
 class TestPerSiteAllowedToolsPresent(unittest.TestCase):
     """Three sites fixed in this bead. Pin each explicitly so a
     future refactor that drops `allowed_tools=[]` on any single
@@ -110,9 +116,10 @@ class TestPerSiteAllowedToolsPresent(unittest.TestCase):
         )
         body = m.group(0)
         self.assertIn(
-            "allowed_tools=[]", body,
-            "ak-vhc2: CLASSIFICATION agent must pass "
-            "allowed_tools=[] — no MCP tools wired + "
+            "restricted_tool_options([])", _code_only(body),
+            "ak-m0f6: CLASSIFICATION agent must use "
+            "restricted_tool_options([]) (tools=[] + strict MCP) — "
+            "allowed_tools=[] alone restricts nothing; no MCP tools wired + "
             "max_turns=1 JSON-only task; any SDK built-in "
             "(Bash/Read/Write/Edit/WebFetch) is a prompt-"
             "injection escalation vector",
@@ -134,7 +141,7 @@ class TestPerSiteAllowedToolsPresent(unittest.TestCase):
         )
         body = m.group(0)
         self.assertIn(
-            "allowed_tools=[]", body,
+            "restricted_tool_options([])", _code_only(body),
             "ak-vhc2: PDF text-mode agent must pass "
             "allowed_tools=[] — structured-output JSON schema "
             "only, no MCP tools wired; any SDK built-in is an "
@@ -157,7 +164,7 @@ class TestPerSiteAllowedToolsPresent(unittest.TestCase):
         )
         body = m.group(0)
         self.assertIn(
-            "allowed_tools=[]", body,
+            "restricted_tool_options([])", _code_only(body),
             "ak-vhc2: job-email classifier must pass "
             "allowed_tools=[] — same class as CLASSIFICATION "
             "(max_turns=1 JSON-only); prompt-injected job "
@@ -216,26 +223,42 @@ class TestAllClaudeAgentOptionsHaveAllowedTools(unittest.TestCase):
                     rel = py.relative_to(_REPO_ROOT)
                     yield str(rel), node.lineno, node
 
-    # (4) The invariant — every call has allowed_tools.
+    # (4) The invariant, tightened by ak-m0f6. allowed_tools is only a
+    # PRE-APPROVAL list; it never restricted anything (measured: 186
+    # tools offered, a canary file read). Every construction must pass
+    # `**restricted_tool_options(<list>)`, which sets tools= (the only
+    # built-ins) + --strict-mcp-config from the same list, and must NOT
+    # pass allowed_tools= / tools= / extra_args= directly (that would
+    # bypass or override the restriction).
     def test_every_options_construction_has_allowed_tools(self):
         violations = []
         found_any = False
         for rel, lineno, node in self._find_claude_agent_options_calls():
             found_any = True
-            kws = {kw.arg for kw in node.keywords if kw.arg}
-            if "allowed_tools" not in kws:
-                violations.append(f"{rel}:{lineno}")
+            direct = {kw.arg for kw in node.keywords if kw.arg}
+            starred = [
+                kw.value for kw in node.keywords
+                if kw.arg is None and isinstance(kw.value, ast.Call)
+                and getattr(kw.value.func, "id",
+                            getattr(kw.value.func, "attr", None))
+                == "restricted_tool_options"
+            ]
+            if len(starred) != 1:
+                violations.append(f"{rel}:{lineno} missing **restricted_tool_options(...)")
+            bad = direct & {"allowed_tools", "tools", "extra_args"}
+            if bad:
+                violations.append(f"{rel}:{lineno} passes {sorted(bad)} directly")
         self.assertTrue(
             found_any,
-            "ak-vhc2 drift guard found ZERO ClaudeAgentOptions "
+            "drift guard found ZERO ClaudeAgentOptions "
             "calls — walker shape broken, review this test",
         )
         self.assertEqual(
             violations, [],
-            "ak-vhc2: the following ClaudeAgentOptions "
-            "constructions are MISSING the `allowed_tools=` "
-            "keyword argument. Every call must pass it (empty "
-            f"list `[]` is acceptable). Violations: {violations}",
+            "ak-m0f6: every ClaudeAgentOptions must pass "
+            "**restricted_tool_options(<allowed list>) so the "
+            "EFFECTIVE tool set (tools= + --strict-mcp-config) equals "
+            f"the pre-approved list. Violations: {violations}",
         )
 
     # (6) Walker finds the expected number of call sites (sanity
@@ -250,7 +273,7 @@ class TestAllClaudeAgentOptionsHaveAllowedTools(unittest.TestCase):
             f"ak-vhc2 drift-guard walker found only {len(sites)} "
             f"sites; expected ≥7 (mailProcessorService 4 + "
             f"jobEmailService 1 + web_extract 1 + cronAgent 1 + "
-            f"agentService 1 + WealthDigestTask 1 = 9 at ship "
+            f"agentService 1 + WealthDigestTask 2 = 10 since ak-lwed "
             f"time). If sites have been legitimately dropped, "
             f"update this floor.",
         )

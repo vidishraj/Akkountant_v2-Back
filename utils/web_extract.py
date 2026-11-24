@@ -24,6 +24,7 @@ from __future__ import annotations  # PEP 604 (`dict | None`) on 3.9 worktree en
 import anyio
 import requests
 from claude_agent_sdk import ClaudeAgentOptions
+from utils.sdk_tools import restricted_tool_options
 
 from utils.logger import Logger
 from utils.sdk_runner import run_query_collect, _make_sdk_stderr_logger
@@ -118,9 +119,9 @@ def fetch_and_extract(
         max_turns=3,  # Allow retries for structured output validation
         permission_mode="bypassPermissions",
         output_format={"type": "json_schema", "schema": schema},
-        allowed_tools=[],
+        # ak-m0f6: effective tool set = StructuredOutput only.
+        **restricted_tool_options([], extra_args={"debug-to-stderr": None}),
         stderr=_make_sdk_stderr_logger(agent),
-        extra_args={"debug-to-stderr": None},
     )
 
     parts = []

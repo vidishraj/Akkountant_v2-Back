@@ -134,8 +134,41 @@ class SdkRunResult:
     init_tools: list | None = None
 
 
+def init_tool_names(message):
+    """Tool NAMES from an init SystemMessage, else None."""
+    if (isinstance(message, SystemMessage)
+            and getattr(message, "subtype", None) == "init"):
+        data = getattr(message, "data", None) or {}
+        names = data.get("tools") if isinstance(data, dict) else None
+        if isinstance(names, list):
+            return [str(n) for n in names]
+    return None
+
+
+def log_init_tools(agent, message):
+    """ak-m0f6: if `message` is the init SystemMessage, log the tool
+    NAMES the CLI offered this agent (names only, never inputs) as
+    `agent_init agent=X tools_offered=N tool_names=a,b`. This is the
+    runtime proof of the EFFECTIVE tool set. Returns the names (or
+    None). Never raises."""
+    try:
+        names = init_tool_names(message)
+        if names is not None:
+            _logger.info(
+                f"agent_init agent={agent} "
+                f"tools_offered={len(names)} "
+                f"tool_names={','.join(sorted(names))}"
+            )
+        return names
+    except Exception:
+        return None
+
+
+_log_init_tools = log_init_tools  # kwarg below shadows the name
+
+
 async def run_query_collect(*, agent, options, prompt, user_id=None,
-                            log_init_tools=False):
+                            log_init_tools=True):
     """Run sdk_query, collect TextBlocks + structured_output, emit log line.
 
     `prompt` may be a string or an AsyncIterable per the SDK contract.
@@ -147,9 +180,10 @@ async def run_query_collect(*, agent, options, prompt, user_id=None,
     kwarg the caller can pass to associate the turn with a Firebase
     user id in logs.
 
-    ak-lwed review: ``log_init_tools=True`` logs the tool NAMES the CLI
-    offered in its init SystemMessage (names only, never inputs) as an
-    ``agent_init`` line; the names are always returned on
+    ak-lwed review / ak-m0f6: logs the tool NAMES the CLI offered in its
+    init SystemMessage (names only, never inputs) as an ``agent_init``
+    line, ON by default for every agent (pass ``log_init_tools=False``
+    to suppress); the names are always returned on
     ``SdkRunResult.init_tools``.
     """
     start = time.monotonic()
@@ -174,18 +208,11 @@ async def run_query_collect(*, agent, options, prompt, user_id=None,
 
     try:
         async for message in sdk_query(prompt=prompt, options=options):
-            if (isinstance(message, SystemMessage)
-                    and getattr(message, "subtype", None) == "init"):
-                data = getattr(message, "data", None) or {}
-                names = data.get("tools") if isinstance(data, dict) else None
-                if isinstance(names, list):
-                    init_tools = [str(n) for n in names]
-                    if log_init_tools:
-                        _logger.info(
-                            f"agent_init agent={agent} "
-                            f"tools_offered={len(init_tools)} "
-                            f"tool_names={','.join(sorted(init_tools))}"
-                        )
+            names = init_tool_names(message)
+            if names is not None:
+                init_tools = names
+                if log_init_tools:
+                    _log_init_tools(agent, message)
             elif isinstance(message, AssistantMessage):
                 turns += 1
                 if getattr(message, "error", None):

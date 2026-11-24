@@ -281,7 +281,11 @@ class TestDigestTurnBudgetAndFallback(unittest.TestCase):
         self.assertEqual(opts.max_turns, self.m._DIGEST_MAX_TURNS)
         cmd = self._cli_args(opts)
         self.assertIn("--allowedTools", cmd)
-        self.assertNotIn("--strict-mcp-config", cmd)
+        # ak-m0f6: research is restricted too: exactly the two web
+        # built-ins + the code-declared MCP wrappers.
+        self.assertEqual(cmd[cmd.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertIn("--mcp-config", cmd)
         self.assertTrue(opts.mcp_servers)
         self.assertEqual(opts.allowed_tools, self.m._DIGEST_ALLOWED_TOOLS)
         self.assertEqual(out["news"], [{"title": "n"}])  # grounded news kept

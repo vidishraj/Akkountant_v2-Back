@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     SdkMcpTool,
     create_sdk_mcp_server,
 )
+from utils.sdk_tools import restricted_tool_options
 
 from services.mailProcessorTools import (
     MAIL_PROCESSOR_TOOLS,
@@ -657,7 +658,10 @@ class MailProcessorService:
             ),
             max_turns=1,
             permission_mode="default",
-            allowed_tools=[],
+            # ak-m0f6: effective tool set = only these (built-ins
+            # via tools=, MCP via mcp_servers=) + --strict-mcp-config;
+            # allowed_tools alone restricted nothing.
+            **restricted_tool_options([]),
         )
 
         prompt_text = (
@@ -937,9 +941,12 @@ class MailProcessorService:
             mcp_servers={MCP_SERVER_NAME: mcp_server},
             permission_mode="bypassPermissions",
             # MCP tool names listed explicitly (defensive — see doc §7.2)
-            allowed_tools=[
+            # ak-m0f6: effective tool set = only these (built-ins
+            # via tools=, MCP via mcp_servers=) + --strict-mcp-config;
+            # allowed_tools alone restricted nothing.
+            **restricted_tool_options([
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in MAIL_PROCESSOR_TOOLS
-            ],
+            ]),
         )
 
         prompt_text = (
@@ -2075,7 +2082,10 @@ class MailProcessorService:
                     "type": "json_schema",
                     "schema": self._TXN_OUTPUT_SCHEMA,
                 },
-                allowed_tools=[],
+                # ak-m0f6: effective tool set = only these (built-ins
+                # via tools=, MCP via mcp_servers=) + --strict-mcp-config;
+                # allowed_tools alone restricted nothing.
+                **restricted_tool_options([]),
             )
             self.logger.info("Text-mode: will use query() with structured output per chunk")
 
@@ -3431,9 +3441,12 @@ class MailProcessorService:
             mcp_servers={MCP_SERVER_NAME: mcp_server},
             permission_mode="bypassPermissions",
             # MCP tool names listed explicitly (defensive — see doc §7.2)
-            allowed_tools=[
+            # ak-m0f6: effective tool set = only these (built-ins
+            # via tools=, MCP via mcp_servers=) + --strict-mcp-config;
+            # allowed_tools alone restricted nothing.
+            **restricted_tool_options([
                 f"mcp__{MCP_SERVER_NAME}__{t['name']}" for t in MAIL_PROCESSOR_TOOLS
-            ],
+            ]),
         )
 
     # ── MCP tool building ──────────────────────────────────────────────

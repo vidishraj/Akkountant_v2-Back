@@ -11,6 +11,7 @@ from enums.ServiceTypeEnum import ServiceTypeEnum
 from utils.logger import Logger
 from sqlalchemy import and_
 from claude_agent_sdk import ClaudeAgentOptions
+from utils.sdk_tools import restricted_tool_options
 from utils.sdk_runner import run_query_collect
 
 
@@ -233,7 +234,9 @@ For MY job applications: extract company, job_title, status (applied/interview/o
                 model="haiku",
                 max_turns=1,
                 permission_mode="bypassPermissions",
-                allowed_tools=[],
+                # ak-m0f6: allowed_tools=[] alone restricted NOTHING;
+                # this makes the effective tool set empty.
+                **restricted_tool_options([]),
                 system_prompt="""You are a precise email classifier that ONLY identifies emails about job applications I have personally submitted.
 
 STRICT CRITERIA - Mark as job-related ONLY if:
