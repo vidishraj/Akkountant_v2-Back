@@ -62,6 +62,28 @@ def next_stamp(status, reason, prev_summary, now=None):
     return "error", attempts
 
 
+def fresh_attempts(prev_summary, error_message=None, now=None):
+    """ak-8gfj: the counter a MANUAL requeue stamps: count 0, last_at now.
+
+    count 0 → the next failure counts as attempt 1 (a fresh 3-strike
+    budget). last_at now → the ak-i3tc sweep window (keyed on the last
+    attempt) includes the row again. Clearing the counter instead fell
+    back to processed_at, so a row first stamped > 45 days ago stayed
+    aged out and was never retried. The reason is kept (or taken from
+    the error_message's reason prefix) so the next identical failure
+    continues the same run.
+    """
+    prev = previous_attempts(prev_summary)
+    reason = prev["reason"] if prev else None
+    if not reason and isinstance(error_message, str) and ":" in error_message:
+        reason = error_message.split(":", 1)[0].strip() or None
+    return {
+        "reason": reason or "manual_retry",
+        "count": 0,
+        "last_at": (now or _dt.datetime.utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 def with_attempts(summary, attempts):
     """The summary to store: the agent's metadata plus the counter."""
     out = dict(summary) if isinstance(summary, dict) else {}

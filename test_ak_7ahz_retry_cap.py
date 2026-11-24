@@ -206,7 +206,10 @@ class TestEndToEnd(unittest.TestCase):
         self.session.expire_all()
         row = self.session.query(self.PE).filter_by(gmail_id="g1").one()
         self.assertEqual(row.status, "failed")
-        self.assertNotIn("_attempts", row.extraction_summary or {})
+        # ak-8gfj: a FRESH counter (count 0, last attempt now), not none,
+        # so the sweep window includes it again.
+        self.assertEqual((row.extraction_summary["_attempts"]["count"],
+                          row.extraction_summary["_attempts"]["reason"]), (0, "no_rows"))
         self.assertEqual(ts.fetchStatementAttention("u")["count"], 0)
         # Back in the queue, and the count starts over.
         self.assertEqual(len(self.svc._filter_already_processed([{"gmail_id": "g1"}], "u")), 1)

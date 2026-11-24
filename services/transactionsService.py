@@ -1315,7 +1315,9 @@ class TransactionService(BaseService):
         ak-i3tc sweep) retries the unlock. Returns the number requeued.
         Never raises (the caller's save already succeeded)."""
         from models.processedEmails import ProcessedEmails
-        from utils.statement_retry_cap import NEEDS_ATTENTION, previous_attempts, with_attempts
+        from utils.statement_retry_cap import (
+            NEEDS_ATTENTION, fresh_attempts, previous_attempts, with_attempts,
+        )
         try:
             rows = self.db.session.query(ProcessedEmails).filter_by(
                 user_id=userId, status=NEEDS_ATTENTION).all()
@@ -1324,7 +1326,10 @@ class TransactionService(BaseService):
                 a = previous_attempts(row.extraction_summary)
                 if a and a.get("reason") == "unlock_failed":
                     row.status = "failed"
-                    row.extraction_summary = with_attempts(row.extraction_summary, None)
+                    # ak-8gfj: fresh counter, so an old row isn't aged out.
+                    row.extraction_summary = with_attempts(
+                        row.extraction_summary,
+                        fresh_attempts(row.extraction_summary, row.error_message))
                     n += 1
             if n:
                 self.db.session.commit()
@@ -1339,11 +1344,20 @@ class TransactionService(BaseService):
             return 0
 
     def retryStatementEmail(self, userId, gmail_id):
-        """ak-7ahz: manual retry. A needs_attention row goes back to
-        'failed' with its retry counter cleared, so the next mail cycle
-        picks it up. Returns (body, http_status)."""
+        """Manual retry. Returns (body, http_status).
+
+        ak-7ahz: a needs_attention row goes back to 'failed'.
+        ak-8gfj: a failed PDF row that AGED OUT of the sweep window (the
+        GET /statementAttention "agedOut" list) is revived too.
+        Either way the row gets a fresh counter (count 0, last attempt =
+        now; utils.statement_retry_cap.fresh_attempts), so the ak-i3tc
+        sweep picks it up next cycle with a new 3-failure budget.
+        A failed row still inside the window is already being retried:
+        409 ALREADY_QUEUED. Anything else: 409 NOT_NEEDS_ATTENTION.
+        """
         from models.processedEmails import ProcessedEmails
-        from utils.statement_retry_cap import NEEDS_ATTENTION, with_attempts
+        from utils import retry_sweep
+        from utils.statement_retry_cap import NEEDS_ATTENTION, fresh_attempts, with_attempts
         userId = assert_valid_firebase_id_for_path(userId)
         if not isinstance(gmail_id, str) or not gmail_id.strip() or len(gmail_id) > 200:
             return {"error": "gmail_id is required"}, 400
@@ -1351,13 +1365,23 @@ class TransactionService(BaseService):
             user_id=userId, gmail_id=gmail_id.strip()).first()
         if row is None:
             return {"error": "email not found"}, 404
-        if row.status != NEEDS_ATTENTION:
+        if row.status == "failed" and row.processing_type == "pdf":
+            aged = retry_sweep.aged_out_ids(
+                [(row.gmail_id, row.status, row.processing_type, row.processed_at,
+                  row.extraction_summary)])
+            if not aged:
+                return {"error": "email is already queued for automatic retry",
+                        "error_code": "ALREADY_QUEUED"}, 409
+        elif row.status != NEEDS_ATTENTION:
             return {"error": f"email is not awaiting attention (status={row.status})",
                     "error_code": "NOT_NEEDS_ATTENTION"}, 409
+        previous_status = row.status
         row.status = "failed"
-        row.extraction_summary = with_attempts(row.extraction_summary, None)
+        row.extraction_summary = with_attempts(
+            row.extraction_summary, fresh_attempts(row.extraction_summary, row.error_message))
         self.db.session.commit()
-        self.logger.info(f"[ak-7ahz] manual retry queued for gmail_id={row.gmail_id!r}")
+        self.logger.info(
+            f"[ak-8gfj] manual retry queued for gmail_id={row.gmail_id!r} (was {previous_status})")
         return {"gmail_id": row.gmail_id, "status": "failed", "queued": True}, 200
 
     def fetchProcessedStatements(self, userId, page=1, limit=100, filters=None):

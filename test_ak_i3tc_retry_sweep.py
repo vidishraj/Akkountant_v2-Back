@@ -264,7 +264,8 @@ class TestRetryCapMinors(_DB):
         self.assertEqual(self._ts().requeueUnlockFailed("u"), 1)
         self.session.expire_all()
         by = {r.gmail_id: r for r in self.session.query(self.PE).all()}
-        self.assertEqual((by["u1"].status, by["u1"].extraction_summary), ("failed", {"k": 1}))
+        self.assertEqual((by["u1"].status, by["u1"].extraction_summary["k"],
+                          by["u1"].extraction_summary["_attempts"]["count"]), ("failed", 1, 0))
         self.assertEqual(by["n1"].status, "needs_attention")
 
     def test_requeue_never_raises(self):
