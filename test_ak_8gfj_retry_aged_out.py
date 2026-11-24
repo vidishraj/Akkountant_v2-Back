@@ -129,14 +129,13 @@ class TestRetryAgedOut(unittest.TestCase):
 
     def test_guards(self):
         self._row("queued", "failed", first_days=2)           # inside the window
-        self._row("text", "failed", ptype="text", first_days=100)
         self._row("done", "processed", first_days=100)
         body, code = self.ts.retryStatementEmail("u", "queued")
         self.assertEqual((code, body["error_code"]), (409, "ALREADY_QUEUED"))
-        for gid in ("text", "done"):
-            body, code = self.ts.retryStatementEmail("u", gid)
-            self.assertEqual((code, body["error_code"]), (409, "NOT_NEEDS_ATTENTION"), gid)
-        self.assertEqual(self._get("text").status, "failed")            # untouched
+        body, code = self.ts.retryStatementEmail("u", "done")
+        self.assertEqual((code, body["error_code"]), (409, "NOT_NEEDS_ATTENTION"))
+        self.assertEqual(self._get("done").status, "processed")          # untouched
+        # ak-788j: failed TEXT rows are now revivable (test_ak_788j_text_retry.py).
 
     def test_aged_out_without_counter_uses_error_reason(self):
         self._row("legacy", "failed", first_days=90, msg="ingest_incomplete: chunks failed")

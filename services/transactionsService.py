@@ -1481,6 +1481,8 @@ class TransactionService(BaseService):
         ak-7ahz: a needs_attention row goes back to 'failed'.
         ak-8gfj: a failed PDF row that AGED OUT of the sweep window (the
         GET /statementAttention "agedOut" list) is revived too.
+        ak-788j: a failed TEXT row is revived too: it is flagged
+        (retry_sweep.MANUAL_KEY) so the sweep picks it once.
         Either way the row gets a fresh counter (count 0, last attempt =
         now; utils.statement_retry_cap.fresh_attempts), so the ak-i3tc
         sweep picks it up next cycle with a new 3-failure budget.
@@ -1504,13 +1506,33 @@ class TransactionService(BaseService):
             if not aged:
                 return {"error": "email is already queued for automatic retry",
                         "error_code": "ALREADY_QUEUED"}, 409
+        elif row.status == "failed" and row.processing_type == "text":
+            # ak-788j: text failures aren't swept automatically; a click
+            # flags the row for ONE sweep pick. Queued only if the sweep
+            # would actually pick it now (review MAJOR: a flagged row past
+            # the window, or given up on, must be re-clickable, never a
+            # permanent 409).
+            if retry_sweep.manual_retry_requested(row.extraction_summary) and \
+                    retry_sweep.select_retry_ids(
+                        [(row.gmail_id, row.status, row.processing_type, row.processed_at,
+                          row.extraction_summary)]):
+                return {"error": "email is already queued for automatic retry",
+                        "error_code": "ALREADY_QUEUED"}, 409
         elif row.status != NEEDS_ATTENTION:
             return {"error": f"email is not awaiting attention (status={row.status})",
                     "error_code": "NOT_NEEDS_ATTENTION"}, 409
         previous_status = row.status
         row.status = "failed"
-        row.extraction_summary = with_attempts(
+        summary = with_attempts(
             row.extraction_summary, fresh_attempts(row.extraction_summary, row.error_message))
+        # A click answers any unanswered sweeps (ak-6k35 misses): drop the
+        # marker outright rather than rely on last_at > last_swept_at, which
+        # ties when both land in the same second.
+        if isinstance(summary, dict):
+            summary.pop(retry_sweep.SWEEP_KEY, None)
+        if row.processing_type == "text":
+            summary = retry_sweep.with_manual_retry(summary)
+        row.extraction_summary = summary
         self.db.session.commit()
         self.logger.info(
             f"[ak-8gfj] manual retry queued for gmail_id={row.gmail_id!r} (was {previous_status})")

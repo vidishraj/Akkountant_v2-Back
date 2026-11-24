@@ -13,6 +13,8 @@ Each cycle, besides the 24h window, the mail pipeline re-fetches by Gmail
 id the rows select_retry_ids picks:
   * status 'failed' with processing_type 'pdf' (statement ingest; the
     expensive, money-relevant path), or
+  * status 'failed' with processing_type 'text' ONLY after a manual
+    retry flagged it (ak-788j; one sweep pick per click),
   * status 'pending' (any type) older than PENDING_STALE_HOURS,
   * last ATTEMPTED within RETRY_WINDOW_DAYS (ak-7ahz's
     _attempts.last_at, else processed_at),
@@ -44,6 +46,11 @@ SWEEP_STATUSES = ("failed", "pending")
 # retry) has happened since the last sweep.
 SWEEP_KEY = "_sweep"
 MAX_SWEEP_MISSES = 3
+# ak-788j: failed TEXT (non-PDF) rows are not swept automatically. A
+# manual retry (POST /retryStatementEmail) sets this flag; the sweep then
+# picks the row like a failed PDF. Any real processing stamp replaces the
+# summary (dropping the flag), so each click buys exactly one retry.
+MANUAL_KEY = "_manual_retry"
 _ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -51,12 +58,27 @@ def sql_prefilter(model, now=None):
     """ak-6k35: coarse SQL filter for the sweep query (exact rules are in
     select_retry_ids / aged_out_ids): failed PDF rows of any age (a
     manual retry can revive an old one) + pending rows first stamped
-    inside the window."""
-    from sqlalchemy import and_, or_
+    inside the window + (ak-788j) failed text rows carrying the manual
+    retry flag (an escaped text match on the JSON; exact check in Python)."""
+    from sqlalchemy import String, and_, cast, or_
     return or_(
         and_(model.status == "failed", model.processing_type == "pdf"),
         and_(model.status == "pending", model.processed_at >= window_start(now)),
+        and_(model.status == "failed", model.processing_type == "text",
+             cast(model.extraction_summary, String).contains(MANUAL_KEY, autoescape=True)),
     )
+
+
+def manual_retry_requested(summary):
+    """ak-788j: True when a manual retry is waiting on this row."""
+    return isinstance(summary, dict) and summary.get(MANUAL_KEY) is True
+
+
+def with_manual_retry(summary):
+    """ak-788j: the summary a manual retry of a failed text row stores."""
+    out = dict(summary) if isinstance(summary, dict) else {}
+    out[MANUAL_KEY] = True
+    return out
 
 
 def window_start(now=None):
@@ -126,14 +148,14 @@ def restore_sweep(summary, previous, stamped):
 
 
 def _rows_with_last(rows):
-    """(gid, status, ptype, queue_key, misses, last_attempt)."""
+    """(gid, status, ptype, queue_key, misses, last_attempt, manual)."""
     for row in rows:
         gid, status, ptype, processed_at = row[:4]
         summary = row[4] if len(row) > 4 else None
         last = last_attempt_at(processed_at, summary)
         misses, last_swept = sweep_misses(summary, last)
         key = max(t for t in (last, last_swept) if t is not None) if (last or last_swept) else None
-        yield gid, status, ptype, key, misses, last
+        yield gid, status, ptype, key, misses, last, manual_retry_requested(summary)
 
 
 def select_retry_ids(rows, now=None, exclude=()):
@@ -149,14 +171,14 @@ def select_retry_ids(rows, now=None, exclude=()):
     stale = now - _dt.timedelta(hours=PENDING_STALE_HOURS)
     excluded = set(exclude)
     picked = []
-    for gid, status, ptype, key, misses, last in _rows_with_last(rows):
+    for gid, status, ptype, key, misses, last, manual in _rows_with_last(rows):
         if not gid or gid in excluded or last is None or last < start:
             continue
         if misses >= MAX_SWEEP_MISSES:
             continue          # never answered: listed in agedOut instead
         # Queue on the later of last attempt / last sweep, so a row just
         # swept (even one that wasn't stamped) moves to the back.
-        if status == "failed" and ptype == "pdf":
+        if status == "failed" and (ptype == "pdf" or (ptype == "text" and manual)):
             picked.append((key, gid))
         elif status == "pending" and last <= stale:
             picked.append((key, gid))
@@ -181,7 +203,7 @@ def aged_out_ids(rows, now=None):
     deliberately not listed; their recovery is a one-off."""
     start = window_start(now)
     out = []
-    for gid, status, ptype, _key, misses, last in _rows_with_last(rows):
+    for gid, status, ptype, _key, misses, last, _manual in _rows_with_last(rows):
         if not gid or last is None:
             continue
         if status == "failed" and ptype == "pdf" and last < start:

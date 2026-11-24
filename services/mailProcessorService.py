@@ -932,7 +932,8 @@ class MailProcessorService:
             # ak-6k35 coarse prefilter (exact rules applied in Python):
             # failed PDF rows (any age; they can be revived) + pending rows
             # first stamped inside the window. This drops the ~2.7k legacy
-            # March 'pending' rows and text failures from every cycle.
+            # March 'pending' rows and unflagged text failures (ak-788j:
+            # a manual retry flags one) from every cycle.
             rows = self.transaction_service.db.session.query(
                 ProcessedEmails.gmail_id, ProcessedEmails.status,
                 ProcessedEmails.processing_type, ProcessedEmails.processed_at,
