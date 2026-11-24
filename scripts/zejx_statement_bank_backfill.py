@@ -34,6 +34,11 @@ import argparse
 import os
 import sys
 
+# ak-3oh review (same risk here): never boot the app. Importing it runs
+# db.create_all() (DDL on prod) and can START the schedulers, which write to
+# prod. Flag set before any project import; the session is a bare engine.
+os.environ["AK_SKIP_SCHEDULERS"] = "1"
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -136,38 +141,71 @@ def main(argv=None):
         print("[zejx] --commit requires --assume-yes", file=sys.stderr)
         return 2
 
-    from app import flask_app
-    with flask_app.app_context():
-        from flask import g
-        g.db = flask_app.db
-        session = flask_app.db.session
-        plan = build_plan(session, args.user_id)
-        print(f"[zejx] mode={'COMMIT' if args.commit else 'DRY-RUN'} "
-              f"user={'all' if not args.user_id else 'one'} fix_linked={args.fix_linked}")
-        for line in plan.report_lines():
-            print(f"[zejx] {line}")
-        risk_txns = sum(n for _g, n in plan.reingest_risk)
-        print(f"[zejx] statements to be fixed that are NOT 'processed' (will be re-ingested "
-              f"under the new bank): {len(plan.reingest_risk)}, with {risk_txns} linked "
-              f"transaction row(s). Re-ingest is deduped bank-agnostically (ak-zejx) on "
-              f"an exact (date, amount, normalised description) match; a row whose "
-              f"description is worded differently on the re-read is not matched and "
-              f"WILL duplicate, so review these statements after the re-ingest.")
-        files_n, txns_n = linked_mismatch_counts(session, plan)
-        print(f"[zejx] linked rows with a different bank family: fileDetails={files_n} "
-              f"transactions={txns_n} ({'WILL be fixed' if args.fix_linked else 'not touched without --fix-linked'})")
-        if not args.commit:
-            print("[zejx] DRY-RUN complete: no writes.")
-            return 0
+    session, close = _open_session(read_only=not args.commit)
+    try:
+        return _run(session, args)
+    finally:
         try:
-            counts = apply_plan(session, plan, fix_linked=args.fix_linked)
-            session.commit()
-        except Exception as exc:
             session.rollback()
-            print(f"[zejx] apply failed, rolled back ({type(exc).__name__})", file=sys.stderr)
-            return 1
-        print(f"[zejx] COMMITTED: {counts}")
+        finally:
+            close()
+
+
+def _open_session(read_only):
+    """A bare SQLAlchemy session on ONE connection from DATABASE_URL (no app
+    init, no create_all, no schedulers). Dry runs are READ ONLY on MySQL.
+    Returns (session, close)."""
+    try:
+        from dotenv import load_dotenv     # same .env the app reads
+        load_dotenv()
+    except ImportError:
+        pass
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise SystemExit("[zejx] DATABASE_URL is not set")
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+    engine = create_engine(url, pool_pre_ping=True)
+    conn = engine.connect()
+    if read_only and engine.dialect.name == "mysql":
+        conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+    session = Session(bind=conn)
+
+    def close():
+        session.close()
+        conn.close()
+        engine.dispose()
+    return session, close
+
+
+def _run(session, args):
+    plan = build_plan(session, args.user_id)
+    print(f"[zejx] mode={'COMMIT' if args.commit else 'DRY-RUN'} "
+          f"user={'all' if not args.user_id else 'one'} fix_linked={args.fix_linked}")
+    for line in plan.report_lines():
+        print(f"[zejx] {line}")
+    risk_txns = sum(n for _g, n in plan.reingest_risk)
+    print(f"[zejx] statements to be fixed that are NOT 'processed' (will be re-ingested "
+          f"under the new bank): {len(plan.reingest_risk)}, with {risk_txns} linked "
+          f"transaction row(s). Re-ingest is deduped bank-agnostically (ak-zejx) on "
+          f"an exact (date, amount, normalised description) match; a row whose "
+          f"description is worded differently on the re-read is not matched and "
+          f"WILL duplicate, so review these statements after the re-ingest.")
+    files_n, txns_n = linked_mismatch_counts(session, plan)
+    print(f"[zejx] linked rows with a different bank family: fileDetails={files_n} "
+          f"transactions={txns_n} ({'WILL be fixed' if args.fix_linked else 'not touched without --fix-linked'})")
+    if not args.commit:
+        print("[zejx] DRY-RUN complete: no writes.")
         return 0
+    try:
+        counts = apply_plan(session, plan, fix_linked=args.fix_linked)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        print(f"[zejx] apply failed, rolled back ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    print(f"[zejx] COMMITTED: {counts}")
+    return 0
 
 
 if __name__ == "__main__":

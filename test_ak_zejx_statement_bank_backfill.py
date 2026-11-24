@@ -157,17 +157,32 @@ class TestBackfill(unittest.TestCase):
 
     @contextmanager
     def _fake_app(self):
-        fake = types.ModuleType("app")
-        db = types.SimpleNamespace(session=self.s)
+        # ak-3oh review: the script opens a bare session (no app import);
+        # tests hand it the sqlite session instead.
+        modes = []
 
-        @contextmanager
-        def ctx():
+        def opener(read_only):
+            modes.append(read_only)
+            return self.s, (lambda: None)
+        with mock.patch.object(self.script, "_open_session", opener), \
+                mock.patch.object(self.s, "rollback", lambda: None):
+            self.open_modes = modes
             yield
-        fake.flask_app = types.SimpleNamespace(app_context=ctx, db=db)
-        g = types.SimpleNamespace()
-        with mock.patch.dict(sys.modules, {"app": fake}), \
-                mock.patch("flask.g", g, create=True):
-            yield
+
+    def test_script_never_imports_app(self):
+        src = open(self.script.__file__).read()
+        self.assertNotIn("from app import", src)
+        self.assertNotIn("import app", src)
+        self.assertLess(src.index('os.environ["AK_SKIP_SCHEDULERS"] = "1"'),
+                        src.index("from utils import statement_bank_backfill"))
+        self.assertIn("SET SESSION TRANSACTION READ ONLY", src)
+
+    def test_dry_run_opens_read_only_commit_does_not(self):
+        self.seed()
+        with self._fake_app(), redirect_stdout(io.StringIO()):
+            self.script.main([])
+            self.script.main(["--commit", "--assume-yes"])
+        self.assertEqual(self.open_modes, [True, False])
 
     def test_main_dry_run_writes_nothing(self):
         self.seed()
