@@ -432,5 +432,116 @@ class TestBoundedQueue(unittest.TestCase):
         self.assertLess(DEFAULT_QUEUE_MAXSIZE, 1024)
 
 
+@unittest.skipUnless(_IMPORT_OK, _SKIP_REASON)
+class TestConsumerDisconnect(unittest.TestCase):
+    """ak-5amc: a client disconnect (WSGI closes the consumer generator)
+    must not strand the producer thread on a full bounded queue.
+
+    Uses real threads and the default put poll, so on pre-ak-5amc code
+    (plain blocking put) the producer never exits and these fail."""
+
+    def _run(self, producer_gen_fn, consume_n):
+        import threading as _t
+        state = {"thread": None, "closed": _t.Event()}
+
+        def producer():
+            state["thread"] = _t.current_thread()
+            try:
+                yield from producer_gen_fn()
+            finally:
+                state["closed"].set()
+
+        gen = wrap_with_heartbeats(producer, interval_sec=5.0, queue_maxsize=2)
+        got = [next(gen) for _ in range(consume_n)]
+        time.sleep(0.2)  # let the producer fill the queue and park
+        gen.close()      # == client disconnect (GeneratorExit)
+        return got, state
+
+    def test_producer_exits_when_consumer_closes_on_full_queue(self):
+        def endless():
+            i = 0
+            while True:
+                yield f"data: {i}\n\n".encode()
+                i += 1
+
+        got, state = self._run(endless, consume_n=1)
+        self.assertEqual(got, [b"data: 0\n\n"])
+        state["thread"].join(timeout=3.0)
+        self.assertFalse(
+            state["thread"].is_alive(),
+            "producer thread still parked at put() after consumer "
+            "disconnect (ak-5amc stuck-thread)",
+        )
+        # Inner generator was closed, so its finally blocks ran.
+        self.assertTrue(state["closed"].is_set())
+
+    def test_producer_exits_when_consumer_closes_mid_gap(self):
+        # Inner is slow (between events) when the client drops; the
+        # producer must exit at its next put, not keep running.
+        produced = []
+
+        def slow():
+            for i in range(1000):
+                produced.append(i)
+                yield f"data: {i}\n\n".encode()
+                time.sleep(0.05)
+
+        got, state = self._run(slow, consume_n=1)
+        state["thread"].join(timeout=3.0)
+        self.assertFalse(state["thread"].is_alive())
+        self.assertLess(len(produced), 50)
+
+    def test_normal_completion_unchanged_with_tiny_queue(self):
+        def burst():
+            for i in range(20):
+                yield f"data: {i}\n\n".encode()
+
+        events = list(wrap_with_heartbeats(
+            burst, interval_sec=5.0, queue_maxsize=2,
+        ))
+        self.assertEqual(
+            events, [f"data: {i}\n\n".encode() for i in range(20)],
+        )
+
+
+@unittest.skipUnless(_IMPORT_OK, _SKIP_REASON)
+class TestOldFactoryWrapPatternCrashes(unittest.TestCase):
+    """ak-5amc item 2: pin the exact v1 (ak-iove 15298d4) failure shape.
+    Wrapping the FACTORY with copy_current_request_context leaves the
+    iteration outside the context, so the first g write in the producer
+    raises RuntimeError: Working outside of application context."""
+
+    def test_factory_wrap_raises_runtime_error(self):
+        try:
+            from flask import Flask, g as _flask_g, copy_current_request_context
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(f"Flask not available: {exc}")
+
+        app = Flask("ak5amc-v1-shape")
+        caught = []
+
+        with app.test_request_context("/"):
+            def producer():
+                _flask_g.firebase_id = "SET_BY_TOOL_EXECUTOR"
+                yield b"data: never\n\n"
+
+            @copy_current_request_context  # v1 shape: wraps the factory only
+            def factory():
+                return producer()
+
+            def on_err(exc):
+                caught.append(exc)
+                return iter(())
+
+            events = list(wrap_with_heartbeats(
+                factory, interval_sec=1.0, on_producer_error=on_err,
+            ))
+
+        self.assertEqual(events, [])
+        self.assertEqual(len(caught), 1, caught)
+        self.assertIsInstance(caught[0], RuntimeError)
+        self.assertIn("application context", str(caught[0]))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)

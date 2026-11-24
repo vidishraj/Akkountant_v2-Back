@@ -73,6 +73,13 @@ DEFAULT_HEARTBEAT_INTERVAL_SEC: float = 5.0
 # real ones fire.
 DEFAULT_QUEUE_MAXSIZE: int = 64
 
+# ak-5amc: the producer never blocks on put() indefinitely. It retries
+# with this timeout and re-checks whether the consumer has gone away
+# (client disconnect -> WSGI closes the consumer generator). Without
+# this, a full queue + dead consumer left the producer thread parked at
+# put() for the life of the process.
+DEFAULT_PUT_POLL_SEC: float = 0.5
+
 
 class _StreamEnded:
     """Sentinel type for the producer→consumer channel. Signals that
@@ -92,6 +99,7 @@ def wrap_with_heartbeats(
     on_producer_error: Callable[[BaseException], Iterator] | None = None,
     producer_wrapper: Callable[[Callable], Callable] | None = None,
     queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
+    put_poll_sec: float = DEFAULT_PUT_POLL_SEC,
 ) -> Iterator:
     """Wrap an inner SSE generator with keep-alive heartbeats.
 
@@ -122,8 +130,10 @@ def wrap_with_heartbeats(
         queue_maxsize: Bound on the producer→consumer channel. If the
             consumer stalls (client disconnected but WSGI hasn't torn
             down the generator yet), the producer thread blocks at
-            `put()` — natural backpressure. Daemon thread doesn't
-            block process exit. Default 64.
+            `put()` — natural backpressure. Default 64.
+        put_poll_sec: How often a producer blocked on a full queue
+            re-checks whether the consumer is gone (ak-5amc). Default
+            0.5s.
 
     Yields:
         Real events from the inner generator, interleaved with
@@ -134,13 +144,35 @@ def wrap_with_heartbeats(
         Producer thread is daemon=True so process exit is unblocked
         even if the inner generator hangs. Queue is thread-safe.
         Consumer runs in the caller's thread (usually WSGI worker).
+
+    Consumer disconnect (ak-5amc):
+        When the consumer generator is closed (client disconnect ->
+        GeneratorExit) or otherwise stops, it sets a `consumer_closed`
+        event. The producer stops putting, closes the inner generator
+        (so its `finally` blocks run) and exits. It notices at its next
+        put — within `put_poll_sec` if it is parked on a full queue, or
+        when the inner generator next yields if that is mid-call.
     """
     q: queue.Queue = queue.Queue(maxsize=queue_maxsize)
+    consumer_closed = threading.Event()
+
+    def _put(item) -> bool:
+        """Put without ever blocking forever. False = consumer gone."""
+        while not consumer_closed.is_set():
+            try:
+                q.put(item, timeout=put_poll_sec)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _producer_body():
+        inner = None
         try:
-            for event in producer_factory():
-                q.put(event)
+            inner = producer_factory()
+            for event in inner:
+                if not _put(event):
+                    return  # consumer gone — abandon (finally closes inner)
         except BaseException as exc:
             # Producer crashed. If caller supplied a converter, yield
             # its events through the queue before the sentinel. If not,
@@ -148,13 +180,22 @@ def wrap_with_heartbeats(
             if on_producer_error is not None:
                 try:
                     for event in on_producer_error(exc):
-                        q.put(event)
+                        if not _put(event):
+                            break
                 except BaseException:
                     # Error converter itself crashed — nothing we can
                     # do; ensure sentinel still fires.
                     pass
         finally:
-            q.put(_STREAM_ENDED)
+            if consumer_closed.is_set():
+                close = getattr(inner, "close", None)
+                if close is not None:
+                    try:
+                        close()
+                    except BaseException:
+                        pass
+            # Sentinel via _put: a dead consumer must not strand us here.
+            _put(_STREAM_ENDED)
 
     # ── ak-iove v2 CRITICAL fix ────────────────────────────────────────
     # `producer_wrapper` (typically `flask.copy_current_request_context`)
@@ -179,13 +220,18 @@ def wrap_with_heartbeats(
     )
     thread.start()
 
-    while True:
-        try:
-            item = q.get(timeout=interval_sec)
-        except queue.Empty:
-            # Silent gap — emit heartbeat + go back to waiting.
-            yield heartbeat_bytes
-            continue
-        if isinstance(item, _StreamEnded):
-            return
-        yield item
+    try:
+        while True:
+            try:
+                item = q.get(timeout=interval_sec)
+            except queue.Empty:
+                # Silent gap — emit heartbeat + go back to waiting.
+                yield heartbeat_bytes
+                continue
+            if isinstance(item, _StreamEnded):
+                return
+            yield item
+    finally:
+        # ak-5amc: runs on normal end AND on GeneratorExit (client
+        # disconnect). Releases a producer parked on a full queue.
+        consumer_closed.set()
