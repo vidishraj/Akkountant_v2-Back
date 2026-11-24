@@ -243,7 +243,18 @@ class InvestmentService(BaseService):
             # Settlement / day-change detail from Kite. Best-effort: an expired
             # Kite session leaves the index empty and every row simply renders
             # without the optional fields.
-            kiteHoldings, _kiteStatus = self.StockService.kite_holdings_index(userId)
+            # ak-ikgn: hand the NSE previous closes we already fetched to
+            # the Kite fold, so post-EOD day change uses the TRUE previous
+            # close (Kite rolls close_price to today's close after EOD).
+            nsePrevClose = {
+                sym: rate.get('previousClose')
+                for sym, rate in (stockRates or {}).items()
+                if isinstance(rate, dict) and not rate.get('error')
+                and rate.get('previousClose')
+            }
+            kiteHoldings, _kiteStatus = self.StockService.kite_holdings_index(
+                userId, nse_prev_close=nsePrevClose,
+            )
 
         for security in activeSecurities:
             if securityType == MSNENUM.Stocks.value:

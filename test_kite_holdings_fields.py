@@ -125,7 +125,7 @@ Preserved invariants (unchanged from ak-w4p):
 """
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -698,7 +698,9 @@ def test_stale_flat_on_prev_close_fallback_is_unknown():
                        close_price=1580.0)], {}).fetch_kite_holdings("u")[0]
     assert row["day_change_known"] is False
     assert row["day_change_amount"] == 0.0
-    assert row["day_change_basis"] is None
+    # ak-ikgn: the attempted basis + the reason are always reported.
+    assert row["day_change_basis"] == "prev_close"
+    assert row["day_change_unknown_reason"] == "stale_prev_close"
 
 
 def test_prod_shape_every_holding_stale_all_unknown():
@@ -748,9 +750,177 @@ def test_pre_open_zero_today_open_is_unknown():
     row = _service_with_ohlc(
         [_kite_holding(instrument_token=3)], {3: 0.0}).fetch_kite_holdings("u")[0]
     assert row["day_change_known"] is False
-    assert row["day_change_basis"] is None
+    assert row["day_change_basis"] == "today_open"
+    assert row["day_change_unknown_reason"] == "no_basis"
 
 
 def test_day_change_basis_field_always_present():
     rows = _service([_kite_holding()]).fetch_kite_holdings("u")
     assert "day_change_basis" in rows[0]
+
+
+# ── ak-ikgn (2026-11-24): genuine flat vs outage; NSE prev close; reason ───
+
+# Same module object the top-of-file (stubbed) import loaded.
+_resolve_day_change = StocksService.fetch_kite_holdings.__globals__["_resolve_day_change"]
+
+
+def _r(**kw):
+    base = dict(last_price=100.0, close_price=95.0, today_open=None,
+                ohlc_batch_ok=False, nse_prev_close=None)
+    base.update(kw)
+    return _resolve_day_change(**base)
+
+
+def test_resolver_priority_open_then_kite_close():
+    # ak-ikgn review: intraday (no rollover) the Kite close stands even
+    # when an agreeing NSE value is present; NSE never overrides it.
+    assert _r(today_open=98.0, nse_prev_close=97.0)[:3] == (98.0, "today_open", True)
+    assert _r(nse_prev_close=95.0)[:3] == (95.0, "prev_close", True)
+    assert _r()[:3] == (95.0, "prev_close", True)
+
+
+def test_resolver_unknown_reasons():
+    assert _r(last_price=0) [2:] == (False, "no_quote")
+    assert _r(close_price=0)[1:] == (None, False, "no_basis")
+    assert _r(today_open=0.0)[2:] == (False, "no_basis")        # pre-open poison
+    assert _r(last_price=95.0)[2:] == (False, "stale_prev_close")
+
+
+def test_resolver_genuine_flat_when_ohlc_batch_worked():
+    # item 1: batch returned quotes, this token had none (suspended /
+    # illiquid), last == close → a REAL flat, known 0.
+    assert _r(last_price=95.0, ohlc_batch_ok=True)[2:] == (True, None)
+
+
+def test_resolver_rollover_substitutes_nse_within_bound():
+    # last == close and OHLC failed = rollover → NSE prev close stands in.
+    assert _r(last_price=95.0, nse_prev_close=90.0)[:3] == (90.0, "nse_prev_close", True)
+
+
+def test_review_probe_wrong_nse_value_intraday_is_conflict_not_known():
+    # Reviewer's probe: OHLC down intraday, true prev close 100 (Kite),
+    # NSE says 500. Previously → known with a large wrong ₹. Now: unknown.
+    basis, source, known, reason = _r(last_price=105.0, close_price=100.0,
+                                      nse_prev_close=500.0)
+    assert (known, reason) == (False, "basis_conflict")
+
+
+def test_review_probe_wrong_nse_value_at_rollover_is_out_of_bounds():
+    basis, source, known, reason = _r(last_price=105.0, close_price=105.0,
+                                      nse_prev_close=500.0)
+    assert (known, reason) == (False, "basis_out_of_bounds")
+
+
+def test_rollover_bound_edge():
+    assert _r(last_price=120.0, close_price=120.0, nse_prev_close=100.0)[2] is True   # 20%
+    assert _r(last_price=120.01, close_price=120.01, nse_prev_close=100.0)[3] == "basis_out_of_bounds"
+
+
+def test_conflict_tolerance_allows_rounding():
+    # NSE prices are quantised ROUND_DOWN to 0.01; tiny gaps are not a conflict.
+    assert _r(close_price=1580.0, nse_prev_close=1579.99)[2:] == (True, None)
+    assert _r(close_price=1580.0, nse_prev_close=1500.0)[3] == "basis_conflict"
+
+
+def test_nse_never_a_standalone_basis():
+    assert _r(close_price=0, nse_prev_close=97.0)[1:] == (None, False, "no_basis")
+
+
+def test_batch_ok_missing_token_last_eq_close_is_known_zero():
+    # Bead test: non-empty OHLC dict + a missing token + last == close.
+    holdings = [
+        _kite_holding(tradingsymbol="SUSP", instrument_token=1,
+                      last_price=500.0, close_price=500.0),
+        _kite_holding(tradingsymbol="LIVE", instrument_token=2),
+    ]
+    rows = _service_with_ohlc(holdings, {2: 1590.0}).fetch_kite_holdings("u")
+    susp = next(r for r in rows if r["symbol"] == "SUSP")
+    assert susp["day_change_known"] is True
+    assert susp["day_change_amount"] == 0.0
+    assert susp["day_change_basis"] == "prev_close"
+    assert susp["day_change_unknown_reason"] is None
+
+
+def test_ohlc_outage_same_row_stays_unknown():
+    holdings = [_kite_holding(tradingsymbol="SUSP", instrument_token=1,
+                              last_price=500.0, close_price=500.0)]
+    svc = _service(holdings)
+    svc.kite_service.get_ohlc.side_effect = RuntimeError("Insufficient permission")
+    row = svc.fetch_kite_holdings("u")[0]
+    assert row["day_change_known"] is False
+    assert row["day_change_unknown_reason"] == "stale_prev_close"
+
+
+def test_post_eod_rollover_uses_nse_prev_close_real_change():
+    # Prod 2026-11-24 after EOD: Kite close rolled to today's close
+    # (last == close 18/18), OHLC failing; NSE previousClose is the
+    # true prior close → the REAL day change, known.
+    holdings = [
+        _kite_holding(tradingsymbol=f"S{i}", instrument_token=i,
+                      quantity=10, t1_quantity=0,
+                      last_price=200.0 + i, close_price=200.0 + i)
+        for i in range(18)
+    ]
+    nse = {f"S{i}": 190.0 + i for i in range(18)}
+    svc = _service(holdings)
+    svc.kite_service.get_ohlc.side_effect = RuntimeError("Insufficient permission")
+    rows = svc.fetch_kite_holdings("u", nse_prev_close=nse)
+    assert all(r["day_change_known"] is True for r in rows)
+    assert all(r["day_change_basis"] == "nse_prev_close" for r in rows)
+    assert all(r["day_change_amount"] == pytest.approx(10 * 10.0) for r in rows)
+    assert all(r["day_change_unknown_reason"] is None for r in rows)
+
+
+def test_nse_value_ignored_for_non_nse_exchange():
+    # Join on exchange too: a BSE listing with the same symbol must not
+    # pick up the NSE feed value.
+    holdings = [_kite_holding(tradingsymbol="X", exchange="BSE", instrument_token=1,
+                              last_price=105.0, close_price=105.0)]
+    svc = _service(holdings)
+    svc.kite_service.get_ohlc.side_effect = RuntimeError("Insufficient permission")
+    row = svc.fetch_kite_holdings("u", nse_prev_close={"X": 100.0})[0]
+    assert row["day_change_basis"] == "prev_close"
+    assert row["day_change_unknown_reason"] == "stale_prev_close"
+
+
+def test_wrong_nse_value_end_to_end_never_known():
+    holdings = [_kite_holding(tradingsymbol="W", instrument_token=1,
+                              quantity=10, t1_quantity=0,
+                              last_price=105.0, close_price=100.0)]
+    svc = _service(holdings)
+    svc.kite_service.get_ohlc.side_effect = RuntimeError("Insufficient permission")
+    row = svc.fetch_kite_holdings("u", nse_prev_close={"W": 500.0})[0]
+    assert row["day_change_known"] is False
+    assert row["day_change_amount"] == 0.0
+    assert row["day_change_unknown_reason"] == "basis_conflict"
+
+
+def test_nse_map_missing_symbol_falls_back_to_kite_close():
+    svc = _service([_kite_holding(instrument_token=1)])
+    row = svc.fetch_kite_holdings("u", nse_prev_close={"OTHER": 1.0})[0]
+    assert row["day_change_basis"] == "prev_close"
+    assert row["day_change_amount"] == pytest.approx(451 * (1600.0 - 1580.0))
+
+
+def test_new_fields_in_kite_row_overlay():
+    assert "day_change_basis" in StocksService.KITE_ROW_FIELDS
+    assert "day_change_unknown_reason" in StocksService.KITE_ROW_FIELDS
+
+
+def test_kite_holdings_index_forwards_nse_map():
+    svc = _service([_kite_holding()])
+    with patch.object(StocksService, "fetch_kite_holdings",
+                      return_value=[]) as fk:
+        svc.kite_holdings_index("u", nse_prev_close={"ANANTRAJ": 1.0})
+    fk.assert_called_once_with("u", nse_prev_close={"ANANTRAJ": 1.0})
+
+
+def test_investment_service_passes_valid_nse_prev_closes():
+    import os as _os
+    src = open(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                             "services", "InvestmentService.py")).read()
+    block = src[src.index("nsePrevClose = {"):src.index("kite_holdings_index(") + 200]
+    assert "not rate.get('error')" in block          # fallback rows excluded
+    assert "rate.get('previousClose')" in block       # zero/None excluded
+    assert "nse_prev_close=nsePrevClose" in block

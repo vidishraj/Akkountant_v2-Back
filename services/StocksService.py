@@ -32,6 +32,76 @@ from services.KiteService import KiteService, KiteAuthError
 from utils.AIHelper import fetch_via_ai
 
 
+
+# ak-ikgn review: NSE previousClose is only a SUBSTITUTE for Kite's
+# close_price during the post-EOD rollover, and only within this bound.
+NSE_ROLLOVER_MAX_MOVE = 0.20
+# Outside the rollover, Kite close and NSE previousClose describe the same
+# price; disagreement beyond this (rounding/quantisation headroom) means
+# one feed is wrong, so the day change is not trusted.
+BASIS_CONFLICT_TOLERANCE = 0.01
+
+
+def _resolve_day_change(*, last_price, close_price, today_open,
+                        ohlc_batch_ok, nse_prev_close=None):
+    """Pick the day-change basis and decide whether it is KNOWN.
+    Returns (basis_value, basis_source, known, unknown_reason).
+
+    1. today_open from a live OHLC quote ("today_open"). Pre-open open=0
+       is a poison basis → unknown "no_basis" (ak-qeex).
+    2. Kite close_price is the previous-close basis ("prev_close").
+       a. last == close while the OHLC batch WORKED: this instrument had
+          no quote (suspended / illiquid) → a GENUINE flat, known 0.
+       b. last == close while OHLC FAILED: Kite's post-EOD rollover
+          (close := today's close) or a stale quote. Substitute the NSE
+          previousClose ("nse_prev_close") ONLY if present and
+          |last − nse| / nse ≤ NSE_ROLLOVER_MAX_MOVE; NSE beyond the
+          bound → unknown "basis_out_of_bounds"; no NSE → unknown
+          "stale_prev_close".
+       c. otherwise Kite close stands; if NSE is also present and
+          disagrees with it beyond BASIS_CONFLICT_TOLERANCE → unknown
+          "basis_conflict" (one feed is wrong; never show a confident
+          wrong ₹).
+    3. No usable basis → "no_basis"; no last_price → "no_quote".
+    NSE is never a standalone basis (no Kite close → "no_basis").
+    """
+    def _num(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    last = _num(last_price)
+    close = _num(close_price)
+    nse = _num(nse_prev_close)
+
+    if today_open is not None:
+        basis = _num(today_open)
+        if not basis:
+            return basis, "today_open", False, "no_basis"
+        if not last:
+            return basis, "today_open", False, "no_quote"
+        return basis, "today_open", True, None
+
+    if not close:
+        return 0.0, None, False, "no_basis"
+    if not last:
+        return close, "prev_close", False, "no_quote"
+
+    if last == close:
+        if ohlc_batch_ok:
+            return close, "prev_close", True, None          # genuine flat
+        if nse > 0:
+            if abs(last - nse) / nse > NSE_ROLLOVER_MAX_MOVE:
+                return nse, "nse_prev_close", False, "basis_out_of_bounds"
+            return nse, "nse_prev_close", True, None         # rollover fix
+        return close, "prev_close", False, "stale_prev_close"
+
+    if nse > 0 and abs(close - nse) / nse > BASIS_CONFLICT_TOLERANCE:
+        return close, "prev_close", False, "basis_conflict"
+    return close, "prev_close", True, None
+
+
 class StocksService(Base_MSN, ABC):
 
     def __init__(self):
@@ -436,8 +506,15 @@ class StocksService(Base_MSN, ABC):
                 return True
         return False
 
-    def fetch_kite_holdings(self, userId):
+    def fetch_kite_holdings(self, userId, nse_prev_close=None):
         """Fetch holdings from Kite and format for the Kite-view display.
+
+        ak-ikgn: ``nse_prev_close`` (optional ``{symbol: previousClose}``
+        from the NSE feed the caller already fetched) is the preferred
+        previous-close basis for day change. After EOD Kite rolls a
+        holding's ``close_price`` to TODAY's close (measured 2026-11-24,
+        18/18 rows), so Kite's own close can't serve as yesterday's
+        close then; NSE previousClose can.
 
         Kite's holdings payload already carries settlement, day-change and
         collateral detail; we used to drop all of it on the floor here. Keeping
@@ -553,59 +630,24 @@ class StocksService(Base_MSN, ABC):
                     if today_opens and instrument_token is not None
                     else None
                 )
-                day_change_basis = today_open if today_open is not None else close_price
-
-                # ak-qeex fix (2026-11-12): fail-closed guard on poison
-                # basis. If `day_change_basis` is 0 / None / falsy after
-                # the today_open-vs-close_price resolve, emit
-                # day_change_amount = 0 (semantic: "unknown day change")
-                # instead of the current math's qty × last_price (which
-                # would surface the full market value as "today's
-                # change" — an order-of-magnitude error on the summary
-                # card).
-                #
-                # Edges that trip this:
-                #   * Kite OHLC emits today_open=0 on pre-open ticks
-                #     (bypasses the `is not None` check in the resolve
-                #     above because 0 != None but is still a poison
-                #     basis).
-                #   * close_price absent + OHLC-fallback-basis absent
-                #     (both missing — cold-sync edge pre-first holdings
-                #     refresh).
-                #   * Any future field addition that lands here with 0
-                #     from `.get(..., 0) or 0` coercion.
-                #
-                # Reviewer verdict on ak-4o41 (3202ea6) called this out
-                # as MAJOR. 0 is better than phantom-full-value as the
-                # degraded default — FE renders 0 as "no change today"
-                # which matches user mental model on a missing-data day.
-                # If FE needs to distinguish "unknown" from "no change",
-                # a `day_change_known: bool` field can land as follow-up.
-                # ak-tsoy (2026-11-24): a KNOWN day change needs a real
-                # basis AND a price that can have moved against it.
-                # Without today's open (OHLC down / no permission:
-                # ak-yx1y) the basis falls back to close_price, and
-                # last_price == close_price is then indistinguishable
-                # from a STALE quote: Kite's holdings last_price not
-                # updated, or close_price already rolled to today's
-                # close after EOD. Prod 2026-11-24: 18/18 holdings
-                # showed exactly this, a confident ₹0.00 "flat" on
-                # every row while the market feed showed real moves.
-                # Never present a fabricated flat as known.
-                if today_open is not None and today_open:
-                    day_change_basis_source = "today_open"
-                elif close_price:
-                    day_change_basis_source = "prev_close"
-                else:
-                    day_change_basis_source = None
-                stale_flat = (
-                    day_change_basis_source == "prev_close"
-                    and float(last_price) == float(close_price)
-                )
-                day_change_known = (
-                    bool(day_change_basis)
-                    and bool(last_price)   # no quote at all → unknown
-                    and not stale_flat
+                # ak-ikgn: basis selection + known/unknown verdict live in
+                # one pure helper (see _resolve_day_change). History:
+                # ak-qeex (poison basis), ak-yvjs (known flag), ak-tsoy
+                # (stale prev-close flat), ak-ikgn (genuine-flat
+                # discriminator, NSE prev close, unknown reason).
+                symbol = holding.get('tradingsymbol')
+                (day_change_basis, day_change_basis_source,
+                 day_change_known, day_change_unknown_reason) = _resolve_day_change(
+                    last_price=last_price,
+                    close_price=close_price,
+                    today_open=today_open,
+                    ohlc_batch_ok=bool(today_opens),
+                    # ak-ikgn review: join on exchange as well as symbol;
+                    # the NSE feed describes NSE listings only.
+                    nse_prev_close=(
+                        (nse_prev_close or {}).get(symbol)
+                        if holding.get('exchange') == 'NSE' else None
+                    ),
                 )
 
                 # Folded money math (Path A: Kite average_price as
@@ -661,9 +703,17 @@ class StocksService(Base_MSN, ABC):
                     # "today_open" (live OHLC), "prev_close" (fallback),
                     # or None (no basis). Lets FE/ops see a degraded
                     # source without inferring it from the numbers.
-                    'day_change_basis': (
-                        day_change_basis_source if day_change_known else None
-                    ),
+                    # ak-ikgn: always emitted. "today_open" (live
+                    # OHLC) | "nse_prev_close" (NSE feed previous close)
+                    # | "prev_close" (Kite close_price) | None (no basis).
+                    'day_change_basis': day_change_basis_source,
+                    # ak-ikgn: None when known; else "stale_prev_close"
+                    # (Kite close == last while OHLC was unavailable, no
+                    # NSE substitute) | "basis_out_of_bounds" (NSE
+                    # substitute moved > 20%) | "basis_conflict" (Kite
+                    # close vs NSE prev close disagree) | "no_basis" |
+                    # "no_quote" (no last_price).
+                    'day_change_unknown_reason': day_change_unknown_reason,
 
                     # --- Kite's own settled-only P&L / day change (preserved
                     #     for observability; NOT the folded values) ---
@@ -793,11 +843,14 @@ class StocksService(Base_MSN, ABC):
         'day_change_amount',
         # ak-yvjs: fail-closed truthiness companion for day_change_amount.
         'day_change_known',
+        # ak-ikgn: basis + unknown reason travel with the row too.
+        'day_change_basis',
+        'day_change_unknown_reason',
         # MTF fields
         'mtf_quantity',
     )
 
-    def kite_holdings_index(self, userId):
+    def kite_holdings_index(self, userId, nse_prev_close=None):
         """Kite holdings keyed by trading symbol, for enriching securities rows.
 
         Returns ``(index, status)``. Enrichment is strictly best-effort: an
@@ -807,7 +860,9 @@ class StocksService(Base_MSN, ABC):
         without the optional fields.
         """
         try:
-            holdings = self.fetch_kite_holdings(userId)
+            holdings = self.fetch_kite_holdings(
+                userId, nse_prev_close=nse_prev_close,
+            )
         except KiteAuthError as e:
             self.logger.warning(
                 f"Skipping Kite enrichment of securities list for {userId}: {str(e)}"
