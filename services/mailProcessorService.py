@@ -3050,6 +3050,7 @@ class MailProcessorService:
         # Build fresh MCP tools and server for each chunk (clean context)
         sdk_tools = self._build_sdk_tools(
             user_id, chunk_page_end=page_end, insert_called=insert_called,
+            pinned_pdf_path=pdf_path,  # ak-jmbw
         )
         mcp_server = create_sdk_mcp_server(
             name=MCP_SERVER_NAME,
@@ -3345,6 +3346,7 @@ class MailProcessorService:
                 insert_called = {"value": False}
                 sdk_tools = self._build_sdk_tools(
                     user_id, chunk_page_end=page_end, insert_called=insert_called,
+                    pinned_pdf_path=pdf_path,  # ak-jmbw
                 )
                 mcp_server = create_sdk_mcp_server(
                     name=MCP_SERVER_NAME, tools=sdk_tools,
@@ -3371,6 +3373,7 @@ class MailProcessorService:
                 insert_called = {"value": False}
                 sdk_tools = self._build_sdk_tools(
                     user_id, chunk_page_end=page_end, insert_called=insert_called,
+                    pinned_pdf_path=pdf_path,  # ak-jmbw
                 )
                 mcp_server = create_sdk_mcp_server(
                     name=MCP_SERVER_NAME, tools=sdk_tools,
@@ -3451,7 +3454,8 @@ class MailProcessorService:
 
     # ── MCP tool building ──────────────────────────────────────────────
 
-    def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None, email_lookup=None):
+    def _build_sdk_tools(self, user_id, chunk_page_end=None, insert_called=None, email_lookup=None,
+                         pinned_pdf_path=None):
         """Build SdkMcpTool objects for the mail processor agent.
 
         Args:
@@ -3497,6 +3501,8 @@ class MailProcessorService:
                     investment_service=self.investment_service,
                     invoice_service=self.invoice_service,
                     reconciliation_service=self.reconciliation_service,
+                    # ak-jmbw: the ONLY file the file tools may touch.
+                    pinned_pdf_path=pinned_pdf_path,
                 )
 
                 # Capture duplicate count from insert result

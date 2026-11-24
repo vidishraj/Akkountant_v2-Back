@@ -261,6 +261,21 @@ class TestAllClaudeAgentOptionsHaveAllowedTools(unittest.TestCase):
             f"the pre-approved list. Violations: {violations}",
         )
 
+    # (5b) ak-m0f6 minor: no site may pass setting_sources. Loading
+    # user/project/local CLI settings can re-introduce tools, MCP servers
+    # or permission rules from config files outside the code, undoing
+    # the restriction above.
+    def test_no_options_construction_passes_setting_sources(self):
+        offenders = [
+            f"{rel}:{lineno}"
+            for rel, lineno, node in self._find_claude_agent_options_calls()
+            if any(kw.arg in ("setting_sources", "settings")
+                   for kw in node.keywords)
+        ]
+        self.assertEqual(offenders, [],
+                         "ak-m0f6: setting_sources/settings would load "
+                         f"external CLI config: {offenders}")
+
     # (6) Walker finds the expected number of call sites (sanity
     # against the walker returning zero due to a bug).
     def test_walker_finds_expected_sites(self):

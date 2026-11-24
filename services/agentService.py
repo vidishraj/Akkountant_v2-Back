@@ -562,9 +562,11 @@ class AgentService(BaseService):
 
         attachments (ak-1x4): list of attachment_id strings previously
         returned by POST /agent/attach. Investment agent only. Each id
-        is resolved to an absolute filesystem path under the user's
-        per-user dir; paths are injected into the user's latest message
-        for Claude's Read tool to pick up. The attachment files are
+        is resolved to a file under the user's per-user dir and exposed
+        ONLY through the ``mcp__agent_tools__read_attachment`` MCP tool
+        (ak-1x4 pass 2); no built-in Read tool is offered (ak-m0f6:
+        built-ins are restricted to WebSearch/WebFetch for this agent).
+        The attachment files are
         deleted in the finally block — ephemeral per-turn lifecycle.
         Resolution failures (deleted, cross-user, malformed id) emit a
         single SSE error event and bail before the SDK runs.

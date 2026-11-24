@@ -16,6 +16,10 @@ from enums.TransactionTypeEnum import TransactionTypeEnum
 from models.transactions import ProcessingMethod
 from utils.GenericUtils import GenericUtil
 from utils.logger import Logger
+from utils.mail_tool_paths import (
+    ToolPathRejected, model_path_differs, resolve_pinned_pdf,
+    safe_attachment_dest,
+)
 
 logger = Logger(__name__).get_logger()
 
@@ -124,10 +128,15 @@ def _get_statement_count(transaction_service, file_id):
 
 def execute_mail_tool(tool_name, tool_input, user_id,
                       transaction_service=None, investment_service=None,
-                      invoice_service=None, reconciliation_service=None):
+                      invoice_service=None, reconciliation_service=None,
+                      pinned_pdf_path=None):
     """
     Execute a mail processor tool call by routing to the appropriate service method.
     Returns a dict with tool result, or for get_pdf_pages returns image content.
+
+    ak-jmbw: ``pinned_pdf_path`` is the run's own PDF, supplied by the
+    SERVICE. get_pdf_pages / save_attachment act only on it (see
+    utils.mail_tool_paths); model-supplied paths are ignored.
     """
     g.firebase_id = user_id
 
@@ -148,9 +157,9 @@ def execute_mail_tool(tool_name, tool_input, user_id,
             result = _handle_mark_invoice_paid(tool_input, invoice_service)
         elif tool_name == "get_pdf_pages":
             # Special case — returns image content for vision
-            return _handle_get_pdf_pages(tool_input)
+            return _handle_get_pdf_pages(tool_input, pinned_pdf_path, user_id)
         elif tool_name == "save_attachment":
-            result = _handle_save_attachment(tool_input, user_id)
+            result = _handle_save_attachment(tool_input, user_id, pinned_pdf_path)
         elif tool_name == "report_result":
             result = _handle_report_result(tool_input, user_id, transaction_service)
         else:
@@ -921,20 +930,28 @@ _MAX_CONTENT_BYTES = 900_000
 _RENDER_DPI = 100
 
 
-def _handle_get_pdf_pages(args):
+def _handle_get_pdf_pages(args, pinned_pdf_path=None, user_id=None):
     """
     Render PDF pages to images using PyMuPDF and return as ImageContent.
     Supports fetching multiple pages per call via page_range (e.g. '1-3', 'all').
     Caps accumulated image size at _MAX_CONTENT_BYTES to stay under the 1MB SDK buffer.
     Falls back to single page_number for backward compatibility.
     """
-    pdf_path = args["pdf_path"]
+    # ak-jmbw: NEVER open the model-supplied path. Use the run's own PDF
+    # (pinned by the service) after a realpath containment check.
+    try:
+        pdf_path = resolve_pinned_pdf(pinned_pdf_path, user_id)
+    except ToolPathRejected as exc:
+        logger.warning(f"get_pdf_pages refused: {exc}")
+        return {"error": f"get_pdf_pages refused: {exc}"}
+    if model_path_differs(args.get("pdf_path"), pdf_path):
+        logger.warning(
+            "get_pdf_pages: model asked for a different file than the "
+            "run's PDF; ignored (serving the run's PDF)"
+        )
     password = args.get("password")
     page_range = args.get("page_range")
     page_number = args.get("page_number", 1)  # 1-indexed, fallback
-
-    if not os.path.exists(pdf_path):
-        return {"error": f"PDF file not found: {pdf_path}"}
 
     try:
         doc = fitz.open(pdf_path)
@@ -1017,24 +1034,32 @@ def _handle_get_pdf_pages(args):
         return {"error": f"Failed to render PDF: {str(e)}"}
 
 
-def _handle_save_attachment(args, user_id):
-    """Save a PDF attachment to local storage."""
-    source_path = args["source_path"]
-    category = args["category"]
-    filename = args["filename"]
+def _handle_save_attachment(args, user_id, pinned_pdf_path=None):
+    """Save the run's PDF attachment to local storage.
 
-    if not os.path.exists(source_path):
-        return {"error": f"Source file not found: {source_path}"}
+    ak-jmbw: the SOURCE is always the run's own PDF (pinned by the
+    service, realpath-contained); the model's `source_path` is ignored.
+    `category` (a directory name) is validated against the enum
+    server-side and the destination is confined to
+    attachments/<uid>/<category>/.
+    """
+    try:
+        source_path = resolve_pinned_pdf(pinned_pdf_path, user_id)
+        dest_path = safe_attachment_dest(
+            user_id, args.get("category"), args.get("filename"),
+        )
+    except ToolPathRejected as exc:
+        logger.warning(f"save_attachment refused: {exc}")
+        return {"error": f"save_attachment refused: {exc}"}
+    if model_path_differs(args.get("source_path"), source_path):
+        logger.warning(
+            "save_attachment: model asked for a different file than the "
+            "run's PDF; ignored (saving the run's PDF)"
+        )
 
-    save_dir = os.path.join(os.getcwd(), "attachments", user_id, category)
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Sanitize filename — strip path traversal and separators
-    safe_filename = filename.replace("..", "").replace("/", "_").replace("\\", "_")
-    dest_path = os.path.join(save_dir, safe_filename)
-
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     shutil.copy2(source_path, dest_path)
-    logger.info(f"Saved attachment to {dest_path}")
+    logger.info("Saved run PDF to attachments dir")
 
     return {"result": "success", "saved_path": dest_path}
 
