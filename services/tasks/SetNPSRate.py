@@ -1,11 +1,12 @@
 from decimal import Decimal
-from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pandas as pd
-import requests
 
 from services.tasks.BaseRateTask import BaseRateTask
+from services.tasks.npsSchemeDownload import (
+    DEAD_SCHEME_IDS, OK, DownloadTally, download_scheme_tsv, scheme_ids,
+)
 from utils.logger import Logger
 
 
@@ -90,46 +91,46 @@ class SetNPSRate(BaseRateTask):
         all_rates = []
         total_hist_upserted = 0
         hist_errors = 0
+        # ak-4caa: rates skip the known-dead ids every run (SetNPSDetails
+        # re-probes them daily and WARNs if one revives).
+        tally = DownloadTally(skipped_dead=len(DEAD_SCHEME_IDS))
 
-        # Iterate through all PFM IDs (PFM001 to PFM014)
-        for pfm_num in range(1, 15):
-            pfm_id = f"PFM0{pfm_num:02d}"
+        # 14 PFMs x 16 schemes (ak-4caa: shared, classified download).
+        for pfm_id, scheme_id in scheme_ids():
+            try:
+                excel_data, outcome, reason = download_scheme_tsv(
+                    pfm_id, scheme_id, self.logger)
+                tally.add(pfm_id, scheme_id, outcome, reason)
+                if outcome == OK:
+                    # Extract rates from this scheme
+                    scheme_rates = self.extractRatesFromExcel(excel_data, scheme_id)
+                    if scheme_rates:
+                        all_rates.append(scheme_rates)
+                        self.logger.info(f"Successfully processed rates for {scheme_id}")
 
-            # Try different schemes for this PFM (001 to 016)
-            for scheme_num in range(1, 17):
-                scheme_id = f"SM0{pfm_num:02d}{scheme_num:03d}"
+                    # ak-v8z1: persist the 12-month history every
+                    # row — best-effort, isolated per-scheme so a
+                    # DB blip on one scheme doesn't poison the
+                    # current-NAV write for the others.
+                    try:
+                        upserted = self._persist_historical_rows(
+                            excel_data, scheme_id,
+                        )
+                        total_hist_upserted += upserted
+                    except Exception as hist_exc:
+                        hist_errors += 1
+                        self.logger.warning(
+                            f"ak-v8z1 history persist failed for "
+                            f"{scheme_id}: {hist_exc}"
+                        )
 
-                try:
-                    excel_data = self.downloadNPSExcel(pfm_id, scheme_id)
-                    if excel_data is not None and not excel_data.empty:
-                        # Extract rates from this scheme
-                        scheme_rates = self.extractRatesFromExcel(excel_data, scheme_id)
-                        if scheme_rates:
-                            all_rates.append(scheme_rates)
-                            self.logger.info(f"Successfully processed rates for {scheme_id}")
-
-                        # ak-v8z1: persist the 12-month history every
-                        # row — best-effort, isolated per-scheme so a
-                        # DB blip on one scheme doesn't poison the
-                        # current-NAV write for the others.
-                        try:
-                            upserted = self._persist_historical_rows(
-                                excel_data, scheme_id,
-                            )
-                            total_hist_upserted += upserted
-                        except Exception as hist_exc:
-                            hist_errors += 1
-                            self.logger.warning(
-                                f"ak-v8z1 history persist failed for "
-                                f"{scheme_id}: {hist_exc}"
-                            )
-
-                except Exception as e:
-                    self.logger.error(f"Error processing rates for {scheme_id}: {str(e)}")
-                    continue
+            except Exception as e:
+                self.logger.error(f"Error processing rates for {scheme_id}: {str(e)}")
+                continue
 
         successful_downloads = len(all_rates)
         self.logger.info(f"Total scheme rates collected: {successful_downloads}")
+        tally.log(self.logger, "SetNPSRate")
         if total_hist_upserted or hist_errors:
             self.logger.info(
                 f"ak-v8z1 NPS history: upserted={total_hist_upserted} "
@@ -210,29 +211,6 @@ class SetNPSRate(BaseRateTask):
         upsert = stmt.on_duplicate_key_update(nav=stmt.inserted.nav)
         self.db.session.execute(upsert)
         return len(rows)
-    
-    def downloadNPSExcel(self, pfm_id, scheme_id):
-        """
-        Download Excel file for a specific PFM and scheme
-        """
-        url = f"https://npstrust.org.in/scheme-wise-nav-report-excel?navcatdataxls={pfm_id}&navyearselxls=12&navsubdataxls={scheme_id}"
-        
-        try:
-            response = requests.get(url, timeout=30, verify=False)
-            response.raise_for_status()
-            
-            # Check if response contains Excel data
-            if 'application/vnd' in response.headers.get('content-type', '') or len(response.content) > 1000:
-                # The API returns TSV data despite the Excel content-type header
-                tsv_data = pd.read_csv(BytesIO(response.content), sep='\t')
-                return tsv_data
-            else:
-                # Likely an error page or no data
-                return None
-                
-        except Exception as e:
-            self.logger.debug(f"No data available for {pfm_id}/{scheme_id}: {str(e)}")
-            return None
     
     def extractRatesFromExcel(self, excel_data, scheme_id):
         """

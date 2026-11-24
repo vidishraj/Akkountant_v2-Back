@@ -1,14 +1,25 @@
 import os
-import pandas as pd
-import requests
-from io import BytesIO
 
 from services.tasks.baseTask import BaseTask
+import time
+
+from services.tasks.npsSchemeDownload import (
+    DEAD_SCHEME_IDS, FULL_PROBE_INTERVAL_S, OK, DownloadTally,
+    download_scheme_tsv, scheme_ids,
+)
 from utils.logger import Logger
+
+
+# ak-4caa: the probe clock, injectable for tests (patching the global
+# time.time also hits logging's LogRecord and other callers).
+_now = time.time
 
 
 class SetNPSDetails(BaseTask):
     _instance = None
+    # ak-4caa: when the dead ids were last re-probed (process lifetime;
+    # 0 = never, so the first run after a restart probes everything).
+    _last_full_probe = 0.0
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -26,7 +37,14 @@ class SetNPSDetails(BaseTask):
         try:
             # Generate NPS scheme details from Excel downloads
             jsonData = self.fetchNPSDetailsFromExcel()
-            
+            # ak-4caa: never replace the scheme list with an empty one
+            # (that completed green while NPS ingest was broken).
+            if not jsonData.get("data"):
+                msg = ("No NPS schemes collected — keeping the previous "
+                       f"list. {jsonData.get('download_summary', '')}")
+                self.logger.error(f"[ak-4caa] SetNPSDetails: {msg}")
+                return msg, "Failed", self.interval
+
             filePath = os.path.join(self.tmp_dir, 'NPSDetails.json')
             try:
                 os.remove(filePath)
@@ -48,19 +66,27 @@ class SetNPSDetails(BaseTask):
         """
         all_schemes = []
         successful_downloads = 0
-        
-        # Iterate through all PFM IDs (PFM001 to PFM014)
-        for pfm_num in range(1, 15):
-            pfm_id = f"PFM0{pfm_num:02d}"
+        # ak-4caa: the known-dead ids are skipped except on a full probe
+        # at most once per FULL_PROBE_INTERVAL_S, so a revived scheme is
+        # still discovered (tally WARNs to drop it from the list).
+        now = _now()
+        full_probe = now - (self._last_full_probe or 0.0) >= FULL_PROBE_INTERVAL_S
+        if full_probe:
+            self._last_full_probe = now
+        tally = DownloadTally(skipped_dead=0 if full_probe else len(DEAD_SCHEME_IDS))
+        by_pfm = {}
+        for pfm_id, scheme_id in scheme_ids(include_dead=full_probe):
+            by_pfm.setdefault(pfm_id, []).append(scheme_id)
+
+        for pfm_id, pfm_scheme_ids in by_pfm.items():
             pfm_schemes_found = []
-            
-            # Try all possible schemes for this PFM (001 to 016)
-            for scheme_num in range(1, 17):
-                scheme_id = f"SM0{pfm_num:02d}{scheme_num:03d}"
-                
+
+            for scheme_id in pfm_scheme_ids:
                 try:
-                    excel_data = self.downloadNPSExcel(pfm_id, scheme_id)
-                    if excel_data is not None and not excel_data.empty:
+                    excel_data, outcome, reason = download_scheme_tsv(
+                        pfm_id, scheme_id, self.logger)
+                    tally.add(pfm_id, scheme_id, outcome, reason)
+                    if outcome == OK:
                         # Extract schemes from this file
                         schemes = self.extractSchemesFromExcel(excel_data, pfm_id)
                         
@@ -70,11 +96,10 @@ class SetNPSDetails(BaseTask):
                                 pfm_schemes_found.append(scheme)
                         
                         self.logger.debug(f"Found data for {scheme_id}")
-                    else:
-                        self.logger.debug(f"No data for {scheme_id}")
-                        
+
                 except Exception as e:
-                    self.logger.debug(f"Error downloading {scheme_id}: {str(e)}")
+                    tally.add(pfm_id, scheme_id, "error", type(e).__name__)
+                    self.logger.warning(f"Error processing {scheme_id}: {e}")
                     continue
             
             if pfm_schemes_found:
@@ -82,7 +107,7 @@ class SetNPSDetails(BaseTask):
                 successful_downloads += 1
                 self.logger.info(f"Successfully processed {pfm_id} with {len(pfm_schemes_found)} schemes")
             else:
-                self.logger.warning(f"No schemes found for {pfm_id}")
+                self.logger.debug(f"No schemes found for {pfm_id}")
         
         # Remove any duplicate schemes across PFMs (based on scheme ID)
         unique_schemes = []
@@ -95,30 +120,14 @@ class SetNPSDetails(BaseTask):
                 self.logger.debug(f"Removing duplicate scheme: {scheme['id']}")
         
         self.logger.info(f"Total unique schemes collected: {len(unique_schemes)} from {successful_downloads} PFMs")
-        
+        tally.log(self.logger, "SetNPSDetails")
+
         return {
             "data": unique_schemes,
             "total_schemes": len(unique_schemes),
-            "successful_pfms": successful_downloads
+            "successful_pfms": successful_downloads,
+            "download_summary": tally.summary(),
         }
-    
-    def downloadNPSExcel(self, pfm_id, scheme_id):
-        """
-        Download Excel file for a specific PFM and scheme
-        """
-        url = f"https://npstrust.org.in/scheme-wise-nav-report-excel?navcatdataxls={pfm_id}&navyearselxls=12&navsubdataxls={scheme_id}"
-        
-        try:
-            response = requests.get(url, timeout=30, verify=False)
-            response.raise_for_status()
-            
-            # The API returns TSV data despite the Excel content-type header
-            tsv_data = pd.read_csv(BytesIO(response.content), sep='\t')
-            return tsv_data
-            
-        except Exception as e:
-            self.logger.error(f"Error downloading Excel for {pfm_id}/{scheme_id}: {str(e)}")
-            return None
     
     def extractSchemesFromExcel(self, excel_data, pfm_id):
         """
