@@ -1,4 +1,5 @@
 import logging
+import traceback
 from functools import wraps
 from flask import jsonify
 
@@ -45,8 +46,14 @@ class Logger:
                 logger.info(f"Completed {func.__name__} successfully")
                 return result
             except Exception as e:
-                logger.error(f"An error occurred in {func.__name__}: {e}")
-                return jsonify({"Error": e.__str__()}), 500
+                # ak-ouu2: never str(e) to the client or the log — SQLAlchemy
+                # errors carry bound params (passwords, PAN, receipt data).
+                # Log the type + traceback FRAMES only (no exception message).
+                frames = "".join(traceback.format_tb(e.__traceback__))
+                logger.error(
+                    f"An error occurred in {func.__name__} ({type(e).__name__})\n{frames}"
+                )
+                return jsonify({"Error": "Internal server error"}), 500
 
         return wrapper
 

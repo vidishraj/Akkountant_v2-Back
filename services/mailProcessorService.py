@@ -7,6 +7,7 @@ Uses claude_agent_sdk following the same pattern as AgentService and CronAgent.
 """
 
 import hashlib
+import traceback
 import json
 import os
 import base64
@@ -457,8 +458,11 @@ class MailProcessorService:
                 report({"pdf_emails_processed": pdf_count})
 
         except Exception as e:
-            self.logger.error(f"Mail processing pipeline error: {e}", exc_info=True)
-            summary["errors"].append(str(e))
+            # ak-ouu2: type + frames only; the summary goes to the client.
+            self.logger.error(
+                f"Mail processing pipeline error ({type(e).__name__})\n"
+                + "".join(traceback.format_tb(e.__traceback__)))
+            summary["errors"].append(f"Mail processing pipeline error ({type(e).__name__})")
         finally:
             # ak-i3tc review minor 3: link-based PDFs (HDFC Smart
             # Statements) are downloaded into <cwd>/tmp during email
@@ -1897,10 +1901,6 @@ class MailProcessorService:
         sender = email.get("sender", "")
         domain = email.get("_sender_domain") or self._extract_domain(sender)
 
-        # ak-3rwh: shared with the /statementPasswords status endpoint.
-        from services.bankFormatRules import STATEMENT_PASSWORD_DOMAIN_BANKS
-        domain_to_bank = STATEMENT_PASSWORD_DOMAIN_BANKS
-
         # ── Strategy 1: Explicit bank passwords from DB ─────────────
         # Collect ALL passwords for matching banks and try each against the PDF
         explicit_passwords = []
@@ -1909,13 +1909,11 @@ class MailProcessorService:
             # ak-x6p fix: subdomain-aware lookup so senders like
             # `noreply-estatement@alerts.bankofindia.bank.in` still
             # resolve to the BOI password candidates.
-            bank_names = self._lookup_domain_map(domain_to_bank, domain)
-            if not bank_names:
-                # ak-iu8i: banks without an order hint here (SBI, BoB,
-                # Paytm, Axis, Kotak, SBI Card) use the shared map, so a
-                # stored password for them is actually tried.
-                from services.bankFormatRules import get_banks_for_domain
-                bank_names = get_banks_for_domain(domain)
+            # ak-ouu2: ONE resolution rule, shared with the
+            # /statementPasswords status count (ak-3rwh): ordered map,
+            # then the DOMAIN_TO_BANK fallback (ak-iu8i).
+            from services.bankFormatRules import statement_password_banks
+            bank_names = statement_password_banks(domain)
             for bank_name in bank_names:
                 pw = self.transaction_service.db.session.query(StatementPasswords).filter_by(
                     user=user_id, bank=bank_name

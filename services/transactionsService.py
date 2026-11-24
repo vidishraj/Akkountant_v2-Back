@@ -693,9 +693,9 @@ class TransactionService(BaseService):
         except Exception as e:
             self.logger.error(
                 f"ak-ex2 strip: FileDetails lookup failed for "
-                f"fileID={fileId!r} user={user_id!r}: {e}"
+                f"fileID={fileId!r} user={user_id!r} ({type(e).__name__})"
             )
-            return _err(f"lookup failed: {e}")
+            return _err(f"lookup failed ({type(e).__name__})")
         if not fd:
             return _skip("no fileDetails row for (fileID, user)")
         if not getattr(fd, "reconciliation_fallback", False):
@@ -752,9 +752,9 @@ class TransactionService(BaseService):
         except Exception as e:
             self.logger.error(
                 f"ak-ex2 strip: transaction query failed for "
-                f"fileID={fileId!r}: {e}"
+                f"fileID={fileId!r} ({type(e).__name__})"
             )
-            return _err(f"transaction query failed: {e}",
+            return _err(f"transaction query failed ({type(e).__name__})",
                         pdf_path=pdf_path)
 
         to_delete_rows = []  # keep the Transactions objects for snapshotting
@@ -812,14 +812,15 @@ class TransactionService(BaseService):
                 # to delete without a snapshot (irreversible loss).
                 self.logger.error(
                     f"ak-ex2 strip: snapshot INSERT failed for "
-                    f"fileID={fileId!r}: {e}. ABORTING delete to "
+                    f"fileID={fileId!r} ({type(e).__name__}). ABORTING delete to "
                     f"preserve recovery contract."
                 )
                 try:
                     self.db.session.rollback()
                 except Exception:
                     pass
-                return _err(f"snapshot failed: {e}",
+                # ak-ouu2: the INSERT's bound params are transaction rows.
+                return _err(f"snapshot failed ({type(e).__name__})",
                             total=len(rows), pdf_path=pdf_path)
 
             # ── Then the DELETE ─────────────────────────────────
@@ -857,13 +858,13 @@ class TransactionService(BaseService):
                 self.logger.error(
                     f"ak-ex2 strip: DELETE failed for fileID={fileId!r} "
                     f"AFTER successful snapshot (snapshot_count="
-                    f"{snapshot_count}): {e}. Rolling back both."
+                    f"{snapshot_count}) ({type(e).__name__}). Rolling back both."
                 )
                 try:
                     self.db.session.rollback()
                 except Exception:
                     pass
-                return _err(f"delete failed: {e}",
+                return _err(f"delete failed ({type(e).__name__})",
                             kept=kept, unlocatable=unlocatable,
                             total=len(rows), snapshot_count=0,
                             pdf_path=pdf_path)
