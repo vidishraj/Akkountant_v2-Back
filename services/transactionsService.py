@@ -1268,6 +1268,37 @@ class TransactionService(BaseService):
             })
         return {"count": len(items), "by_reason": by_reason, "items": items}
 
+    def requeueUnlockFailed(self, userId):
+        """ak-7ahz review minor 4: after the user changes statement
+        passwords or personal info (the inputs of PDF unlocking), put
+        every needs_attention row whose reason is unlock_failed back to
+        'failed' with its counter cleared, so the next cycle (or the
+        ak-i3tc sweep) retries the unlock. Returns the number requeued.
+        Never raises (the caller's save already succeeded)."""
+        from models.processedEmails import ProcessedEmails
+        from utils.statement_retry_cap import NEEDS_ATTENTION, previous_attempts, with_attempts
+        try:
+            rows = self.db.session.query(ProcessedEmails).filter_by(
+                user_id=userId, status=NEEDS_ATTENTION).all()
+            n = 0
+            for row in rows:
+                a = previous_attempts(row.extraction_summary)
+                if a and a.get("reason") == "unlock_failed":
+                    row.status = "failed"
+                    row.extraction_summary = with_attempts(row.extraction_summary, None)
+                    n += 1
+            if n:
+                self.db.session.commit()
+                self.logger.info(f"[ak-7ahz] requeued {n} unlock_failed statement email(s) after a password/personal-info change")
+            return n
+        except Exception as e:
+            self.logger.warning(f"[ak-7ahz] unlock_failed requeue skipped ({type(e).__name__})")
+            try:
+                self.db.session.rollback()
+            except Exception:
+                pass
+            return 0
+
     def retryStatementEmail(self, userId, gmail_id):
         """ak-7ahz: manual retry. A needs_attention row goes back to
         'failed' with its retry counter cleared, so the next mail cycle
@@ -1370,7 +1401,10 @@ class TransactionService(BaseService):
             # Build a human-readable summary string
             summary_text = ""
             items = row.items_extracted or 0
-            if items > 0:
+            if row.status == "needs_attention":
+                # ak-7ahz: flagged first, even when some rows landed.
+                summary_text = f"Needs attention: {row.error_message or 'repeated failures'}"
+            elif items > 0:
                 summary_text = f"{items} item(s) extracted"
                 if summary.get("inserted"):
                     summary_text = f"{summary['inserted']} inserted"

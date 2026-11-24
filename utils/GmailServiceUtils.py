@@ -220,6 +220,20 @@ class GmailServiceUtils:
                     except Exception as e:
                         self.logger.warning(f"Error processing email {mid}: {str(e)}")
 
+    def iter_emails_by_ids(self, userId: str, token: str, message_ids) -> Iterator[Dict[str, Any]]:
+        """ak-i3tc: fetch specific messages by Gmail id (the retry sweep),
+        in the same shape findAllEmailsInInterval yields. A message that
+        can't be fetched (deleted, moved to spam/trash) is skipped with a
+        WARNING carrying the id only."""
+        if not message_ids:
+            return
+        gmailService = self.googleService.get_gmail_service(userId, token)
+        for mid in message_ids:
+            try:
+                yield self._get_email_details(gmailService, mid)
+            except Exception as e:
+                self.logger.warning(f"[ak-i3tc] retry fetch failed for {mid}: {type(e).__name__}")
+
     def findAllEmailsInInterval(self, userId: str, token: str, dateFrom: str, dateTo: str) -> Iterator[Dict[str, Any]]:
         """Memory-efficient version that returns an iterator instead of a list"""
         # OPTIMIZATION: Break large date ranges into 3-day chunks for better performance

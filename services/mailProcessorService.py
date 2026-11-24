@@ -378,6 +378,21 @@ class MailProcessorService:
             # 2. Fetch all emails in range
             gmail_svc = self.transaction_service.gmailService
             all_emails = list(gmail_svc.findAllEmailsInInterval(user_id, token, date_from, date_to))
+
+            # 2.1 ak-i3tc retry sweep: the scheduled window is only 24h, so
+            # an email that didn't succeed within ~a night was never
+            # fetched again. Re-fetch recent failed/stale-pending rows by
+            # id (utils.retry_sweep); ak-7ahz's counter bounds repeats.
+            retry_ids = self._retry_sweep_ids(
+                user_id, exclude={e.get("gmail_id") or e.get("message_id") for e in all_emails})
+            if retry_ids:
+                retried = list(gmail_svc.iter_emails_by_ids(user_id, token, retry_ids))
+                all_emails.extend(retried)
+                summary["retry_sweep"] = len(retried)
+                self.logger.info(
+                    f"[ak-i3tc] retry sweep: re-fetched {len(retried)}/{len(retry_ids)} "
+                    f"failed/stale-pending emails"
+                )
             summary["total_emails_fetched"] = len(all_emails)
             self.logger.info(f"Fetched {len(all_emails)} emails for {date_from} to {date_to}")
             report({"stage": "fetched_emails", "total_emails_fetched": len(all_emails)})
@@ -714,6 +729,25 @@ class MailProcessorService:
             self.logger.info(f"Saved {len(records)} emails to {filepath}")
         except Exception as e:
             self.logger.error(f"Failed to save emails to disk: {e}", exc_info=True)
+
+    def _retry_sweep_ids(self, user_id, exclude=()):
+        """ak-i3tc: gmail ids to re-fetch this cycle (see utils.retry_sweep).
+        Never raises: a lookup failure just skips the sweep this cycle."""
+        from models.processedEmails import ProcessedEmails
+        from utils import retry_sweep
+        try:
+            rows = self.transaction_service.db.session.query(
+                ProcessedEmails.gmail_id, ProcessedEmails.status,
+                ProcessedEmails.processing_type, ProcessedEmails.processed_at,
+            ).filter(
+                ProcessedEmails.user_id == user_id,
+                ProcessedEmails.status.in_(retry_sweep.SWEEP_STATUSES),
+                ProcessedEmails.processed_at >= retry_sweep.window_start(),
+            ).all()
+        except Exception as e:
+            self.logger.warning(f"[ak-i3tc] retry sweep lookup failed: {type(e).__name__}")
+            return []
+        return retry_sweep.select_retry_ids(rows, exclude=exclude)
 
     def _filter_already_processed(self, emails, user_id):
         """Remove emails that have already been successfully processed.

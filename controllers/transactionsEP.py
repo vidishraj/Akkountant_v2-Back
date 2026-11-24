@@ -545,6 +545,9 @@ class TransactionController:
             updated_user = self.TransactionService.setOptedBanks(userId, banks)
             if updated_user is None:
                 return jsonify({"error": "User not found"}), 404
+            # ak-7ahz: new statement passwords may unlock PDFs that hit
+            # the retry cap as unlock_failed.
+            self.TransactionService.requeueUnlockFailed(userId)
 
             return jsonify({"message": "Opted banks updated successfully"}), 200
         except Exception as e:
@@ -660,6 +663,8 @@ class TransactionController:
                 )
                 g.db.session.add(info)
             g.db.session.commit()
+            # ak-7ahz: personal info feeds the PDF password candidates.
+            self.TransactionService.requeueUnlockFailed(user_id)
             return jsonify({"message": "Personal info updated successfully"}), 200
         except Exception as e:
             g.db.session.rollback()
@@ -833,6 +838,8 @@ class TransactionController:
         """GET /statementAttention — ak-7ahz: statement emails that hit the
         retry cap (needs_attention), for the Home/bell attention item."""
         userId = g.get('firebase_id')
+        if not userId:
+            return jsonify({"error": "authentication required"}), 401
         return jsonify(self.TransactionService.fetchStatementAttention(userId)), 200
 
     @Logger.standardLogger
@@ -841,6 +848,8 @@ class TransactionController:
         needs_attention email back in the automatic queue."""
         data = request.get_json(silent=True) or {}
         userId = g.get('firebase_id')
+        if not userId:
+            return jsonify({"error": "authentication required"}), 401
         body, status = self.TransactionService.retryStatementEmail(
             userId, data.get("gmail_id") if isinstance(data, dict) else None)
         return jsonify(body), status

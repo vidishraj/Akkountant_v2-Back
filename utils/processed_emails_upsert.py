@@ -114,6 +114,23 @@ def should_stamp_success(analysis_summary) -> bool:
     return True
 
 
+def _merge_retry_counter(old_summary, new_summary, db_status):
+    """ak-7ahz review minor 1: a stamp that doesn't carry the retry
+    counter (a report_result / not_financial / skipped write for the same
+    email) must not wipe it. The counter is dropped only when the new
+    stamp is a success ('processed'), or replaced when the new summary
+    carries its own."""
+    from utils.statement_retry_cap import ATTEMPTS_KEY
+    old_a = old_summary.get(ATTEMPTS_KEY) if isinstance(old_summary, dict) else None
+    if db_status == "processed" or old_a is None:
+        return new_summary
+    if isinstance(new_summary, dict) and ATTEMPTS_KEY in new_summary:
+        return new_summary
+    merged = dict(new_summary) if isinstance(new_summary, dict) else {}
+    merged[ATTEMPTS_KEY] = old_a
+    return merged
+
+
 def map_tool_status_to_db(tool_status: Optional[str]) -> str:
     """Public tool-status → DB-status map. Unknown / missing → 'processed'
     (matches pre-ak-bwe fallback in _handle_report_result)."""
@@ -220,7 +237,8 @@ def upsert_processed_email(
             existing.category = category
             existing.status = db_status
             existing.items_extracted = items_extracted or 0
-            existing.extraction_summary = extraction_summary
+            existing.extraction_summary = _merge_retry_counter(
+                existing.extraction_summary, extraction_summary, db_status)
             existing.processing_type = processing_type
             if db_status in ("failed", "needs_attention"):
                 existing.error_message = error_message
