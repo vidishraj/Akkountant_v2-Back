@@ -829,6 +829,23 @@ class TransactionController:
         return jsonify(result), 200
 
     @Logger.standardLogger
+    def statementAttention(self):
+        """GET /statementAttention — ak-7ahz: statement emails that hit the
+        retry cap (needs_attention), for the Home/bell attention item."""
+        userId = g.get('firebase_id')
+        return jsonify(self.TransactionService.fetchStatementAttention(userId)), 200
+
+    @Logger.standardLogger
+    def retryStatementEmail(self):
+        """POST /retryStatementEmail {"gmail_id": "..."} — ak-7ahz: put a
+        needs_attention email back in the automatic queue."""
+        data = request.get_json(silent=True) or {}
+        userId = g.get('firebase_id')
+        body, status = self.TransactionService.retryStatementEmail(
+            userId, data.get("gmail_id") if isinstance(data, dict) else None)
+        return jsonify(body), status
+
+    @Logger.standardLogger
     def fetchFileDetailsEnhanced(self):
         """Fetch processed email statements from DB with pagination and filters"""
         data = request.get_json(force=True)

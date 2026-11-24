@@ -489,6 +489,8 @@ class Akkountant(Flask):
             ('/deleteFile', 'GET', self.transactionEP.deleteFile),
             ('/processMailPipeline', 'POST', self.transactionEP.processMailPipeline),
             ('/reprocessPdf', 'POST', self.transactionEP.reprocessPdf),
+            ('/statementAttention', 'GET', self.transactionEP.statementAttention),
+            ('/retryStatementEmail', 'POST', self.transactionEP.retryStatementEmail),
             ('/updatePersonalInfo', 'POST', self.transactionEP.updatePersonalInfo),
             ('/getPersonalInfo', 'GET', self.transactionEP.getPersonalInfo),
             ('/reconcile', 'POST', self.transactionEP.reconcile),

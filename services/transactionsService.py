@@ -1237,6 +1237,59 @@ class TransactionService(BaseService):
             self.logger.error(f"Error deleting local statement: {str(e)}")
             return {"error": str(e)}
 
+    def fetchStatementAttention(self, userId):
+        """ak-7ahz: statement emails that hit the retry cap
+        (status needs_attention), for the app's attention item.
+
+        Returns {"count", "by_reason": {reason: n}, "items": [...]} with
+        metadata only (gmail id, subject, sender, category, reason,
+        attempts, last attempt), never statement content.
+        """
+        from models.processedEmails import ProcessedEmails
+        from utils.statement_retry_cap import NEEDS_ATTENTION, previous_attempts
+        userId = assert_valid_firebase_id_for_path(userId)
+        rows = self.db.session.query(ProcessedEmails).filter_by(
+            user_id=userId, status=NEEDS_ATTENTION,
+        ).order_by(ProcessedEmails.processed_at.desc()).all()
+        items, by_reason = [], {}
+        for row in rows:
+            a = previous_attempts(row.extraction_summary) or {}
+            reason = a.get("reason") or "unknown"
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            items.append({
+                "gmail_id": row.gmail_id,
+                "subject": row.subject,
+                "sender": row.sender,
+                "category": row.category,
+                "reason": reason,
+                "attempts": a.get("count", 0),
+                "last_attempt_at": a.get("last_at"),
+                "message": row.error_message,
+            })
+        return {"count": len(items), "by_reason": by_reason, "items": items}
+
+    def retryStatementEmail(self, userId, gmail_id):
+        """ak-7ahz: manual retry. A needs_attention row goes back to
+        'failed' with its retry counter cleared, so the next mail cycle
+        picks it up. Returns (body, http_status)."""
+        from models.processedEmails import ProcessedEmails
+        from utils.statement_retry_cap import NEEDS_ATTENTION, with_attempts
+        userId = assert_valid_firebase_id_for_path(userId)
+        if not isinstance(gmail_id, str) or not gmail_id.strip() or len(gmail_id) > 200:
+            return {"error": "gmail_id is required"}, 400
+        row = self.db.session.query(ProcessedEmails).filter_by(
+            user_id=userId, gmail_id=gmail_id.strip()).first()
+        if row is None:
+            return {"error": "email not found"}, 404
+        if row.status != NEEDS_ATTENTION:
+            return {"error": f"email is not awaiting attention (status={row.status})",
+                    "error_code": "NOT_NEEDS_ATTENTION"}, 409
+        row.status = "failed"
+        row.extraction_summary = with_attempts(row.extraction_summary, None)
+        self.db.session.commit()
+        self.logger.info(f"[ak-7ahz] manual retry queued for gmail_id={row.gmail_id!r}")
+        return {"gmail_id": row.gmail_id, "status": "failed", "queued": True}, 200
+
     def fetchProcessedStatements(self, userId, page=1, limit=100, filters=None):
         """Fetch processed email records from processedEmails table for the statements view."""
         from models.processedEmails import ProcessedEmails

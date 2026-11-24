@@ -741,7 +741,8 @@ class TestRejectedBatchNeverStamped(unittest.TestCase):
         script = [self._batch_call(self.BAD),
                   ("report_result", dict(self.REPORT, extraction_summary={"x": 1}))]
         row, = self._process(category="bank_statement", scripts=[script])
-        self.assertEqual((row.status, row.extraction_summary), ("failed", {"x": 1}))
+        # (ak-7ahz adds the retry counter alongside the agent's metadata.)
+        self.assertEqual((row.status, row.extraction_summary["x"]), ("failed", 1))
 
     # ── round 4: the category can't let a bank statement dodge ─────────
 

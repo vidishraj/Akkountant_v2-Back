@@ -56,6 +56,9 @@ _STATUS_MAP = {
     "success": "processed",
     "skipped": "skipped",
     "error": "failed",
+    # ak-7ahz: terminal after N identical failures; excluded from
+    # automatic processing (utils.statement_retry_cap).
+    "needs_attention": "needs_attention",
 }
 
 
@@ -189,7 +192,7 @@ def upsert_processed_email(
             status=db_status,
             items_extracted=items_extracted or 0,
             extraction_summary=extraction_summary,
-            error_message=error_message if db_status == "failed" else None,
+            error_message=error_message if db_status in ("failed", "needs_attention") else None,
         )
         session.add(row)
         session.commit()
@@ -219,7 +222,7 @@ def upsert_processed_email(
             existing.items_extracted = items_extracted or 0
             existing.extraction_summary = extraction_summary
             existing.processing_type = processing_type
-            if db_status == "failed":
+            if db_status in ("failed", "needs_attention"):
                 existing.error_message = error_message
             session.commit()
             return {

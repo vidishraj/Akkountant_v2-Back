@@ -718,10 +718,13 @@ class MailProcessorService:
     def _filter_already_processed(self, emails, user_id):
         """Remove emails that have already been successfully processed.
 
-        Only skips emails with status='processed'. Failed and skipped emails
-        are allowed through so they can be retried (e.g., after adding personal
-        info for PDF password unlocking).
+        Skips emails with status='processed' and (ak-7ahz) the terminal
+        'needs_attention'. Failed and skipped emails are allowed through
+        so they can be retried (e.g., after adding personal info for PDF
+        password unlocking); needs_attention comes back only via a manual
+        retry (POST /retryStatementEmail).
         """
+        from utils.statement_retry_cap import TERMINAL_DB_STATUSES
         from models.processedEmails import ProcessedEmails
 
         gmail_ids = [e.get("gmail_id") or e.get("message_id") for e in emails]
@@ -735,7 +738,7 @@ class MailProcessorService:
             existing = db.session.query(ProcessedEmails.gmail_id).filter(
                 ProcessedEmails.user_id == user_id,
                 ProcessedEmails.gmail_id.in_(gmail_ids),
-                ProcessedEmails.status == 'processed',
+                ProcessedEmails.status.in_(TERMINAL_DB_STATUSES),
             ).all()
             existing_ids = {row.gmail_id for row in existing}
 
@@ -1058,12 +1061,26 @@ class MailProcessorService:
         status, reason = ingest_outcome.final_email_status(
             email.get("_category") or report.get("model_category"),
             landed["rows"], failures, sender=email.get("sender"))
+        # ak-7ahz: retry cap. N consecutive failures with the same reason
+        # → terminal needs_attention (skipped by automatic processing).
+        from utils import statement_retry_cap as retry_cap
+        status, attempts = retry_cap.next_stamp(
+            status, reason, self._stored_extraction_summary(gmail_id, user_id))
         if reason:
-            self.logger.error(
-                f"[ak-fc7z] PDF email gmail_id={gmail_id!r} (category={category!r}) "
-                f"stamped error: {reason} (landed_rows={landed['rows']}, "
-                f"recorded={landed['recorded']}); will retry next run"
-            )
+            if status == retry_cap.NEEDS_ATTENTION:
+                self.logger.error(
+                    f"[ak-7ahz] PDF email gmail_id={gmail_id!r} (category={category!r}) "
+                    f"failed {attempts['count']}x with {reason}: stamped "
+                    f"{retry_cap.NEEDS_ATTENTION}; no more automatic retries "
+                    f"(manual retry: POST /retryStatementEmail)"
+                )
+            else:
+                self.logger.error(
+                    f"[ak-fc7z] PDF email gmail_id={gmail_id!r} (category={category!r}) "
+                    f"stamped error: {reason} (landed_rows={landed['rows']}, "
+                    f"recorded={landed['recorded']}, attempt {attempts['count']}/"
+                    f"{retry_cap.MAX_IDENTICAL_FAILURES}); will retry next run"
+                )
         self._stamp_processed_email(
             email, user_id,
             category=category,
@@ -1072,11 +1089,24 @@ class MailProcessorService:
             # rows inserted or deduplicated + accepted record-only
             # inserts), not the model's self-report.
             items_extracted=landed["rows"] + landed["recorded"],
-            extraction_summary=report.get("extraction_summary"),
+            extraction_summary=retry_cap.with_attempts(report.get("extraction_summary"), attempts),
             error_message=ingest_outcome.REASON_TEXT.get(reason),
         )
         for persist_path in persisted:
             self._update_processed_email_pdf(gmail_id, user_id, persist_path)
+
+    def _stored_extraction_summary(self, gmail_id, user_id):
+        """ak-7ahz: the row's current extraction_summary (holds the retry
+        counter), or None. Never raises: a lookup failure just restarts
+        the count, which errs toward retrying."""
+        try:
+            from models.processedEmails import ProcessedEmails
+            row = self.transaction_service.db.session.query(ProcessedEmails).filter_by(
+                gmail_id=gmail_id, user_id=user_id).first()
+            return row.extraction_summary if row is not None else None
+        except Exception as e:
+            self.logger.warning(f"[ak-7ahz] retry-counter lookup failed for {gmail_id!r}: {type(e).__name__}")
+            return None
 
     def _process_pdf_items(self, email, user_id, processing_mode, pdf_items,
                            hint_tags, gmail_id):
