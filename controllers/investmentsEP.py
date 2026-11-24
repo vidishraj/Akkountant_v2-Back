@@ -11,6 +11,37 @@ from utils.logger import Logger
 from flask import request, jsonify, g
 
 
+# ak-k9d8: result of the delete-all confirm check.
+CONFIRM_OK = "ok"
+CONFIRM_MISSING = "missing"
+CONFIRM_MISMATCH = "mismatch"
+
+
+def check_delete_all_confirm(service_type_param, body):
+    """ak-k9d8: defence in depth for DELETE /deleteAllInvestments against
+    stray or replayed calls. It is NOT a server-side type-to-confirm (the
+    human confirmation is the FE dialog). The client must echo the target
+    asset as body {"confirm": "<serviceType>"}, compared EXACTLY
+    (case-sensitive, enum-name form: Stocks / Mutual_Funds / NPS / EPF /
+    PF / Gold) with the serviceType query param.
+
+    Returns CONFIRM_OK | CONFIRM_MISSING | CONFIRM_MISMATCH.
+    TRANSITION: a MISSING confirm is still accepted (old cached FE
+    bundles) with a WARN, for one deploy cycle; a present-but-wrong one
+    (including a non-object body or a non-string confirm) is rejected.
+    """
+    if body is None:
+        return CONFIRM_MISSING
+    if not isinstance(body, dict):
+        return CONFIRM_MISMATCH
+    if "confirm" not in body:
+        return CONFIRM_MISSING
+    confirm = body.get("confirm")
+    if isinstance(confirm, str) and confirm == service_type_param:
+        return CONFIRM_OK
+    return CONFIRM_MISMATCH
+
+
 class InvestmentController:
     InvestmentService: InvestmentService
 
@@ -290,7 +321,28 @@ class InvestmentController:
             # Error has happened during validation
             return params
         user_id, service_type = params
-        # Validate the request JSON body
+        # ak-k9d8: the body must echo the target asset (see
+        # check_delete_all_confirm). Checked BEFORE anything is deleted.
+        verdict = check_delete_all_confirm(
+            service_type_param, request.get_json(silent=True),
+        )
+        if verdict == CONFIRM_MISMATCH:
+            self.logger.warning(
+                f"deleteAllInvestments REJECTED: confirm does not match "
+                f"serviceType={service_type_param}"
+            )
+            return jsonify({
+                "error": "confirm must equal the serviceType being deleted",
+                "error_code": "DELETE_ALL_CONFIRM_MISMATCH",
+            }), 400
+        if verdict == CONFIRM_MISSING:
+            # TRANSITION (one deploy cycle): old FE bundles send no body.
+            # Follow-up makes confirm required.
+            self.logger.warning(
+                f"deleteAllInvestments without confirm "
+                f"(serviceType={service_type_param}); allowed during the "
+                f"ak-k9d8 transition"
+            )
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
         return self.InvestmentService.deleteAll(service_type, user_id)
 
