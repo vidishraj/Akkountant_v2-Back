@@ -36,15 +36,16 @@ Defense:
         - a service-method direct call (bypasses HTTP entry)
       Belt-and-brace, tiny perf cost.
 
-Shape rule:
-    ^[A-Za-z0-9_-]{1,128}$
+Shape rule (whole string, via re.fullmatch):
+    [A-Za-z0-9_-]{1,128}
 
 Rejects:
     * empty string
     * non-str
     * `..` traversal segment (fails pattern — `.` not allowed)
     * `/` or `\\` separators (fail pattern)
-    * NUL / whitespace / control chars (fail pattern)
+    * NUL / whitespace / control chars (fail pattern), including a
+      trailing newline (ak-qkii: fullmatch, not `$`)
     * URL-encoded path chars (`%2F`, etc. — `%` not allowed)
     * strings > 128 chars (modern Firebase Auth hard-caps at 128)
     * empty / None
@@ -60,13 +61,15 @@ import re
 # Strict shape — alphanumeric + hyphen + underscore, 1-128 chars.
 # Firebase Auth UIDs are alphanumeric by spec; legacy UIDs are
 # 28 chars; newer custom-auth UIDs can reach 128.
-_FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# ak-qkii: matched with fullmatch(), NOT match() + `$` — in Python `$`
+# also matches before a trailing newline, so `^...$` admitted 'abc\n'.
+_FIREBASE_UID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class InvalidFirebaseId(ValueError):
     """Raised by assert_valid_firebase_id_for_path when the uid
-    fails the shape check. Callers in path-building code catch +
-    log + abort the operation."""
+    fails the shape check. Callers let it propagate (ak-qkii): an
+    uncaught 500 is the intended defense-in-depth signal."""
 
 
 def is_valid_firebase_id(uid) -> bool:
@@ -76,13 +79,19 @@ def is_valid_firebase_id(uid) -> bool:
     """
     if not isinstance(uid, str):
         return False
-    return bool(_FIREBASE_UID_RE.match(uid))
+    return _FIREBASE_UID_RE.fullmatch(uid) is not None
 
 
 def assert_valid_firebase_id_for_path(uid) -> str:
     """Return the uid unchanged if valid; raise InvalidFirebaseId
     otherwise. Used at path-building callsites where a bad uid
     would be a filesystem-traversal attempt.
+
+    ak-qkii: callsites let InvalidFirebaseId PROPAGATE (uncaught ->
+    500). The middleware is the primary gate, so a defense-in-depth
+    trip means an unexpected bypass; a 500 is the correct "should
+    never happen" signal and stays fail-closed. Do not catch it into
+    a graceful error body.
 
     Returns the validated uid so callsites can chain it:
         user_dir = os.path.join(base, assert_valid_firebase_id_for_path(user_id))

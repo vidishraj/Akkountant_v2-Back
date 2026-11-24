@@ -1187,6 +1187,9 @@ class TransactionService(BaseService):
                 "total_count": len(statements)
             }
             
+        except InvalidFirebaseId:
+            # ak-qkii: D-i-D trip propagates (uncaught -> 500) by design.
+            raise
         except Exception as e:
             self.logger.error(f"Error fetching local statements: {str(e)}")
             return {"error": str(e)}
@@ -1213,6 +1216,9 @@ class TransactionService(BaseService):
             # Return file path for download (Flask will handle the actual file serving)
             return {"file_path": file_path, "filename": filename}
             
+        except InvalidFirebaseId:
+            # ak-qkii: D-i-D trip propagates (uncaught -> 500) by design.
+            raise
         except Exception as e:
             self.logger.error(f"Error downloading local statement: {str(e)}")
             return {"error": str(e)}
@@ -1247,6 +1253,9 @@ class TransactionService(BaseService):
             
             return {"message": "Statement deleted successfully"}
             
+        except InvalidFirebaseId:
+            # ak-qkii: D-i-D trip propagates (uncaught -> 500) by design.
+            raise
         except Exception as e:
             self.logger.error(f"Error deleting local statement: {str(e)}")
             return {"error": str(e)}

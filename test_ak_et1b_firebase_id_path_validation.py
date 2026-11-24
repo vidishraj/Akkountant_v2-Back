@@ -136,6 +136,13 @@ class TestIsValidFirebaseId(unittest.TestCase):
         self.assertFalse(self.fn("user\trest"))
         self.assertFalse(self.fn("user\rrest"))
 
+    def test_rejects_trailing_newline(self):
+        # ak-qkii: `^...$` matched before a trailing newline, so
+        # 'abc\n' passed. fullmatch() closes it.
+        self.assertFalse(self.fn("abc\n"))
+        self.assertFalse(self.fn("a" * 128 + "\n"))
+        self.assertFalse(self.fn("abc\r\n"))
+
     def test_rejects_empty_string(self):
         self.assertFalse(self.fn(""))
 
@@ -384,6 +391,55 @@ class TestCallsiteHardening(unittest.TestCase):
             "construction — gap suggests a refactor split them. "
             "Review that nothing bypasses the gate.",
         )
+
+
+class TestDefenseInDepthPropagates(unittest.TestCase):
+    """ak-qkii: D-i-D trips propagate as InvalidFirebaseId (uncaught
+    -> 500) instead of being swallowed into a graceful error dict."""
+
+    _real_mod = None
+
+    @classmethod
+    def _load_real_service_module(cls):
+        # Other test files replace sys.modules["services.transactionsService"]
+        # with a stub at collection time, so a plain import is
+        # order-dependent. Load the real file under a private name, and
+        # take InvalidFirebaseId from THAT module's namespace so the
+        # class identity matches what its methods raise.
+        if cls._real_mod is None:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            spec = importlib.util.spec_from_file_location(
+                "_ak_qkii_real_transactionsService",
+                os.path.join(here, "services", "transactionsService.py"),
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cls._real_mod = mod
+        return cls._real_mod
+
+    def setUp(self):
+        from unittest import mock
+        try:
+            mod = self._load_real_service_module()
+        except Exception as e:  # pragma: no cover - env without deps
+            self.skipTest(f"transactionsService import failed: {e}")
+        self.svc = mock.MagicMock()
+        self.cls = mod.TransactionService
+        self.Exc = mod.InvalidFirebaseId
+        self.assertEqual(self.Exc.__name__, "InvalidFirebaseId")
+
+    def test_fetch_local_statements_propagates(self):
+        with self.assertRaises(self.Exc):
+            self.cls.fetchLocalStatements(self.svc, "../other")
+
+    def test_download_local_statement_propagates(self):
+        with self.assertRaises(self.Exc):
+            self.cls.downloadLocalStatement(self.svc, "../other", "b", "f.pdf")
+
+    def test_delete_local_statement_propagates(self):
+        with self.assertRaises(self.Exc):
+            self.cls.deleteLocalStatement(self.svc, "uid\n", "b", "f.pdf")
 
 
 if __name__ == "__main__":  # pragma: no cover
