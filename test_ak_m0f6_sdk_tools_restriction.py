@@ -59,6 +59,18 @@ def _src(rel):
         return f.read()
 
 
+
+import dataclasses as _dc
+
+
+@_dc.dataclass
+class _ToolsOpts:
+    """Stand-in for a ClaudeAgentOptions that HAS the `tools` field."""
+    allowed_tools: list = None
+    tools: list = None
+    disallowed_tools: list = None
+    extra_args: dict = None
+
 class TestRestrictedToolOptions(unittest.TestCase):
 
     def test_builtins_are_the_non_mcp_names(self):
@@ -68,14 +80,18 @@ class TestRestrictedToolOptions(unittest.TestCase):
             builtin_tools([MCP_A, "WebSearch", MCP_B, "WebFetch"]),
             ["WebSearch", "WebFetch"])
 
+    # ak-1m97: the kwargs shape depends on the installed SDK (feature-
+    # detected), so these pin the tools=-capable shape explicitly; the
+    # pre-tools shape is pinned in test_ak_1m97_sdk_compat.py.
     def test_kwargs_shape(self):
-        kw = restricted_tool_options([MCP_A, "WebSearch"])
+        kw = restricted_tool_options([MCP_A, "WebSearch"], options_cls=_ToolsOpts)
         self.assertEqual(kw["allowed_tools"], [MCP_A, "WebSearch"])
         self.assertEqual(kw["tools"], ["WebSearch"])
         self.assertEqual(kw["extra_args"], {STRICT_MCP_FLAG: None})
 
     def test_extra_args_merged_not_dropped(self):
-        kw = restricted_tool_options([], extra_args={"debug-to-stderr": None})
+        kw = restricted_tool_options([], extra_args={"debug-to-stderr": None},
+                                     options_cls=_ToolsOpts)
         self.assertEqual(kw["extra_args"],
                          {"debug-to-stderr": None, STRICT_MCP_FLAG: None})
 
