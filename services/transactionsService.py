@@ -18,6 +18,13 @@ from utils.firebase_id_validator import (
 from utils.logger import Logger
 
 
+# ak-d06w: statement categories shown in the Statements view (in addition
+# to any row processed as a PDF), and the paging bounds.
+STATEMENT_CATEGORIES = ("bank_statement", "brokerage_statement", "nps_statement", "epf_passbook")
+STATEMENT_PAGE_MAX = 200
+STATEMENT_BANK_SCAN_CAP = 5000
+
+
 class TransactionInsertError(RuntimeError):
     """ak-iu8i: insertTransactions wrote nothing (not a duplicate)."""
 
@@ -1549,15 +1556,23 @@ class TransactionService(BaseService):
         # per-row.
         userId = assert_valid_firebase_id_for_path(userId)
         filters = filters or {}
+        page, limit = self._clamp_page(page, limit)
+        from sqlalchemy import or_
         query = self.db.session.query(ProcessedEmails).filter_by(user_id=userId)
 
-        # Default to bank_statement category — only show statement files
-        # unless a specific category filter is provided
+        # ak-d06w: every STATEMENT-type row, not just category ==
+        # 'bank_statement'. A statement the classifier mislabelled (or left
+        # NULL) was invisible here. Statement-type = processed as a PDF, or
+        # carrying one of the statement categories.
+        query = query.filter(or_(
+            ProcessedEmails.processing_type == "pdf",
+            ProcessedEmails.category.in_(STATEMENT_CATEGORIES),
+        ))
+        # ak-d06w: the bank filter used to compare against the CATEGORY
+        # column. It now matches the row's resolved bank (see
+        # _statement_bank), applied below over a bounded scan.
         bank_filter = filters.get("bank")
-        if bank_filter:
-            query = query.filter(ProcessedEmails.category == bank_filter)
-        else:
-            query = query.filter(ProcessedEmails.category == 'bank_statement')
+        bank_filter = bank_filter.strip() if isinstance(bank_filter, str) else ""
 
         # Filter by fileName (search in subject)
         file_name_filter = filters.get("fileName")
@@ -1581,16 +1596,35 @@ class TransactionService(BaseService):
             "uploadDate": ProcessedEmails.processed_at,
             "processed_at": ProcessedEmails.processed_at,
             "fileName": ProcessedEmails.subject,
-            "bank": ProcessedEmails.category,
+            # ak-d06w: the bank is resolved per row (sender / summary);
+            # sorting by sender groups rows by bank.
+            "bank": ProcessedEmails.sender,
             "email_date": ProcessedEmails.email_date,
         }
         sort_col = col_map.get(sort_col_name, ProcessedEmails.processed_at)
         order_fn = desc if sort_dir == "desc" else asc
         query = query.order_by(order_fn(sort_col))
 
-        total = query.count()
         offset = (page - 1) * limit
-        rows = query.offset(offset).limit(limit).all()
+        if bank_filter:
+            # Bounded, uid-scoped scan of the cheap columns, resolve each
+            # row's bank in Python, then page over the matching ids (the
+            # query's sort order is kept).
+            want = bank_filter.lower()
+            cands = query.with_entities(
+                ProcessedEmails.id, ProcessedEmails.sender,
+                ProcessedEmails.extraction_summary,
+            ).limit(STATEMENT_BANK_SCAN_CAP).all()
+            ids = [c.id for c in cands
+                   if self._statement_bank(c.sender, c.extraction_summary).lower() == want]
+            total = len(ids)
+            page_ids = ids[offset:offset + limit]
+            by_id = {r.id: r for r in self.db.session.query(ProcessedEmails).filter(
+                ProcessedEmails.id.in_(page_ids)).all()} if page_ids else {}
+            rows = [by_id[i] for i in page_ids if i in by_id]
+        else:
+            total = query.count()
+            rows = query.offset(offset).limit(limit).all()
 
         # Batch-load statement periods for all gmail_ids in this page
         from models.statementPeriods import StatementPeriod
@@ -1611,9 +1645,10 @@ class TransactionService(BaseService):
                 full_path = os.path.join(os.getcwd(), "claude_statements", userId, row.pdf_filename)
                 has_pdf = os.path.exists(full_path)
 
-            # Extract bank from extraction_summary if available
-            summary = row.extraction_summary or {}
-            bank = summary.get("bank", row.category or "Unknown")
+            # ak-d06w: one bank resolution for display AND the filter
+            # (never the category name).
+            summary = row.extraction_summary if isinstance(row.extraction_summary, dict) else {}
+            bank = self._statement_bank(row.sender, row.extraction_summary)
 
             # Build a human-readable summary string
             summary_text = ""
@@ -1667,6 +1702,46 @@ class TransactionService(BaseService):
             "page_size": limit,
             "results": results,
         }
+
+    @staticmethod
+    def _clamp_page(page, limit):
+        """ak-d06w: bounded paging (the limit comes from the client)."""
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 100
+        return max(page, 1), min(max(limit, 1), STATEMENT_PAGE_MAX)
+
+    @staticmethod
+    def _statement_bank(sender, extraction_summary) -> str:
+        """ak-d06w: the bank a statement row belongs to (display + filter
+        only; no money math). In order:
+          1. extraction_summary.bank when it is a known BankEnums id
+             (specific: an HDFC credit-card statement is Millenia_Credit,
+             which the sender map can't tell from HDFC_DEBIT)
+          2. the server-side sender-domain map (bankFormatRules)
+          3. extraction_summary.bank as free text
+          4. 'Unknown'"""
+        from enums.BanksEnum import BankEnums
+        from services.bankFormatRules import get_bank_from_sender
+        summary = extraction_summary if isinstance(extraction_summary, dict) else {}
+        reported = summary.get("bank")
+        reported = reported.strip() if isinstance(reported, str) else ""
+        if reported in BankEnums.__members__:
+            return reported
+        try:
+            by_sender = get_bank_from_sender(sender or "")
+        except Exception:
+            by_sender = "UNKNOWN"
+        if by_sender and by_sender != "UNKNOWN":
+            return by_sender
+        if reported:
+            return reported[:100]
+        return "Unknown"
 
     def getProcessedEmailByGmailId(self, userId, gmail_id):
         """Look up a processedEmails row by gmail_id and user_id."""
