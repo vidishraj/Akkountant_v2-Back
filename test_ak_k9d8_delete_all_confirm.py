@@ -6,9 +6,10 @@ DELETE /deleteAllInvestments?serviceType=<ST> with JSON body
 {"confirm": "<ST>"}, where confirm is the serviceType enum name
 (Stocks | Mutual_Funds | NPS | EPF | PF | Gold), compared exactly.
 
-Transition (one deploy cycle): a MISSING confirm is allowed with a WARN
-(old cached FE bundles send no body); a present-but-wrong confirm is
-rejected with 400 and NOTHING is deleted.
+ak-b8em: the one-deploy-cycle transition is over. A MISSING confirm is
+rejected (400 DELETE_ALL_CONFIRM_REQUIRED); a present-but-wrong confirm,
+including a body that is present but unparsable / not JSON, is rejected
+(400 DELETE_ALL_CONFIRM_MISMATCH). NOTHING is deleted on any 400.
 """
 from __future__ import annotations
 
@@ -72,6 +73,13 @@ class TestCheckHelper(unittest.TestCase):
         for body in (None, {}, {"other": 1}):
             self.assertEqual(self.m.check_delete_all_confirm("Stocks", body),
                              self.m.CONFIRM_MISSING, body)
+
+    def test_unparsed_but_present_body_is_mismatch(self):
+        # ak-b8em
+        self.assertEqual(self.m.check_delete_all_confirm("Stocks", None, raw_body_present=True),
+                         self.m.CONFIRM_MISMATCH)
+        self.assertEqual(self.m.check_delete_all_confirm("Stocks", None, raw_body_present=False),
+                         self.m.CONFIRM_MISSING)
 
     def test_mismatch_variants(self):
         bad = [
@@ -150,19 +158,40 @@ class TestEndpoint(unittest.TestCase):
         self.ctrl.InvestmentService.deleteAll.assert_not_called()
         self.assertIn("REJECTED", "\n".join(cm.output))
 
-    def test_missing_allowed_with_warn_during_transition(self):
-        with self.assertLogs("akk9d8.ctrl", level="WARNING") as cm:
-            status, _ = self._call("EPF")       # old client: no body at all
+    # ak-b8em: the transition is over; a missing confirm is REJECTED.
+    def test_missing_confirm_rejected_nothing_deleted(self):
+        for kw in ({}, {"json": {}}, {"json": {"other": "EPF"}}):
+            self.ctrl.InvestmentService.deleteAll.reset_mock()
+            with self.assertLogs("akk9d8.ctrl", level="WARNING") as cm:
+                status, data = self._call("EPF", **kw)
+            self.assertEqual(status, 400, kw)
+            self.assertEqual(data["error_code"], "DELETE_ALL_CONFIRM_REQUIRED", kw)
+            self.ctrl.InvestmentService.deleteAll.assert_not_called()
+            self.assertIn("REJECTED", "\n".join(cm.output))
+
+    # ak-b8em: a present-but-unparsable body is a MISMATCH, not MISSING.
+    def test_unparsable_body_is_mismatch(self):
+        cases = [
+            {"data": "not json", "content_type": "application/json"},
+            {"data": '{"confirm": "Gold"', "content_type": "application/json"},  # truncated
+            {"data": '{"confirm": "Gold"}', "content_type": "text/plain"},       # valid JSON, wrong type
+            {"data": "confirm=Gold", "content_type": "application/x-www-form-urlencoded"},
+            {"data": "   ", "content_type": "application/json"},
+        ]
+        for kw in cases:
+            self.ctrl.InvestmentService.deleteAll.reset_mock()
+            with self.assertLogs("akk9d8.ctrl", level="WARNING"):
+                status, data = self._call("Gold", **kw)
+            self.assertEqual(status, 400, kw)
+            self.assertEqual(data["error_code"], "DELETE_ALL_CONFIRM_MISMATCH", kw)
+            self.ctrl.InvestmentService.deleteAll.assert_not_called()
+
+    def test_frontend_wire_shape_still_deletes(self):
+        # Exactly what the FE sends (axios DELETE, data {confirm}).
+        status, _ = self._call("Mutual_Funds", data='{"confirm":"Mutual_Funds"}',
+                               content_type="application/json;charset=utf-8")
         self.assertEqual(status, 200)
         self.ctrl.InvestmentService.deleteAll.assert_called_once()
-        self.assertIn("without confirm", "\n".join(cm.output))
-
-    def test_invalid_json_body_is_treated_as_missing(self):
-        # get_json(silent=True) → None on unparsable bodies.
-        with self.assertLogs("akk9d8.ctrl", level="WARNING"):
-            status, _ = self._call("Gold", data="not json",
-                                   content_type="application/json")
-        self.assertEqual(status, 200)
 
     def test_non_object_body_rejected(self):
         status, _ = self._call("PF", json=["PF"])

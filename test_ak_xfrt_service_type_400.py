@@ -95,10 +95,10 @@ class TestEveryEndpointReturns400(unittest.TestCase):
         c.logger = logging.getLogger("akxfrt")
         return c
 
-    def _call(self, method, query, user):
+    def _call(self, method, query, user, body=None):
         c = self._ctrl()
         with self.app.test_request_context(f"/x?{query}", method="POST",
-                                           json={"any": "body"}):
+                                           json=body if body is not None else {"any": "body"}):
             if user:
                 flask.g.firebase_id = user
             resp = getattr(c, method)()
@@ -131,7 +131,9 @@ class TestEveryEndpointReturns400(unittest.TestCase):
                 self.assertEqual(svc.method_calls, [], method)
 
     def test_valid_input_still_reaches_the_service(self):
-        status, _, svc = self._call("deleteAllInvestments", "serviceType=Stocks", "u1")
+        # ak-b8em: delete-all now REQUIRES the confirm echo the FE sends.
+        status, _, svc = self._call("deleteAllInvestments", "serviceType=Stocks", "u1",
+                                    body={"confirm": "Stocks"})
         svc.deleteAll.assert_called_once()
         args = svc.deleteAll.call_args[0]
         self.assertEqual((args[0].name, args[1]), ("Stocks", "u1"))

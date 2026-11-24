@@ -17,7 +17,7 @@ CONFIRM_MISSING = "missing"
 CONFIRM_MISMATCH = "mismatch"
 
 
-def check_delete_all_confirm(service_type_param, body):
+def check_delete_all_confirm(service_type_param, body, raw_body_present=False):
     """ak-k9d8: defence in depth for DELETE /deleteAllInvestments against
     stray or replayed calls. It is NOT a server-side type-to-confirm (the
     human confirmation is the FE dialog). The client must echo the target
@@ -25,13 +25,18 @@ def check_delete_all_confirm(service_type_param, body):
     (case-sensitive, enum-name form: Stocks / Mutual_Funds / NPS / EPF /
     PF / Gold) with the serviceType query param.
 
-    Returns CONFIRM_OK | CONFIRM_MISSING | CONFIRM_MISMATCH.
-    TRANSITION: a MISSING confirm is still accepted (old cached FE
-    bundles) with a WARN, for one deploy cycle; a present-but-wrong one
-    (including a non-object body or a non-string confirm) is rejected.
+    ``body`` is the parsed JSON (None if there was none or it did not
+    parse); ``raw_body_present`` says whether the request carried any body
+    bytes at all.
+
+    Returns CONFIRM_OK | CONFIRM_MISSING | CONFIRM_MISMATCH. The endpoint
+    rejects both MISSING and MISMATCH (ak-b8em: confirm is REQUIRED; the
+    one-deploy-cycle transition that allowed MISSING is over).
+    ak-b8em: a body that is present but unparsable (or sent with a
+    non-JSON content type) is a MISMATCH, never MISSING.
     """
     if body is None:
-        return CONFIRM_MISSING
+        return CONFIRM_MISMATCH if raw_body_present else CONFIRM_MISSING
     if not isinstance(body, dict):
         return CONFIRM_MISMATCH
     if "confirm" not in body:
@@ -340,8 +345,11 @@ class InvestmentController:
         user_id, service_type = params
         # ak-k9d8: the body must echo the target asset (see
         # check_delete_all_confirm). Checked BEFORE anything is deleted.
+        # ak-b8em: raw body bytes tell an unparsable body (MISMATCH) apart
+        # from no body at all (MISSING).
         verdict = check_delete_all_confirm(
             service_type_param, request.get_json(silent=True),
+            raw_body_present=bool(request.get_data(cache=True)),
         )
         if verdict == CONFIRM_MISMATCH:
             self.logger.warning(
@@ -352,14 +360,17 @@ class InvestmentController:
                 "error": "confirm must equal the serviceType being deleted",
                 "error_code": "DELETE_ALL_CONFIRM_MISMATCH",
             }), 400
-        if verdict == CONFIRM_MISSING:
-            # TRANSITION (one deploy cycle): old FE bundles send no body.
-            # Follow-up makes confirm required.
+        if verdict != CONFIRM_OK:
+            # ak-b8em: confirm is REQUIRED (the k9d8 transition that let a
+            # missing confirm through is over). Nothing is deleted.
             self.logger.warning(
-                f"deleteAllInvestments without confirm "
-                f"(serviceType={service_type_param}); allowed during the "
-                f"ak-k9d8 transition"
+                f"deleteAllInvestments REJECTED: no confirm "
+                f"(serviceType={service_type_param})"
             )
+            return jsonify({
+                "error": "confirm is required and must equal the serviceType being deleted",
+                "error_code": "DELETE_ALL_CONFIRM_REQUIRED",
+            }), 400
         self.logger.info(f"userID: {user_id}, investmentType: {service_type.value}")
         return self.InvestmentService.deleteAll(service_type, user_id)
 
