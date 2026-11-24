@@ -53,6 +53,9 @@ from utils.agent_constants import AGENT_MODEL_ID  # noqa: F401
 
 
 # Tools that require user confirmation before execution
+# ak-1xu (2026-11-24, audit LLM-1 remainder): update_customer added —
+# it rewrites a customer's identity / address printed on invoices, so it
+# needs the same token-bound (tool + args) confirm as update_invoice.
 # ak-dixt (2026-11-23): update_invoice added to DESTRUCTIVE_TOOLS
 # below. Pre-ak-dixt the tool was ungated — a mutation path that
 # can change line items, status, customer linkage. Added to the
@@ -73,6 +76,7 @@ DESTRUCTIVE_TOOLS = {
     "sync_kite_holdings",
     "process_mail_pipeline",
     "update_invoice",
+    "update_customer",
 }
 
 # Tools that mutate data (used to signal frontend to refresh)
@@ -1717,6 +1721,7 @@ class AgentService(BaseService):
             "delete_file": f"Delete file {tool_input.get('file_id', 'unknown')} and all its transactions?",
             "delete_invoice": f"Delete invoice {tool_input.get('invoice_number', 'unknown')}?",
             "delete_customer": f"Delete customer (ID: {tool_input.get('customer_id', 'unknown')})?",
+            "update_customer": f"Update customer (ID: {tool_input.get('customer_id', 'unknown')})?",
             "scan_emails_for_transactions": "Scan Gmail for transaction emails? This may take several minutes.",
             "scan_statements": "Scan Gmail for bank statements? This may take several minutes.",
             "sync_kite_holdings": "Sync holdings from Kite Connect into local database?",

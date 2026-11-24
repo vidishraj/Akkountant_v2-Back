@@ -26,6 +26,7 @@ _TOOL_OPS = {
     "delete_invoice": ("delete", "Delete invoice", "Deleted."),
     "delete_customer": ("delete", "Delete customer", "Deleted."),
     "update_invoice": ("update", "Update invoice", "Updated."),
+    "update_customer": ("update", "Update customer", "Updated."),
     "sync_kite_holdings": ("sync", "Sync Kite holdings", "Synced."),
     "scan_emails_for_transactions": ("scan", "Scan emails for transactions", "Done."),
     "scan_statements": ("scan", "Scan statements", "Done."),
