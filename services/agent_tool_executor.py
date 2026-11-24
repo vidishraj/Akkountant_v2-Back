@@ -824,7 +824,10 @@ def _execute_transaction_tool(tool_name, tool_input, user_id, service, mail_proc
         return service.fetchTransactionDates(tool_input["date_from"], tool_input["date_to"])
 
     elif tool_name == "update_transaction":
-        return service.updateTransaction(tool_input["reference_id"], tool_input["updates"])
+        # ak-vfa3: scope the update to the agent's own user.
+        return service.updateTransaction(
+            tool_input["reference_id"], tool_input["updates"], user_id=user_id,
+        )
 
     elif tool_name == "fetch_opted_banks":
         return service.fetchBanksOptedByUser(user_id)

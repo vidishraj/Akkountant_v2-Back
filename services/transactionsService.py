@@ -928,11 +928,14 @@ class TransactionService(BaseService):
         }
 
     def updateTransaction(self, reference_id: int, updates: dict, user_id: str = None):
-        # Fetch the transaction by referenceID
-        query = self.db.session.query(Transactions).filter_by(referenceID=reference_id)
-        if user_id:
-            query = query.filter(Transactions.user == user_id)
-        transaction = query.first()
+        # ak-vfa3: always scope to the caller's uid; fail closed without one
+        # (previously a missing uid updated the row of ANY user).
+        if not user_id:
+            return {"error": "user_id is required to update a transaction"}
+        transaction = self.db.session.query(Transactions).filter(
+            Transactions.referenceID == reference_id,
+            Transactions.user == user_id,
+        ).first()
 
         # If transaction is not found, return an error message
         if not transaction:
