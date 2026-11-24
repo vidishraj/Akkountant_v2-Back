@@ -71,6 +71,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socketserver
 import sys
 import threading
@@ -137,6 +138,36 @@ def _resolve_ticker_factory() -> Callable:
 # re-check at next loop iteration.
 _TRANSIENT_CLOSE_CODES = {1000, 1001, 1012}
 
+# ak-ygpn: Kite rejects a dead access token at the WebSocket upgrade with
+# HTTP 403. autobahn reports that as an unclean close with code 1006 and a
+# reason like "WebSocket connection upgrade failed (403 - Forbidden)", i.e.
+# the 403 is only in the reason text (a stub / future SDK may pass 403 as
+# the code). The SDK's reconnecting factory then retries the SAME stale
+# token forever inside reactor.run(), so ticker.connect() never returns and
+# the daemon never exits for systemd to restart it with a fresh DB token.
+_AUTH_FAILURE_RE = re.compile(r"\b403\b")
+
+# ak-ygpn: pause before EVERY non-zero exit from the ws loop (auth failure,
+# SDK gave up, any return from connect()). Each restart re-reads the token
+# from the DB; until the operator re-auths it is still stale, so without a
+# pause the unit would bounce every ~6s (and trip the unit's
+# StartLimitBurst, leaving it failed after re-auth). >= 60s keeps such a
+# cycle far under 20 restarts / 10 min (deploy/ak-kite-ws.service).
+EXIT_DELAY_S = 60
+
+
+def _is_auth_failure(code, reason) -> bool:
+    """True if a close / error is Kite rejecting the access token (403).
+    The reason is inspected, never logged (it may carry token fragments)."""
+    if code == 403:
+        return True
+    if not reason:
+        return False
+    try:
+        return bool(_AUTH_FAILURE_RE.search(str(reason)))
+    except Exception:
+        return False
+
 
 class KiteWsDaemon:
     """Long-lived WebSocket producer + UNIX-socket snapshot server.
@@ -200,6 +231,10 @@ class KiteWsDaemon:
 
         # Signal the main loop sets when it's time to exit.
         self._exit_event = threading.Event()
+
+        # ak-ygpn: set when Kite rejected the token (403) or the SDK gave
+        # up reconnecting; run_ws_loop then exits non-zero.
+        self._fatal_ws_failure = False
 
         # IPC server + its thread handle.
         self._server: Optional[_IpcServer] = None
@@ -315,10 +350,12 @@ class KiteWsDaemon:
         case so systemd can be asked to restart with a fresh
         token.
         """
-        # Logging: 'reason' can carry token fragments in some
-        # SDK versions — strip to just the code + short text.
-        reason_tag = str(reason)[:40] if reason else ""
-        self.logger.info(f"ws closed: code={code} reason={reason_tag}")
+        # ak-m69p (ak-zttr parity): 'reason' can carry token fragments
+        # in some SDK versions — log the code only, never the reason.
+        self.logger.info(f"ws closed: code={code}")
+        if _is_auth_failure(code, reason):
+            self._stop_on_fatal(ws, "kite rejected the access token (403)")
+            return
         if code and code in _TRANSIENT_CLOSE_CODES:
             return
         # Non-transient close → re-check token at next iteration.
@@ -330,8 +367,33 @@ class KiteWsDaemon:
         )
 
     def _on_error(self, ws, code, reason) -> None:
-        reason_tag = str(reason)[:40] if reason else ""
-        self.logger.error(f"ws error: code={code} reason={reason_tag}")
+        # ak-m69p: code only (see _on_close).
+        self.logger.error(f"ws error: code={code}")
+        if _is_auth_failure(code, reason):
+            self._stop_on_fatal(ws, "kite rejected the access token (403)")
+
+    def _on_noreconnect(self, ws) -> None:
+        """ak-ygpn: the SDK exhausted its reconnect attempts. Exit so
+        systemd restarts with a fresh DB read instead of idling."""
+        self._stop_on_fatal(ws, "kite ws reconnect attempts exhausted")
+
+    def _stop_on_fatal(self, ws, detail: str) -> None:
+        """ak-ygpn: mark reconnect_required, stop the SDK's internal
+        retries and its reactor so ``ticker.connect()`` returns and
+        run_ws_loop exits non-zero. Idempotent (autobahn calls on_error
+        AND on_close for one unclean close)."""
+        self._set_state(STATE_RECONNECT, detail)
+        if self._fatal_ws_failure:
+            return
+        self._fatal_ws_failure = True
+        self.logger.error(f"{detail} — stopping the ws loop; daemon will exit non-zero")
+        for method in ("stop_retry", "stop"):
+            fn = getattr(ws, method, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception as exc:
+                    self.logger.error(f"ticker.{method} raised {type(exc).__name__}")
 
     # ───── Subscription set management ─────────────────────
 
@@ -436,8 +498,10 @@ class KiteWsDaemon:
     def run_ws_loop(self) -> int:
         """Enter the KiteTicker loop. Blocks until:
           * ``stop()`` is called (returns 0), OR
-          * Token-expired detected (sets state + returns 1 so
-            the caller sys.exit(1) and systemd restarts).
+          * ``ticker.connect()`` returns for any reason (403 / SDK
+            gave up / connection ended): after EXIT_DELAY_S returns 1
+            so the caller sys.exit(1)s and systemd restarts with a
+            fresh token read (ak-ygpn).
 
         Return value is the intended process exit code.
         """
@@ -451,7 +515,17 @@ class KiteWsDaemon:
         )
 
         while not self._exit_event.is_set():
-            token = self._token_provider()
+            # ak-ygpn review: a DB blip in the provider must not crash the
+            # process into a fast systemd restart loop (start limit);
+            # treat it as "no token" and take the paced 30s wait below.
+            try:
+                token = self._token_provider()
+            except Exception as exc:
+                self.logger.error(
+                    f"access_token provider raised {type(exc).__name__}; "
+                    f"treating as no token"
+                )
+                token = None
             if not token:
                 self.logger.warning(
                     "no kite access_token — state=reconnect_required, "
@@ -474,6 +548,7 @@ class KiteWsDaemon:
             ticker.on_connect = self._on_connect
             ticker.on_close = self._on_close
             ticker.on_error = self._on_error
+            ticker.on_noreconnect = self._on_noreconnect  # ak-ygpn
 
             try:
                 # threaded=False → connect() blocks the main thread
@@ -489,22 +564,24 @@ class KiteWsDaemon:
                     f"ticker.connect raised {type(exc).__name__}"
                 )
 
-            # Post-connect check: if state flipped to reconnect_
-            # required during the lifetime of this connection,
-            # exit non-zero. systemd restarts; next boot re-reads
-            # the token from DB.
-            if self.get_state()["state"] == STATE_RECONNECT:
-                self.logger.info(
-                    "exiting with code 1 — systemd will restart with "
-                    "fresh token read"
-                )
-                return 1
-
-            # Transient close + state stays OK/INIT → loop and
-            # reconnect with the same token. Brief backoff so a
-            # hard network partition doesn't spin.
-            if self._exit_event.wait(timeout=5):
+            # ak-ygpn (+ review): whatever made connect() return — Kite
+            # rejected the token (403), the SDK gave up reconnecting, a
+            # reconnect_required close, or a plain return with state
+            # OK/INIT — the SDK's reactor has stopped and cannot be
+            # restarted in this process (twisted ReactorNotRestartable), so
+            # re-calling connect() would fail forever. Exit non-zero so
+            # systemd restarts with a fresh DB token read, after a pause so
+            # a still-stale token or a flapping network can't bounce the
+            # unit into its start limit.
+            reason = ("fatal ws failure" if self._fatal_ws_failure
+                      else f"ws loop ended (state={self.get_state()['state']})")
+            self.logger.info(
+                f"{reason}: exiting with code 1 in {EXIT_DELAY_S}s — "
+                f"systemd will restart with a fresh token read"
+            )
+            if self._exit_event.wait(timeout=EXIT_DELAY_S):
                 return 0
+            return 1
 
         return 0
 

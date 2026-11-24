@@ -44,7 +44,7 @@ Pin-downs:
   (19) Controller SSE emits reconnect_required event.
   (20) Systemd unit file Restart=always.
   (21) Systemd unit file RuntimeDirectory=akkountant.
-  (22) Systemd unit file StartLimitIntervalSec=0.
+  (22) Systemd unit file: finite StartLimit in [Unit] (ak-m69p).
 """
 from __future__ import annotations
 
@@ -549,14 +549,18 @@ def test_systemd_unit_has_runtime_directory():
     ), "systemd unit must set RuntimeDirectory=akkountant"
 
 
-def test_systemd_unit_has_start_limit_interval_zero():
-    """(22) StartLimitIntervalSec=0 — no cap on restart attempts.
-    Token-expired triggers intentional non-zero exits.
+def test_systemd_unit_has_finite_start_limit_in_unit_section():
+    """(22) ak-m69p: a finite start limit, in [Unit] (systemd ignores
+    StartLimitIntervalSec in [Service]). Token-expiry exits self-pace
+    (ak-ygpn 60s) so they never reach it; a misconfig restart storm does.
     """
     src = _read_source("deploy/ak-kite-ws.service")
-    assert re.search(
-        r"^StartLimitIntervalSec\s*=\s*0", src, re.MULTILINE,
-    ), "systemd unit must set StartLimitIntervalSec=0"
+    unit = src.split("\n[Unit]\n", 1)[1].split("\n[Service]\n", 1)[0]
+    service = src.split("\n[Service]\n", 1)[1]
+    assert re.search(r"^StartLimitIntervalSec\s*=\s*600\s*$", unit, re.MULTILINE)
+    assert re.search(r"^StartLimitBurst\s*=\s*20\s*$", unit, re.MULTILINE)
+    assert not re.search(r"^StartLimit", service, re.MULTILINE), \
+        "StartLimit* in [Service] is ignored by systemd"
 
 
 def test_systemd_unit_binds_entrypoint_script():

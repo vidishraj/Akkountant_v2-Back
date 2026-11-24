@@ -19,23 +19,37 @@ Lifecycle:
 systemd unit expectations:
   - Type=simple
   - Restart=always + RestartSec=5
-  - StartLimitIntervalSec=0 (indefinite retry on token-expired)
+  - StartLimitIntervalSec=600 + StartLimitBurst=20 in [Unit]
+    (ak-m69p). Only a misconfiguration (exit 2: KITE_API_KEY
+    missing) is meant to reach it; every other exit is paced
+    (ak-ygpn): ws-loop exits wait 60s, unexpected errors 30s.
   - User=opc / Group=opc
   - RuntimeDirectory=akkountant (gives /run/akkountant 0755 opc:opc;
     socket inside gets 0600 via chmod from daemon)
 
 Operator notes:
   - Logs land in journalctl -u ak-kite-ws (stdout/stderr).
-  - On token-expired → daemon exits 1 → systemd restarts
-    within 5s → re-reads token from DB → if still expired,
-    daemon logs `state=reconnect_required` + sleeps 30s per
-    cycle (no restart loop spam; bounded by the 30s wait).
+  - Kite rejects the token (403) → daemon waits 60s, exits 1 →
+    systemd restarts within 5s → re-reads the token from the DB.
+    No token on file (or a DB read error) → state
+    `reconnect_required` + a 30s in-process wait per cycle (no
+    exit). An unexpected error (e.g. the app import failing
+    while MySQL is down) → 30s wait, exit 1.
+  - Start limit tripped (misconfig fixed): `systemctl
+    reset-failed ak-kite-ws.service`, then start.
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
+import time
+
+# ak-ygpn review: pause before exiting on an UNEXPECTED error (failed app
+# import while MySQL is down, a crash during setup, ...), so a few minutes
+# of DB trouble can't trip the unit's start limit (20 / 10 min) and leave
+# it failed. Only the exit-2 misconfiguration exits at once.
+UNEXPECTED_EXIT_DELAY_S = 30
 
 
 # Make sure the Flask app's modules are importable. systemd invokes
@@ -168,5 +182,20 @@ def main() -> int:
         daemon.stop()
 
 
+def run(main_fn=main, sleep=time.sleep) -> int:
+    """ak-ygpn review: run ``main_fn``; an unexpected exception is
+    logged by type only (it may carry DSNs / tokens) and exits 1 after
+    UNEXPECTED_EXIT_DELAY_S instead of immediately."""
+    try:
+        return main_fn()
+    except Exception as exc:
+        logging.getLogger("kite_ws_daemon").error(
+            f"daemon failed with {type(exc).__name__}; exiting 1 in "
+            f"{UNEXPECTED_EXIT_DELAY_S}s (paced restart)"
+        )
+        sleep(UNEXPECTED_EXIT_DELAY_S)
+        return 1
+
+
 if __name__ == "__main__":  # pragma: no cover — entrypoint
-    sys.exit(main())
+    sys.exit(run())

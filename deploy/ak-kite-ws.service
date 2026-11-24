@@ -11,9 +11,19 @@
 #     or token-expired-signal) → relaunch within 5s. The daemon
 #     exits non-zero intentionally when the Kite token expires;
 #     the restart picks up the fresh token from the DB.
-#   * StartLimitIntervalSec=0 — no cap on restart attempts. The
-#     daemon self-paces its own token-expired bounces (30s wait
-#     inside the loop when no access_token on file).
+#   * ak-m69p: StartLimitIntervalSec=600 + StartLimitBurst=20 in
+#     [Unit] — a misconfigured unit (e.g. KITE_API_KEY missing:
+#     main() returns 2 at once) stops after 20 fast restarts
+#     instead of flooding the journal every 5s. Every other
+#     exit self-paces far below that (ak-ygpn): any ws-loop exit
+#     (403 token rejection, SDK gave up, connection ended) waits
+#     60s first, an unexpected error (e.g. app import failing
+#     while MySQL is down) waits 30s, and no-access-token / a DB
+#     read error waits 30s in-loop without exiting. (The old
+#     StartLimitIntervalSec=0 sat in [Service], where systemd
+#     ignores it: "Unknown key name ... in section 'Service'".)
+#     After fixing a misconfig: `systemctl reset-failed
+#     ak-kite-ws.service` then start.
 #
 # Overseer invariants:
 #   * DESTRUCTIVE systemctl permissions scope to this NEW unit
@@ -33,6 +43,9 @@
 Description=Akkountant Kite WebSocket LTP daemon (ak-vue6)
 After=network-online.target mysqld.service
 Wants=network-online.target
+# ak-m69p: start-rate limit (must be in [Unit]; see header).
+StartLimitIntervalSec=600
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -72,10 +85,6 @@ Environment=AK_SKIP_SCHEDULERS=1
 ExecStart=/home/opc/Akkountant_v2-Back/venv/bin/python3 scripts/kite_ws_daemon_entrypoint.py
 Restart=always
 RestartSec=5
-# No upper bound on restart attempts — token-expiry triggers a
-# non-zero exit intentionally; the daemon paces itself with a
-# 30s sleep when no access_token is on file.
-StartLimitIntervalSec=0
 # Journal captures stdout+stderr; matches app.service pattern.
 StandardOutput=journal
 StandardError=journal
