@@ -59,6 +59,62 @@ def mark_prior_consumed(run_refs, refs):
         run_refs.update((_CONSUMED, r) for r in refs if r)
 
 
+# ak-d0mc: which incoming row (skipped as a copy) consumed which earlier
+# row, as (_SKIPPED, earlier_ref, bank, row_json) markers, so a later chunk
+# whose PK-path row OWNS that earlier row can release the skipped row.
+_SKIPPED = "ak_d0mc_skipped_for"
+
+
+def _norm_bank(bank):
+    return (bank or "UNKNOWN").upper()
+
+
+def record_skip(run_refs, earlier_ref, bank, txn, file_id=None, gmail_id=None):
+    import json
+    if run_refs is not None and earlier_ref:
+        run_refs.add((_SKIPPED, earlier_ref, bank or "UNKNOWN", file_id, gmail_id,
+                      json.dumps(txn, sort_keys=True, default=str)))
+
+
+def pop_skip(run_refs, earlier_ref):
+    """(bank, file_id, gmail_id, row) of the incoming row that consumed
+    earlier_ref, removing the marker; None if no skipped row consumed it."""
+    import json
+    for e in list(run_refs or ()):
+        if isinstance(e, tuple) and e[:2] == (_SKIPPED, earlier_ref):
+            run_refs.discard(e)
+            return e[2], e[3], e[4], json.loads(e[5])
+    return None
+
+
+# ak-d0mc review minor 1: a released row of ANOTHER bank (multi-PDF email)
+# that can't be placed in the current batch waits here, as
+# (_PENDING, bank, file_id, gmail_id, row_json). That bank's next batch in
+# the same run inserts it; whatever is left is flushed at run end
+# (mailProcessorToolExecutor.flush_pending_releases). Never dropped.
+_PENDING = "ak_d0mc_pending_release"
+
+
+def add_pending(run_refs, bank, file_id, gmail_id, txn):
+    import json
+    if run_refs is not None:
+        run_refs.add((_PENDING, bank or "UNKNOWN", file_id, gmail_id,
+                      json.dumps(txn, sort_keys=True, default=str)))
+
+
+def take_pending(run_refs, bank=None):
+    """Remove and return pending released rows [(bank, file_id, gmail_id,
+    row)], only those of `bank` when given."""
+    import json
+    out = []
+    for e in list(run_refs or ()):
+        if isinstance(e, tuple) and e[:1] == (_PENDING,) and (
+                bank is None or _norm_bank(e[1]) == _norm_bank(bank)):
+            run_refs.discard(e)
+            out.append((e[1], e[2], e[3], json.loads(e[4])))
+    return out
+
+
 def add_landed(result):
     """Count an insert result's landed rows into the current email."""
     counter = LANDED_ROWS.get()

@@ -181,6 +181,139 @@ class TestReingestDedup(unittest.TestCase):
         out = self.ingest("BOB", [COFFEE], gid="g1", run=set())
         self.assertEqual(out["inserted"], 1)
 
+    def test_result_does_not_depend_on_row_order(self):
+        # ak-d0mc (2): the earlier run landed only the line-3 coffee. The
+        # re-ingest's line-3 coffee is that row (PK path); its line-1 coffee
+        # is genuinely new. In one pass, listing line 1 first let it take
+        # line 3's earlier row: both were dropped and the ledger kept 1.
+        for order in ([COFFEE, COFFEE2], [COFFEE2, COFFEE]):
+            with self.subTest(first=order[0]["line_position"]):
+                self.s.query(Transactions).delete()
+                self.s.query(FileDetails).delete()
+                self.s.commit()
+                self.ingest("BOB", [COFFEE2], run=set())
+                out = self.ingest("BOB", order, run=set())
+                self.assertEqual((out["inserted"], self.count()), (1, 2))
+
+    # ak-d0mc review: the reviewer's scenario table as regression tests
+    # (attachments concept dropped; one run set per ingest call group).
+    A = {"date": "22/11/2026", "amount": 50, "description": "UPI TEA",
+         "bank_reference_id": None, "line_position": 10}
+
+    def test_s2_boi_to_bob_adds_nothing(self):
+        self.ingest("BOI", [COFFEE, COFFEE2, RENT], run=set())
+        self.ingest("BOB", [COFFEE, COFFEE2, RENT], run=set())
+        self.assertEqual(self.count(), 3)
+
+    def test_s3_one_earlier_two_incoming_across_chunks(self):
+        self.ingest("BOI", [COFFEE], run=set())
+        run = set()
+        self.ingest("BOB", [COFFEE], run=run)
+        self.ingest("BOB", [COFFEE2], run=run)
+        self.assertEqual(self.count(), 2)
+
+    def test_s4_two_identical_first_ingest_then_bank_change(self):
+        self.ingest("BOB", [COFFEE, COFFEE2], run=set())
+        self.assertEqual(self.count(), 2)
+        self.ingest("BOI", [COFFEE, COFFEE2], run=set())
+        self.assertEqual(self.count(), 2)
+
+    def test_s5_third_ingest_after_a_mixed_bank_reingest(self):
+        self.ingest("BOI", [COFFEE], run=set())
+        self.ingest("BOB", [COFFEE, RENT], run=set())          # coffee deduped, rent new
+        self.assertEqual(self.count(), 2)
+        self.ingest("BOB", [COFFEE, RENT], run=set())          # third ingest: nothing new
+        self.assertEqual(self.count(), 2)
+
+    def test_s7_cross_chunk_order(self):
+        # earlier {A'} only; chunk 1 = [A] (new hash), chunk 2 = [A'] (PK).
+        # Chunk 1 can't know A' is coming, so A is first taken as a copy of
+        # A'; chunk 2's PK-path A' owns that earlier row, so A is released
+        # and inserted there. No bank-column rule (breaks --fix-linked).
+        a2 = dict(self.A, line_position=11)
+        self.ingest("BOB", [a2], run=set())
+        run = set()
+        self.assertEqual(self.ingest("BOB", [self.A], run=run)["inserted"], 0)
+        self.assertEqual(self.ingest("BOB", [a2], run=run)["inserted"], 1)
+        self.assertEqual(self.count(), 2)
+
+    def test_s7_released_row_takes_another_free_earlier_row(self):
+        # earlier {A' under BOI, A'' under BOB}; chunk 1 [A] takes one; when
+        # chunk 2's PK row claims A'', A moves to the remaining free slot.
+        a2, a3 = dict(self.A, line_position=11), dict(self.A, line_position=12)
+        self.ingest("BOI", [a2], run=set())
+        self.ingest("BOB", [a3])                   # no ingest context: both earlier rows exist
+        self.assertEqual(self.count(), 2)
+        run = set()
+        self.ingest("BOB", [self.A], run=run)
+        self.ingest("BOB", [a3], run=run)
+        self.assertEqual(self.count(), 2)          # A = the BOI copy; a3 = itself
+
+    def banks(self):
+        self.s.expire_all()
+        return sorted(t.bank for t in self.s.query(Transactions).all())
+
+    def _two_bank_release(self):
+        """Multi-PDF email (SBI savings + SBI_CARD card), identical coffee on
+        both. Earlier run landed only SBI's line-3 coffee. Re-ingest: the
+        card's coffee (call 1) is first taken as a copy of it; SBI's PK row
+        (call 2) owns it, so the card's coffee is released, and it belongs
+        to ANOTHER bank than the releasing call."""
+        self.ingest("SBI", [COFFEE2], run=set())
+        run = set()
+        self.assertEqual(self.ingest("SBI_CARD", [COFFEE], run=run)["inserted"], 0)
+        self.assertEqual(self.ingest("SBI", [COFFEE2], run=run)["inserted"], 0)
+        return run
+
+    def test_other_bank_release_is_inserted_at_run_end(self):
+        # ak-d0mc review minor 1: never dropped with only a warning.
+        run = self._two_bank_release()
+        self.assertEqual(self.count(), 1)                  # pending, not lost
+        landed = {"rows": 0, "recorded": 0}
+        t1, t2 = O.STATEMENT_RUN_REFS.set(run), O.LANDED_ROWS.set(landed)
+        try:
+            self.assertEqual(EX.flush_pending_releases(self.ts, "u"), 1)
+            self.assertEqual(EX.flush_pending_releases(self.ts, "u"), 0)   # once only
+        finally:
+            O.LANDED_ROWS.reset(t2)
+            O.STATEMENT_RUN_REFS.reset(t1)
+        self.assertEqual(self.banks(), ["SBI", "SBI_CARD"])  # nothing lost, own bank
+        self.assertEqual(landed["rows"], 1)
+        self.s.expire_all()
+        card = self.s.query(Transactions).filter_by(bank="SBI_CARD").one()
+        self.assertEqual((str(card.date)[:10], Decimal(str(card.amount))),
+                         ("2026-11-20", Decimal("100")))   # JSON round-trip inserted fine
+
+    def test_other_bank_release_is_inserted_by_that_banks_next_batch(self):
+        run = self._two_bank_release()
+        out = self.ingest("SBI_CARD", [RENT], run=run)     # the card's next chunk
+        self.assertEqual(out["inserted"], 2)               # rent + the released coffee
+        self.assertEqual(self.banks(), ["SBI", "SBI_CARD", "SBI_CARD"])
+        t1 = O.STATEMENT_RUN_REFS.set(run)
+        try:
+            self.assertEqual(EX.flush_pending_releases(self.ts, "u"), 0)
+        finally:
+            O.STATEMENT_RUN_REFS.reset(t1)
+
+    def test_flush_failure_fails_the_email_not_silent(self):
+        from services import mailProcessorService as MPS
+        run = self._two_bank_release()
+        svc = MPS.MailProcessorService.__new__(MPS.MailProcessorService)
+        svc.logger = mock.MagicMock()
+        svc.transaction_service = mock.MagicMock()
+        svc.transaction_service.insertTransactions.side_effect = RuntimeError("db down")
+        t1 = O.STATEMENT_RUN_REFS.set(run)
+        try:
+            self.assertEqual(svc._flush_released_rows("u"), [O.INGEST_INCOMPLETE])
+        finally:
+            O.STATEMENT_RUN_REFS.reset(t1)
+        self.assertTrue(svc.logger.error.called)
+
+    def test_service_flushes_at_run_end(self):
+        src = open(os.path.join(HERE, "services", "mailProcessorService.py")).read()
+        self.assertIn("failures = list(failures) + self._flush_released_rows(user_id)", src)
+        self.assertIn("if self._flush_released_rows(user_id):", src)
+
     def test_other_statement_is_not_matched(self):
         self.ingest("BOI", [COFFEE], gid="g1", run=set())
         out = self.ingest("BOB", [COFFEE], gid="g2", run=set())   # a different statement

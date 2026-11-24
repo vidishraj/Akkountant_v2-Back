@@ -137,9 +137,21 @@ def _drop_previous_run_copies(transaction_service, user_id, bank, file_id, gmail
         incoming ones, so legit same-day duplicates are preserved. A
         consumed slot stays consumed for the whole run (recorded in the
         run state), so a later chunk can't match the same earlier row;
+      * (ak-d0mc) order-independent: rows whose referenceID exists claim
+        their OWN earlier row first; and if a skipped row in an earlier
+        chunk took an earlier row that a later chunk's PK-path row owns,
+        that skipped row is RELEASED (it takes another free slot, or is
+        inserted now). The bank column can't decide this: after the
+        backfill's --fix-linked, a row's bank no longer matches the bank
+        its referenceID was minted under;
       * an incoming row whose referenceID already exists keeps the
         normal PK path (and uses up its own slot).
     Only active inside a statement ingest (the ContextVar is set).
+    Known gap (deferred, ak-ely2): every attachment of one email shares one
+    fileID, so in a multi-PDF email with statements of different banks an
+    incoming row may absorb an identical earlier row of ANOTHER attachment.
+    The total row count stays right; the per-bank attribution of that row
+    can be wrong. Fixing it needs per-attachment fileIDs.
     Returns (rows_to_insert, skipped_count).
     """
     from collections import defaultdict
@@ -147,7 +159,8 @@ def _drop_previous_run_copies(transaction_service, user_id, bank, file_id, gmail
     from models.transactions import Transactions
     from utils.reference_id import normalize_description_for_backstop
     from utils.statement_ingest_outcome import (
-        STATEMENT_RUN_REFS, consumed_prior_refs, mark_prior_consumed)
+        STATEMENT_RUN_REFS, add_pending, consumed_prior_refs, mark_prior_consumed,
+        pop_skip, record_skip, take_pending)
 
     run_refs = STATEMENT_RUN_REFS.get()
     session = _get_db_session(transaction_service)
@@ -184,18 +197,52 @@ def _drop_previous_run_copies(transaction_service, user_id, bank, file_id, gmail
         if k is not None:
             available[k].append(r.referenceID)
             key_of_ref[r.referenceID] = k
-    keep, skipped, newly_consumed = [], 0, set()
+    # ak-d0mc: two passes, so the result doesn't depend on row order. Pass 1:
+    # rows whose referenceID already exists (the PK path handles them) claim
+    # their OWN earlier row first. Pass 2: the rest match what's left. In one
+    # pass a new-ref row listed first could take the earlier row a later
+    # PK-path row owns; that row is then a PK duplicate too and the batch
+    # loses a genuine row.
+    newly_consumed, released = set(), []
     for txn in transactions:
-        k = key(txn.get("date"), txn.get("amount"), txn.get("description"))
         ref = txn.get("reference")
         if ref in existing_refs:
             own = key_of_ref.get(ref)
             if own is not None and ref in available[own]:
-                available[own].remove(ref)    # the PK path handles it; its own slot
+                available[own].remove(ref)
                 newly_consumed.add(ref)
+            elif ref in consumed and ref not in run_refs:
+                # An EARLIER call's skipped row took this row's own earlier
+                # row (cross-chunk order): release it.
+                prev = pop_skip(run_refs, ref)
+                if prev is not None:
+                    released.append(prev)
+    this_bank = (bank or "UNKNOWN").upper()
+    # Released rows of THIS bank left pending by an earlier call: insert now.
+    keep = [txn for _b, _f, _g, txn in take_pending(run_refs, bank=bank)]
+    skipped = 0
+    for row_bank, row_file, row_gmail, txn in released:
+        k = key(txn.get("date"), txn.get("amount"), txn.get("description"))
+        if k is not None and available.get(k):
+            earlier_ref = available[k].pop()       # still a copy of another earlier row
+            newly_consumed.add(earlier_ref)
+            record_skip(run_refs, earlier_ref, row_bank, txn, row_file, row_gmail)
+        elif (row_bank or "UNKNOWN").upper() == this_bank:
+            keep.append(txn)                       # genuine: insert it now
+        else:
+            # Another bank's attachment: insert under its own bank on that
+            # bank's next batch, or at run end. Never dropped.
+            add_pending(run_refs, row_bank, row_file, row_gmail, txn)
+    for txn in transactions:
+        ref = txn.get("reference")
+        if ref in existing_refs:
             keep.append(txn)
-        elif k is not None and available.get(k):
-            newly_consumed.add(available[k].pop())
+            continue
+        k = key(txn.get("date"), txn.get("amount"), txn.get("description"))
+        if k is not None and available.get(k):
+            earlier_ref = available[k].pop()
+            newly_consumed.add(earlier_ref)
+            record_skip(run_refs, earlier_ref, bank, txn, file_id, gmail_id)
             skipped += 1
         else:
             keep.append(txn)
@@ -207,6 +254,33 @@ def _drop_previous_run_copies(transaction_service, user_id, bank, file_id, gmail
             f"(bank-agnostic match); skipped as duplicates"
         )
     return keep, skipped
+
+
+def flush_pending_releases(transaction_service, user_id):
+    """ak-d0mc review minor 1: at the end of a statement run, insert released
+    rows still pending (another bank's attachment had no batch left), each
+    group under its OWN bank / fileID. Returns rows inserted. Raises if an
+    insert fails, so the caller fails the email (retried) instead of
+    silently under-counting."""
+    from utils import statement_ingest_outcome as outcome
+    run_refs = outcome.STATEMENT_RUN_REFS.get()
+    pending = outcome.take_pending(run_refs)
+    if not pending:
+        return 0
+    groups = {}
+    for row_bank, row_file, row_gmail, txn in pending:
+        groups.setdefault((row_bank, row_file, row_gmail), []).append(txn)
+    total = 0
+    for (row_bank, row_file, row_gmail), rows in groups.items():
+        errors = transaction_service.insertTransactions(
+            rows, row_bank, user_id, [], "Statement", fileId=row_file,
+            source_emails=[{"message_id": row_gmail}] if row_gmail else None)
+        inserted = len(rows) - (errors or 0)
+        outcome.add_landed({"inserted": inserted, "duplicates": errors or 0})
+        run_refs.update(t.get("reference") for t in rows if t.get("reference"))
+        total += inserted
+    logger.info(f"[ak-d0mc] inserted {total} released statement row(s) at run end")
+    return total
 
 
 def _find_existing_file_details(transaction_service, gmail_message_id):

@@ -359,6 +359,9 @@ class MailProcessorService:
                 pdf_path, email, user_id, password=password,
                 processing_mode=processing_mode, only_chunks=only_chunks,
             )
+            if self._flush_released_rows(user_id):
+                analysis_summary = dict(analysis_summary or {}, success=False,
+                                        reason=ingest_outcome.INGEST_INCOMPLETE)
         finally:
             ingest_outcome.STATEMENT_RUN_REFS.reset(_run_refs_token)
 
@@ -1355,6 +1358,7 @@ class MailProcessorService:
         try:
             failures, persisted = self._process_pdf_items(
                 email, user_id, processing_mode, pdf_items, hint_tags, gmail_id)
+            failures = list(failures) + self._flush_released_rows(user_id)
         finally:
             ingest_outcome.STATEMENT_RUN_REFS.reset(_run_refs_token)
             ingest_outcome.LANDED_ROWS.reset(_landed_token)
@@ -1397,6 +1401,21 @@ class MailProcessorService:
         )
         for persist_path in persisted:
             self._update_processed_email_pdf(gmail_id, user_id, persist_path)
+
+    def _flush_released_rows(self, user_id):
+        """ak-d0mc: insert re-ingest rows still pending at run end (see
+        mailProcessorToolExecutor.flush_pending_releases). Returns [] or
+        [INGEST_INCOMPLETE] when the insert failed, so the email is stamped
+        failed and retried rather than silently short."""
+        from services.mailProcessorToolExecutor import flush_pending_releases
+        try:
+            flush_pending_releases(self.transaction_service, user_id)
+            return []
+        except Exception as e:
+            self.logger.error(
+                f"[ak-d0mc] inserting released statement rows failed ({type(e).__name__}); "
+                f"email marked incomplete for retry")
+            return [ingest_outcome.INGEST_INCOMPLETE]
 
     def _stored_extraction_summary(self, gmail_id, user_id):
         """ak-7ahz: the row's current extraction_summary (holds the retry
