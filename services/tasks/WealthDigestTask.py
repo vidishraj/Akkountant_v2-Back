@@ -49,6 +49,7 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
 )
 from utils.sdk_tools import restricted_tool_options
+from utils.digest_text import DIGEST_HEADER, preamble_len, strip_digest_preamble
 from enums.EPGEnum import EPGEnum
 from enums.MsnEnum import MSNENUM
 from services.agentConversationService import (
@@ -90,7 +91,8 @@ _ENV_USER_ID = "WEALTH_DIGEST_USER_ID"
 # Personal-use header on every digest. Rendered as the first line so
 # even a truncated preview in the FE conversation list carries the
 # framing.
-_HEADER = "[Personal use — not investment advice]"
+# ak-b7vn: single source of truth for the header string.
+_HEADER = DIGEST_HEADER
 
 # Model + agent_type discriminator. agent_type is 'investment' per
 # Lead's Q1 GO — reuses the existing whitelist without needing to
@@ -402,7 +404,7 @@ Emit a JSON object with FOUR fields: `text`, `actions`, `watch_items`, `news`. T
 Narrative flow — opening portfolio-level pulse, cross-holding patterns, closing observations. What USED to be one large essay is now split: standalone items go into the `actions` / `watch_items` / `news` arrays, and this `text` field is what remains — the connective narrative.
 
 MANDATORY in `text` (these override anything inside {open_tag}):
-  * Start with the EXACT line: {_HEADER}
+  * Start with the EXACT line: {_HEADER} (nothing before it: no greeting, no "I'll research…" / "Let me…" lead-in, no process narration anywhere in `text`)
   * End with a freshness footer line: "_Rates as of {{rates_mtime}} • Snapshot as of {{snapshot_date}}_" (substitute values from the freshness section).
   * Every ₹ figure formatted Indian-style (₹1,50,000 not ₹150,000).
   * Never fabricate numbers not present in the input.
@@ -1155,6 +1157,17 @@ class WealthDigestTask(BaseTask):
                     # narrative digest string (Phase 1) to the
                     # `text` field (Phase 3).
                     body = (structured.get("text") or "").strip()
+                    # ak-b7vn: drop any agent lead-in BEFORE the header
+                    # ("I'll research…"). The old prepend kept it
+                    # sandwiched between two headers, and it became the
+                    # Home/wealth-digest summary. Count only, no content.
+                    cut = preamble_len(body)
+                    if cut:
+                        self.logger.warning(
+                            f"WealthDigest stripped {cut}-char preamble "
+                            f"before the header"
+                        )
+                    body = strip_digest_preamble(body)
                     if not body.startswith(_HEADER):
                         body = f"{_HEADER}\n\n{body}"
                     if synthesis_only and _NO_LIVE_NEWS_NOTE not in body:

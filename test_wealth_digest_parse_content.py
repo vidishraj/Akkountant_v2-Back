@@ -58,6 +58,11 @@ def _ast_lift_parse_digest_content():
             kept.append(node)
     tree.body = kept
     ns = {"__name__": "test_wealth_digest_parse_content_ast_lift"}
+    # ak-b7vn: parse_digest_content calls the leaf (dependency-free)
+    # preamble stripper; provide it to the lifted function.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from utils.digest_text import strip_digest_preamble
+    ns["strip_digest_preamble"] = strip_digest_preamble
     exec(compile(tree, "<parse_digest_content-AST-lift>", "exec"), ns)
     return ns["parse_digest_content"]
 

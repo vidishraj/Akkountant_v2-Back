@@ -68,6 +68,7 @@ def _ast_lift_delimiter_helpers():
     for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module in {
             "__future__",
+            "utils.digest_text",  # ak-b7vn: _HEADER = DIGEST_HEADER
         }:
             kept.append(node)
             continue

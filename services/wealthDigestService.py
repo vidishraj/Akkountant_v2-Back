@@ -39,6 +39,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from services.Base_Service import BaseService
 from utils.logger import Logger
+from utils.digest_text import strip_digest_preamble
 
 
 # ak-5vg v2 (reviewer MINOR-1): pre-migration column-missing errors
@@ -136,14 +137,20 @@ def parse_digest_content(raw: str | None) -> dict:
         ):
             # Structured shape recognized. Normalize types + fill
             # missing arrays.
-            out = {"text": str(parsed.get("text") or "")}
+            # ak-b7vn: also clean digests STORED with an agent lead-in
+            # before the header (pre-fix rows).
+            out = {"text": strip_digest_preamble(str(parsed.get("text") or ""))}
             for k in ("actions", "watch_items", "news"):
                 v = parsed.get(k)
                 out[k] = v if isinstance(v, list) else []
             return out
-    # Legacy digest — wrap raw as text, arrays empty.
+    # Legacy digest — wrap raw as text, arrays empty. (A malformed JSON
+    # row also lands here and is shown as raw text; accepted per the
+    # ak-b7vn review, since no such row exists in prod.) ak-b7vn: legacy
+    # digests were built from ALL concatenated TextBlocks, so any
+    # interstitial lead-in precedes the header; cut it.
     return {
-        "text": raw,
+        "text": strip_digest_preamble(raw),
         "actions": [],
         "watch_items": [],
         "news": [],
