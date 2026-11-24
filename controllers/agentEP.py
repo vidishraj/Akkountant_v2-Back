@@ -45,6 +45,12 @@ class AgentController:
         # tokens. Dual-accept with legacy `confirmed_tools: [str]`
         # during the migration window; see utils/confirm_tokens.py.
         confirmed_calls = data.get("confirmed_calls", []) or []
+        # ak-2ye9: confirm_ids the user cancelled — revoked server-side
+        # and answered with an `outcome` event (status=cancelled).
+        cancelled_calls = data.get("cancelled_calls", []) or []
+        if not isinstance(cancelled_calls, list):
+            cancelled_calls = []
+        cancelled_calls = [c for c in cancelled_calls if isinstance(c, str)][:50]
         attachments = data.get("attachments", []) or []
         conversation_id = data.get("conversation_id")  # ak-bq5
         user_id = g.get("firebase_id")
@@ -104,6 +110,7 @@ class AgentController:
                 # ak-dixt: server-signed confirm tokens (dual-accept
                 # with the legacy confirmed_tools name-list).
                 confirmed_calls=confirmed_calls,
+                cancelled_calls=cancelled_calls,
             )
 
         def _producer_error_to_sse(exc: BaseException):

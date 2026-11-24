@@ -637,7 +637,9 @@ def test_web_gate_source_still_checks_four_conditions():
         "ak-dixt helper _is_call_confirmed missing — the dual-"
         "accept gate (server-signed tokens + legacy fallback)"
     )
-    assert "not _is_call_confirmed(_tn, args)" in src, (
+    # ak-2ye9: the call now also captures the matched confirm token
+    # (`_ck :=`) so the handler can emit the proposal's outcome event.
+    assert "not (_ck := _is_call_confirmed(_tn, args))" in src, (
         "ak-dixt: gate 4th condition must be "
         "`not _is_call_confirmed(_tn, args)` — the server-token "
         "preferred path with legacy dual-accept"
@@ -650,7 +652,7 @@ def test_web_gate_source_still_checks_four_conditions():
         "                    web_fetch_state is not None\n"
         "                    and _tn == \"insert_investment\"\n"
         "                    and web_fetch_state[\"used\"]\n"
-        "                    and not _is_call_confirmed(_tn, args)\n"
+        "                    and not (_ck := _is_call_confirmed(_tn, args))\n"
         "                ):"
     ) in src, (
         "web-gate branch no longer matches the expected four-condition "

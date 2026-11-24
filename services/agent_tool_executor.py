@@ -122,6 +122,31 @@ def _resolve_service_type(raw_type: str):
     raise ValueError(f"Unknown service type: {raw_type}")
 
 
+HTTP_STATUS_KEY = "_http_status"
+
+
+def _with_http_status(body, status):
+    """ak-2ye9: keep an error HTTP status (>= 400) on the unwrapped dict.
+    Services signal failure as e.g. `jsonify({"Error": ...}), 406`; the
+    status used to be dropped here, so a failed write looked like a
+    success to the confirm-outcome check."""
+    if isinstance(status, int) and status >= 400 and isinstance(body, dict):
+        body = dict(body)
+        body[HTTP_STATUS_KEY] = status
+    return body
+
+
+def result_failed(result) -> bool:
+    """ak-2ye9: True if a tool result reports failure in any of the
+    shapes the services use."""
+    if not isinstance(result, dict):
+        return False
+    if result.get(TOOL_ERROR_KEY) or result.get("error") or result.get("Error"):
+        return True
+    status = result.get(HTTP_STATUS_KEY)
+    return isinstance(status, int) and status >= 400
+
+
 def _unwrap_response(result):
     """Unwrap Flask jsonify responses into plain dicts for Claude."""
     if result is None:
@@ -130,14 +155,15 @@ def _unwrap_response(result):
     # Handle (response, status_code) tuples from Flask controllers
     if isinstance(result, tuple):
         resp, status = result[0], result[1] if len(result) > 1 else 200
-        return _unwrap_response(resp)
+        return _with_http_status(_unwrap_response(resp), status)
 
     # Handle Flask Response objects (from jsonify)
     if isinstance(result, Response):
         try:
-            return json.loads(result.get_data(as_text=True))
+            body = json.loads(result.get_data(as_text=True))
         except (json.JSONDecodeError, Exception):
-            return {"result": result.get_data(as_text=True)}
+            body = {"result": result.get_data(as_text=True)}
+        return _with_http_status(body, result.status_code)
 
     # Handle SQLAlchemy model objects
     if hasattr(result, '__dict__') and hasattr(result, '__tablename__'):

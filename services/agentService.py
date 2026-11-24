@@ -11,11 +11,13 @@ import time
 import anyio
 from services.Base_Service import BaseService
 from services.agent_tools import get_agent_config, get_tool_destructiveness
-from services.agent_tool_executor import execute_tool, TOOL_ERROR_KEY
+from services.agent_tool_executor import execute_tool, TOOL_ERROR_KEY, result_failed
 from utils.logger import Logger
 from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
+from utils.confirm_preview import build_outcome, build_preview
 from utils.confirm_tokens import (
-    issue_confirm_token, verify_confirm_token,
+    issue_confirm_token, verify_confirm_token, revoke_confirm_token,
+    peek_confirm_tool,
 )
 import base64 as _base64  # ak-1x4 pass 2: encode attachment bytes for tool result
 from utils.agent_attachments import (
@@ -547,7 +549,7 @@ class AgentService(BaseService):
 
     def stream_chat(self, agent_type, messages, user_id, confirmed_tools=None,
                     attachments=None, conversation_id=None,
-                    confirmed_calls=None):
+                    confirmed_calls=None, cancelled_calls=None):
         """
         Generator that yields SSE events for the agent chat.
         Uses claude_agent_sdk with MCP tools to process queries.
@@ -556,7 +558,10 @@ class AgentService(BaseService):
         - conversation_id: {"type": "conversation_id", "id": int}  (ak-bq5)
         - text: {"type": "text", "content": "..."}
         - tool_exec: {"type": "tool_exec", "tool": "..."}
-        - confirm: {"type": "confirm", "tool": "...", "input": {...}, "message": "..."}
+        - confirm: {"type": "confirm", "tool": "...", "input": {...}, "message": "...",
+                    "preview": {"op", "op_label", "fields": [...]}}  (ak-2ye9)
+        - outcome: {"type": "outcome", "confirm_id", "tool", "status", "recorded", "message"}
+                   (ak-2ye9: final line for a confirmed / cancelled proposal)
         - done: {"type": "done", "mutations": [...]}
         - error: {"type": "error", "message": "..."}
 
@@ -590,6 +595,22 @@ class AgentService(BaseService):
         attachments = attachments or []
         tool_events = []  # Collected intermediate events (tool_exec, confirm)
         mutations = []
+        # ak-2ye9: cancelled proposals are revoked FIRST, before anything
+        # can run, so a cancelled confirm_id can never be applied (not
+        # this turn, not later). Only live tokens yield an outcome.
+        _cancel_events, cancelled = self._revoke_cancelled(cancelled_calls, user_id)
+        tool_events.extend(_cancel_events)
+        confirmed_calls = [t for t in confirmed_calls if t not in cancelled]
+        # ak-2ye9: tokens that verified for a call this turn, those whose
+        # call reported an outcome, tools that executed, and the tools
+        # with a LIVE Apply token this turn. A pending tool is ALWAYS
+        # held to the token's bound args (independent of web state), so
+        # an Apply can never write different values than the card showed.
+        confirm_state = {
+            "matched": {}, "done": set(), "executed": set(),
+            "pending_tools": {t for t in (peek_confirm_tool(c, user_id)
+                                          for c in confirmed_calls) if t},
+        }
         # ak-6k2m Bead B (2026-11-12): per-turn flag — flips True when
         # ANY web-fetch tool (SDK built-in WebSearch/WebFetch OR one of
         # the WEB_WRAPPER_TOOLS domain wrappers) fires. Used by the
@@ -786,6 +807,7 @@ class AgentService(BaseService):
                 # the gate can prefer the hardened path over the
                 # legacy name-list.
                 confirmed_calls=confirmed_calls,
+                confirm_state=confirm_state,
             )
 
             # ak-1x4 pass 2: when this turn carries attachments, register
@@ -1038,7 +1060,20 @@ class AgentService(BaseService):
                 output_tokens=output_tokens,
             )
 
+            # ak-2ye9: close out every live token the client sent for
+            # this turn. Verified-but-no-outcome -> failed; never ran ->
+            # revoked + not_executed (so "nothing recorded" stays true).
+            # Stale tokens from earlier turns are already consumed, so
+            # revoke returns None and they emit nothing.
+            tool_events.extend(
+                self._close_out_confirms(confirmed_calls, confirm_state, user_id))
+
             if error_msg:
+                # ak-2ye9: outcomes first — the user must learn whether
+                # anything was recorded even when the turn errored.
+                for event_type, data in tool_events:
+                    if event_type == "outcome":
+                        yield self._sse_event(event_type, data)
                 yield self._sse_event("error", {"message": error_msg})
                 return
 
@@ -1183,7 +1218,7 @@ class AgentService(BaseService):
     def _build_sdk_tools(self, agent_type, tool_defs, user_id,
                          tool_events, mutations, confirmed_tools,
                          conversation_id=None, web_fetch_state=None,
-                         confirmed_calls=None):
+                         confirmed_calls=None, confirm_state=None):
         """Build SdkMcpTool objects from tool definitions with handler closures.
 
         ak-9dz: `conversation_id` is threaded into the closure so the
@@ -1222,6 +1257,11 @@ class AgentService(BaseService):
         sdk_tools = []
 
         confirmed_calls = confirmed_calls or []
+        if confirm_state is None:
+            confirm_state = {}
+        for _k, _v in (("matched", {}), ("done", set()), ("executed", set()),
+                       ("pending_tools", set())):
+            confirm_state.setdefault(_k, _v)
 
         # ak-dixt helper: resolve whether THIS specific (tool, args,
         # user_id) call is confirmed. Tries the hardened token path
@@ -1231,13 +1271,28 @@ class AgentService(BaseService):
         # WARN log.
         logger = self.logger
 
+        def _token_confirmed(_tn, args):
+            # ak-2ye9: hardened path ONLY (no legacy name-list) — used by
+            # the pending-Apply gate.
+            for tok in confirmed_calls:
+                try:
+                    if verify_confirm_token(tok, _tn, args, user_id):
+                        confirm_state["matched"][tok] = _tn
+                        return tok
+                except Exception:
+                    continue
+            return None
+
         def _is_call_confirmed(_tn, args):
             # Hardened path: any token in confirmed_calls that
             # verifies for this exact (tool, args, user_id) is a hit.
             for tok in confirmed_calls:
                 try:
                     if verify_confirm_token(tok, _tn, args, user_id):
-                        return True
+                        # ak-2ye9: return the token so the handler can
+                        # emit this proposal's outcome (truthy as before).
+                        confirm_state["matched"][tok] = _tn
+                        return tok
                 except Exception:
                     # verify_confirm_token is designed to not raise,
                     # but defensively swallow + continue trying any
@@ -1263,6 +1318,9 @@ class AgentService(BaseService):
 
             # Use default-arg capture to bind loop variable
             async def handler(args, _tn=tool_name, _at=agent_type):
+                # ak-2ye9: the confirm token this call verified with
+                # (str), True for the legacy name-list, None if ungated.
+                _ck = None
                 # ak-6k2m Bead B: web-wrapper tools flip the per-turn
                 # flag BEFORE anything else — if the executor raises
                 # on validation, the flag still records that the model
@@ -1290,7 +1348,7 @@ class AgentService(BaseService):
                     web_fetch_state is not None
                     and _tn == "insert_investment"
                     and web_fetch_state["used"]
-                    and not _is_call_confirmed(_tn, args)
+                    and not (_ck := _is_call_confirmed(_tn, args))
                 ):
                     msg = AgentService._get_web_insert_confirm_message(args)
                     # ak-dixt: mint server-signed confirm_id. None on
@@ -1312,6 +1370,9 @@ class AgentService(BaseService):
                         # the underlying tool is still a mutation
                         # (inserts a row; doesn't delete).
                         "destructiveness": get_tool_destructiveness(_tn),
+                        # ak-2ye9: field-by-field preview, built from
+                        # the SAME args the confirm_id binds.
+                        "preview": build_preview(_tn, args),
                     }
                     if _confirm_id is not None:
                         _confirm_payload["confirm_id"] = _confirm_id
@@ -1338,7 +1399,7 @@ class AgentService(BaseService):
                 # bind to tool + args + user + expiry + one-time-use.
                 # Legacy name-list path still accepted during
                 # dual-accept migration window (WARN-logs on hit).
-                if _tn in DESTRUCTIVE_TOOLS and not _is_call_confirmed(_tn, args):
+                if _tn in DESTRUCTIVE_TOOLS and not (_ck := _is_call_confirmed(_tn, args)):
                     msg = AgentService._get_confirmation_message(_tn, args)
                     # ak-dixt: mint server-signed confirm_id. None
                     # on missing AK_CONFIRM_SECRET → FE falls back
@@ -1355,6 +1416,9 @@ class AgentService(BaseService):
                         # a future destructive tool named with a
                         # different prefix (purge_*, remove_*, etc.).
                         "destructiveness": get_tool_destructiveness(_tn),
+                        # ak-2ye9: field-by-field preview, built from
+                        # the SAME args the confirm_id binds.
+                        "preview": build_preview(_tn, args),
                     }
                     if _confirm_id is not None:
                         _confirm_payload["confirm_id"] = _confirm_id
@@ -1377,6 +1441,40 @@ class AgentService(BaseService):
                 # observability aggregation (operator can chart
                 # tool-latency P50 / P99 across cycles by filtering
                 # tool_exec events with a specific tool name).
+                # ak-2ye9 (review CRITICAL): this turn carries a live
+                # Apply token for this tool. Whatever else gated it (or
+                # didn't — insert_investment's web gate resets per turn),
+                # the call must match the token's bound args, else it is
+                # NOT executed and a fresh proposal is shown instead.
+                if (
+                    _ck is None
+                    and _tn in confirm_state["pending_tools"]
+                    and not (_ck := _token_confirmed(_tn, args))
+                ):
+                    _confirm_id = issue_confirm_token(_tn, args, user_id)
+                    _confirm_payload = {
+                        "tool": _tn,
+                        "input": args,
+                        "message": "The details changed since you confirmed. Please confirm again.",
+                        "reason": "args_changed_since_confirm",
+                        "destructiveness": get_tool_destructiveness(_tn),
+                        "preview": build_preview(_tn, args),
+                    }
+                    if _confirm_id is not None:
+                        _confirm_payload["confirm_id"] = _confirm_id
+                    tool_events.append(("confirm", _confirm_payload))
+                    return {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                f"Action NOT executed — the {_tn} call differs from what the "
+                                "user confirmed. Show the user the new details and wait for "
+                                "explicit approval before retrying."
+                            ),
+                        }],
+                        "is_error": True,
+                    }
+
                 _tool_start = time.monotonic()
 
                 # Execute via existing services
@@ -1405,6 +1503,14 @@ class AgentService(BaseService):
                     "tool_exec",
                     {"tool": _tn, "duration_ms": _tool_duration_ms},
                 ))
+                confirm_state["executed"].add(_tn)
+                # ak-2ye9: final line for a token-confirmed proposal.
+                # result_failed covers TOOL_ERROR_KEY, error/Error keys and
+                # an HTTP status >= 400 kept by _unwrap_response.
+                if isinstance(_ck, str):
+                    tool_events.append(("outcome", build_outcome(
+                        _ck, _tn, "failed" if result_failed(result) else "recorded")))
+                    confirm_state["done"].add(_ck)
 
                 # ak-e7g: distinguish handler-layer validation failures
                 # (surfaced with is_error=True so the LLM can retry with
@@ -1440,6 +1546,44 @@ class AgentService(BaseService):
             ))
 
         return sdk_tools
+
+    @staticmethod
+    def _revoke_cancelled(cancelled_calls, user_id):
+        """ak-2ye9: revoke each cancelled confirm_id. Returns
+        (outcome events, set of revoked tokens). Dead / foreign / forged
+        tokens are skipped silently (nothing to report)."""
+        events, revoked = [], set()
+        for tok in (cancelled_calls or []):
+            tool = revoke_confirm_token(tok, user_id)
+            if tool:
+                revoked.add(tok)
+                events.append(("outcome", build_outcome(tok, tool, "cancelled")))
+        return events, revoked
+
+    @staticmethod
+    def _close_out_confirms(confirmed_calls, confirm_state, user_id):
+        """ak-2ye9: end-of-turn outcomes for confirm tokens the client
+        sent. Verified + already reported -> nothing; verified but no
+        outcome (handler raised) -> failed; never ran with the bound
+        args -> revoked + not_executed. Tokens from earlier turns are
+        already consumed, so revoke returns None and they're skipped."""
+        events = []
+        for tok in (confirmed_calls or []):
+            if tok in confirm_state["done"]:
+                continue
+            if tok in confirm_state["matched"]:
+                confirm_state["done"].add(tok)
+                events.append(("outcome", build_outcome(
+                    tok, confirm_state["matched"][tok], "failed", interrupted=True)))
+                continue
+            tool = revoke_confirm_token(tok, user_id)
+            if tool:
+                confirm_state["done"].add(tok)
+                # Never claim "nothing recorded" if that tool DID run this
+                # turn (it can't with the pending gate; defence in depth).
+                if tool not in confirm_state.get("executed", ()):
+                    events.append(("outcome", build_outcome(tok, tool, "not_executed")))
+        return events
 
     @staticmethod
     def _format_conversation(messages, logger=None):

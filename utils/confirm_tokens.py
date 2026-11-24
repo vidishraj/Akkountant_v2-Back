@@ -262,6 +262,74 @@ def verify_confirm_token(
     return True
 
 
+def _decode_live(token, user_id):
+    """ak-2ye9: (tool, nonce, exp) for a token that is signed, for this
+    user, unexpired and not yet consumed IN THIS PROCESS; else None.
+    Does NOT check tool/args and does not consume. Never raises."""
+    try:
+        secret = _get_secret()
+        if secret is None or not isinstance(token, str) or "." not in token:
+            return None
+        payload_b64, sig_hex = token.rsplit(".", 1)
+        payload_bytes = _b64url_decode(payload_b64)
+        expected_sig = hmac.new(secret, payload_bytes, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig_hex, expected_sig):
+            return None
+        payload = json.loads(payload_bytes.decode("utf-8"))
+        if not isinstance(payload, dict) or payload.get("uid") != user_id:
+            return None
+        tool, exp, nonce = payload.get("tool"), payload.get("exp"), payload.get("nonce")
+        if not isinstance(tool, str) or not isinstance(exp, int):
+            return None
+        if not isinstance(nonce, str) or not nonce:
+            return None
+        now = int(time.time())
+        if exp <= now:
+            return None
+        with _consumed_lock:
+            _prune_consumed_locked(now)
+            if nonce in _consumed:
+                return None
+        return tool, nonce, exp
+    except Exception:
+        return None
+
+
+def peek_confirm_tool(token: str, user_id: str) -> Optional[str]:
+    """ak-2ye9: tool name of a LIVE token, without consuming it. Used to
+    find which tools have an Apply pending this turn, so those calls are
+    always held to the token's bound args."""
+    live = _decode_live(token, user_id)
+    return live[0] if live else None
+
+
+def revoke_confirm_token(token: str, user_id: str) -> Optional[str]:
+    """ak-2ye9: consume a LIVE token without executing anything, so it
+    can never be applied later. Used when the user cancels a proposal
+    (`cancelled_calls`) and when an Apply turn ends without the bound
+    call having run ("not_executed").
+
+    Checks signature + uid + expiry + not-already-consumed (NOT tool or
+    args: the caller doesn't have them). Returns the token's tool name
+    on success, None otherwise. Never raises.
+
+    LIMIT (ak-erkm): like one-time-use itself, the consumed set is
+    in-process. With several gunicorn workers a revoked token re-sent
+    to ANOTHER worker within its TTL is still live there. Revocation is
+    therefore best-effort until ak-erkm moves the set to the DB; the FE
+    never re-sends a cancelled confirm_id.
+    """
+    live = _decode_live(token, user_id)
+    if not live:
+        return None
+    tool, nonce, exp = live
+    with _consumed_lock:
+        if nonce in _consumed:
+            return None
+        _consumed[nonce] = exp
+    return tool
+
+
 def _reset_consumed_for_tests() -> None:
     """Test-only hook — flush the in-memory consumed dict. Not
     exported in a wildcard import; only test suites touch this."""
@@ -272,4 +340,6 @@ def _reset_consumed_for_tests() -> None:
 __all__ = [
     "issue_confirm_token",
     "verify_confirm_token",
+    "revoke_confirm_token",
+    "peek_confirm_tool",
 ]
