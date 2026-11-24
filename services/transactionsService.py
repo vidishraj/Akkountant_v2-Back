@@ -1266,7 +1266,32 @@ class TransactionService(BaseService):
                 "last_attempt_at": a.get("last_at"),
                 "message": row.error_message,
             })
-        return {"count": len(items), "by_reason": by_reason, "items": items}
+        # ak-i3tc review minor 2: failed statement emails whose last
+        # attempt is older than the retry window. The sweep no longer
+        # retries them, so they're listed here rather than going silent.
+        from utils import retry_sweep
+        failed = self.db.session.query(ProcessedEmails).filter_by(
+            user_id=userId, status="failed", processing_type="pdf").all()
+        aged_ids = set(retry_sweep.aged_out_ids(
+            [(r.gmail_id, r.status, r.processing_type, r.processed_at, r.extraction_summary)
+             for r in failed]))
+        aged_items = []
+        for r in failed:
+            if r.gmail_id not in aged_ids:
+                continue
+            last = retry_sweep.last_attempt_at(r.processed_at, r.extraction_summary)
+            aged_items.append({
+                "gmail_id": r.gmail_id,
+                "subject": r.subject,
+                "sender": r.sender,
+                "category": r.category,
+                "reason": (previous_attempts(r.extraction_summary) or {}).get("reason"),
+                "last_attempt_at": last.strftime("%Y-%m-%dT%H:%M:%SZ") if last else None,
+                "message": r.error_message,
+            })
+        aged_items.sort(key=lambda i: i["last_attempt_at"] or "", reverse=True)
+        return {"count": len(items), "by_reason": by_reason, "items": items,
+                "agedOut": {"count": len(aged_items), "items": aged_items[:50]}}
 
     def requeueUnlockFailed(self, userId):
         """ak-7ahz review minor 4: after the user changes statement

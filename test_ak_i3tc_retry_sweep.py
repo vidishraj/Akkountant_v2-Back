@@ -68,16 +68,17 @@ class TestSelection(unittest.TestCase):
             ("bad_at", "failed", "pdf", None),
             (None, "failed", "pdf", ago(days=1)),
         ]
-        self.assertEqual(S.select_retry_ids(rows, now=NOW), ["p_stale", "f_pdf"])
+        # Oldest last attempt first (round-robin; see the follow-up tests).
+        self.assertEqual(S.select_retry_ids(rows, now=NOW), ["f_pdf", "p_stale"])
         self.assertEqual(S.select_retry_ids(rows, now=NOW, exclude={"f_pdf"}), ["p_stale"])
 
-    def test_cap_newest_first(self):
+    def test_cap_oldest_first(self):
         rows = [(f"g{i}", "failed", "pdf", ago(hours=i + 1)) for i in range(50)]
         out = S.select_retry_ids(rows, now=NOW)
         self.assertEqual(len(out), S.MAX_RETRIES_PER_RUN)
         self.assertLessEqual(S.MAX_RETRIES_PER_RUN, 20)
-        self.assertEqual(out[0], "g0")
-        self.assertEqual(out[-1], f"g{S.MAX_RETRIES_PER_RUN - 1}")
+        self.assertEqual(out[0], "g49")
+        self.assertEqual(out[-1], f"g{50 - S.MAX_RETRIES_PER_RUN}")
 
 
 @unittest.skipUnless(_HAVE_APP, "app deps not installed")

@@ -370,6 +370,7 @@ class MailProcessorService:
                 except Exception:
                     pass
 
+        pdf_emails = []
         try:
             # 1. Fetch Gmail token
             report({"stage": "fetching_emails", "status": "processing"})
@@ -448,6 +449,15 @@ class MailProcessorService:
         except Exception as e:
             self.logger.error(f"Mail processing pipeline error: {e}", exc_info=True)
             summary["errors"].append(str(e))
+        finally:
+            # ak-i3tc review minor 3: link-based PDFs (HDFC Smart
+            # Statements) are downloaded into <cwd>/tmp during email
+            # separation, BEFORE PDF processing. The per-PDF loop removes
+            # each file it processes; if the run fails in between (e.g. the
+            # text batch raises) they would be left on disk. Remove any
+            # still present. Persisted copies (claude_statements/) are
+            # separate and untouched.
+            self._cleanup_local_pdfs(pdf_emails)
 
         self.logger.info(f"Mail processing complete: {summary}")
         return summary
@@ -730,23 +740,48 @@ class MailProcessorService:
         except Exception as e:
             self.logger.error(f"Failed to save emails to disk: {e}", exc_info=True)
 
+    def _cleanup_local_pdfs(self, emails):
+        """Remove leftover temp PDFs from `_local_pdf_paths`; never raises."""
+        removed = 0
+        for e in emails or []:
+            for item in e.get("_local_pdf_paths") or []:
+                path = item[0] if isinstance(item, (tuple, list)) else item
+                try:
+                    if isinstance(path, str) and os.path.exists(path):
+                        os.remove(path)
+                        removed += 1
+                except OSError as exc:
+                    self.logger.warning(f"[ak-i3tc] temp PDF cleanup failed ({type(exc).__name__})")
+        if removed:
+            self.logger.info(f"[ak-i3tc] removed {removed} leftover temp PDF(s)")
+        return removed
+
     def _retry_sweep_ids(self, user_id, exclude=()):
         """ak-i3tc: gmail ids to re-fetch this cycle (see utils.retry_sweep).
         Never raises: a lookup failure just skips the sweep this cycle."""
         from models.processedEmails import ProcessedEmails
         from utils import retry_sweep
         try:
+            # Review minor 2: the window keys on the LAST attempt (in
+            # extraction_summary), so it can't be a processed_at SQL filter.
             rows = self.transaction_service.db.session.query(
                 ProcessedEmails.gmail_id, ProcessedEmails.status,
                 ProcessedEmails.processing_type, ProcessedEmails.processed_at,
+                ProcessedEmails.extraction_summary,
             ).filter(
                 ProcessedEmails.user_id == user_id,
                 ProcessedEmails.status.in_(retry_sweep.SWEEP_STATUSES),
-                ProcessedEmails.processed_at >= retry_sweep.window_start(),
             ).all()
         except Exception as e:
             self.logger.warning(f"[ak-i3tc] retry sweep lookup failed: {type(e).__name__}")
             return []
+        aged = retry_sweep.aged_out_ids(rows)
+        if aged:
+            self.logger.warning(
+                f"[ak-i3tc] {len(aged)} failed statement email(s) aged out of the "
+                f"{retry_sweep.RETRY_WINDOW_DAYS}-day retry window; no longer retried "
+                f"automatically (listed in GET /statementAttention agedOut)"
+            )
         return retry_sweep.select_retry_ids(rows, exclude=exclude)
 
     def _filter_already_processed(self, emails, user_id):
