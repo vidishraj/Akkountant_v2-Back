@@ -581,7 +581,32 @@ class StocksService(Base_MSN, ABC):
                 # which matches user mental model on a missing-data day.
                 # If FE needs to distinguish "unknown" from "no change",
                 # a `day_change_known: bool` field can land as follow-up.
-                day_change_known = bool(day_change_basis)
+                # ak-tsoy (2026-11-24): a KNOWN day change needs a real
+                # basis AND a price that can have moved against it.
+                # Without today's open (OHLC down / no permission:
+                # ak-yx1y) the basis falls back to close_price, and
+                # last_price == close_price is then indistinguishable
+                # from a STALE quote: Kite's holdings last_price not
+                # updated, or close_price already rolled to today's
+                # close after EOD. Prod 2026-11-24: 18/18 holdings
+                # showed exactly this, a confident ₹0.00 "flat" on
+                # every row while the market feed showed real moves.
+                # Never present a fabricated flat as known.
+                if today_open is not None and today_open:
+                    day_change_basis_source = "today_open"
+                elif close_price:
+                    day_change_basis_source = "prev_close"
+                else:
+                    day_change_basis_source = None
+                stale_flat = (
+                    day_change_basis_source == "prev_close"
+                    and float(last_price) == float(close_price)
+                )
+                day_change_known = (
+                    bool(day_change_basis)
+                    and bool(last_price)   # no quote at all → unknown
+                    and not stale_flat
+                )
 
                 # Folded money math (Path A: Kite average_price as
                 # broker-canonical blended avg). If Overseer stamps Path B or
@@ -632,6 +657,13 @@ class StocksService(Base_MSN, ABC):
                     # distinguish "unknown" from "no movement" without
                     # ambiguity. True when the math ran normally.
                     'day_change_known': day_change_known,
+                    # ak-tsoy: which baseline the day change used:
+                    # "today_open" (live OHLC), "prev_close" (fallback),
+                    # or None (no basis). Lets FE/ops see a degraded
+                    # source without inferring it from the numbers.
+                    'day_change_basis': (
+                        day_change_basis_source if day_change_known else None
+                    ),
 
                     # --- Kite's own settled-only P&L / day change (preserved
                     #     for observability; NOT the folded values) ---

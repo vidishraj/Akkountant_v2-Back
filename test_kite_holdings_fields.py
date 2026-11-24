@@ -671,3 +671,86 @@ def test_enrichment_index_is_keyed_by_trading_symbol():
 
     assert set(index) == {"INFY", "TCS"}
     assert status["connected"] is True
+
+
+# ── ak-tsoy (2026-11-24): stale prev-close fallback must be UNKNOWN ────────
+#
+# Prod 2026-11-24 (flags only): 18/18 holdings had last_price ==
+# close_price, OHLC unavailable (ak-yx1y), so the basis fell back to
+# close_price and every row emitted day_change_amount=0 with
+# day_change_known=True: a confident ₹0.00 "flat" while the market feed
+# showed real moves. A prev-close zero with last == close cannot be told
+# apart from a stale quote / post-EOD close rollover, so it is unknown.
+
+def _service_with_ohlc(holdings, opens):
+    """opens: {instrument_token: today_open} (empty → OHLC unavailable)."""
+    svc = _service(holdings)
+    svc.kite_service.get_ohlc.return_value = {
+        f"NSE:{t}": {"instrument_token": t, "ohlc": {"open": o}}
+        for t, o in opens.items()
+    }
+    return svc
+
+
+def test_stale_flat_on_prev_close_fallback_is_unknown():
+    row = _service_with_ohlc(
+        [_kite_holding(instrument_token=1, last_price=1580.0,
+                       close_price=1580.0)], {}).fetch_kite_holdings("u")[0]
+    assert row["day_change_known"] is False
+    assert row["day_change_amount"] == 0.0
+    assert row["day_change_basis"] is None
+
+
+def test_prod_shape_every_holding_stale_all_unknown():
+    # 18 holdings, all last == close, OHLC failing: the FE aggregate must
+    # get "unknown" for every row (renders '—'), never a summed ₹0.
+    holdings = [
+        _kite_holding(tradingsymbol=f"S{i}", instrument_token=i,
+                      last_price=100.0 + i, close_price=100.0 + i)
+        for i in range(18)
+    ]
+    svc = _service(holdings)
+    svc.kite_service.get_ohlc.side_effect = RuntimeError("Insufficient permission")
+    rows = svc.fetch_kite_holdings("u")
+    assert len(rows) == 18
+    assert all(r["day_change_known"] is False for r in rows)
+    assert all(r["day_change_amount"] == 0.0 for r in rows)
+
+
+def test_prev_close_basis_with_real_move_stays_known():
+    row = _service_with_ohlc(
+        [_kite_holding(instrument_token=1)], {}).fetch_kite_holdings("u")[0]
+    assert row["day_change_known"] is True
+    assert row["day_change_basis"] == "prev_close"
+    assert row["day_change_amount"] == pytest.approx(451 * (1600.0 - 1580.0))
+
+
+def test_today_open_basis_flat_vs_close_is_still_known():
+    # With a LIVE open, last == yesterday's close is a real intraday
+    # number (move from open), not a staleness artefact.
+    row = _service_with_ohlc(
+        [_kite_holding(instrument_token=7, last_price=1580.0,
+                       close_price=1580.0)], {7: 1570.0}).fetch_kite_holdings("u")[0]
+    assert row["day_change_known"] is True
+    assert row["day_change_basis"] == "today_open"
+    assert row["day_change_amount"] == pytest.approx(451 * (1580.0 - 1570.0))
+
+
+def test_missing_last_price_is_unknown_not_a_full_value_drop():
+    row = _service_with_ohlc(
+        [_kite_holding(instrument_token=1, last_price=0)], {}).fetch_kite_holdings("u")[0]
+    assert row["day_change_known"] is False
+    assert row["day_change_amount"] == 0.0
+
+
+def test_pre_open_zero_today_open_is_unknown():
+    # Kite emits open=0 on pre-open ticks (ak-qeex): poison basis.
+    row = _service_with_ohlc(
+        [_kite_holding(instrument_token=3)], {3: 0.0}).fetch_kite_holdings("u")[0]
+    assert row["day_change_known"] is False
+    assert row["day_change_basis"] is None
+
+
+def test_day_change_basis_field_always_present():
+    rows = _service([_kite_holding()]).fetch_kite_holdings("u")
+    assert "day_change_basis" in rows[0]
