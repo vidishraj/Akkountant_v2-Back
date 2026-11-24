@@ -14,6 +14,8 @@ from services.agent_tools import get_agent_config, get_tool_destructiveness
 from services.agent_tool_executor import execute_tool, TOOL_ERROR_KEY, result_failed
 from utils.logger import Logger
 from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
+from utils.sdk_retry import sdk_error_code, sdk_error_user_message  # ak-95w0
+from utils.safe_errors import error_frames, error_tag  # ak-95w0
 from utils.confirm_preview import build_outcome, build_preview
 from utils.confirm_tokens import (
     issue_confirm_token, verify_confirm_token, revoke_confirm_token,
@@ -670,7 +672,7 @@ class AgentService(BaseService):
                     except Exception as exc:
                         # DB write failure is a hard error — don't run
                         # the SDK if we can't track the turn.
-                        self.logger.exception(
+                        self._log_exc(
                             "conversation create failed for user=%s "
                             "agent_type=%s", user_id, agent_type,
                         )
@@ -780,7 +782,7 @@ class AgentService(BaseService):
                         attachments_meta=attachments_meta,
                     )
                 except Exception:
-                    self.logger.exception(
+                    self._log_exc(
                         "append user message failed for conv=%s",
                         active_conversation_id,
                     )
@@ -999,7 +1001,9 @@ class AgentService(BaseService):
                     if isinstance(message, AssistantMessage):
                         turns += 1
                         if message.error:
-                            error_msg = f"Claude error: {message.error}"
+                            # ak-95w0: closed-set code, never raw SDK text.
+                            error_msg = sdk_error_code(
+                                "assistant_error", str(message.error), str(message.error))
                             error_class = "assistant_error"
                             return
                         for block in message.content:
@@ -1023,7 +1027,12 @@ class AgentService(BaseService):
                                         web_fetch_state["used"] = True
                     elif isinstance(message, ResultMessage):
                         if message.is_error:
-                            error_msg = message.result or "Query failed"
+                            # ak-95w0: result text can quote the user's
+                            # statements; keep subtype + marker only.
+                            error_msg = sdk_error_code(
+                                "result_error",
+                                getattr(message, "subtype", None) or "error",
+                                message.result)
                             error_class = "result_error"
                         # ak-rde9: capture usage when the SDK exposes
                         # it. Shape varies by version — defensive walk.
@@ -1043,7 +1052,12 @@ class AgentService(BaseService):
             try:
                 anyio.run(run_query)
             except Exception as e:
-                error_msg = f"SDK exception: {e}"
+                # ak-95w0: type + marker (classified here), message dropped.
+                try:
+                    _raw = str(e)
+                except Exception:
+                    _raw = ""
+                error_msg = sdk_error_code("sdk_exception", type(e).__name__, _raw)
                 error_class = e.__class__.__name__
 
             emit_agent_run(
@@ -1074,7 +1088,12 @@ class AgentService(BaseService):
                 for event_type, data in tool_events:
                     if event_type == "outcome":
                         yield self._sse_event(event_type, data)
-                yield self._sse_event("error", {"message": error_msg})
+                # ak-95w0: fixed user text + the closed-set code.
+                self.logger.warning(f"[ak-95w0] chat.{agent_type} SDK error {error_msg}")
+                yield self._sse_event("error", {
+                    "message": sdk_error_user_message(error_msg),
+                    "code": error_msg,
+                })
                 return
 
             # Yield collected tool/confirm events
@@ -1132,7 +1151,7 @@ class AgentService(BaseService):
                     )
                     persisted_assistant = True
                 except Exception:
-                    self.logger.exception(
+                    self._log_exc(
                         "append assistant message failed for conv=%s",
                         active_conversation_id,
                     )
@@ -1141,8 +1160,12 @@ class AgentService(BaseService):
             yield self._sse_event("done", {"mutations": mutations})
 
         except Exception as e:
-            self.logger.error(f"Agent error: {e}")
-            yield self._sse_event("error", {"message": str(e)})
+            # ak-95w0: type + frames in the log; fixed text to the client.
+            self.logger.error(f"Agent error ({error_tag(e)})\n{error_frames(e)}")
+            yield self._sse_event("error", {
+                "message": "The assistant ran into an error. Please try again.",
+                "code": f"server_exception:{error_tag(e)}",
+            })
         finally:
             # ak-bq5: if the SDK loop crashed OR the generator was
             # closed early (FE disconnect after first text chunk),
@@ -1174,7 +1197,7 @@ class AgentService(BaseService):
                             partial=True,
                         )
                     except Exception:
-                        self.logger.exception(
+                        self._log_exc(
                             "append partial assistant message failed "
                             "for conv=%s", active_conversation_id,
                         )
@@ -1190,7 +1213,7 @@ class AgentService(BaseService):
                 try:
                     attachment_cleanup(user_id, att_id)
                 except Exception:
-                    self.logger.exception(
+                    self._log_exc(
                         "attachment cleanup failed for %s (id=%s)",
                         user_id, att_id,
                     )
@@ -1546,6 +1569,17 @@ class AgentService(BaseService):
             ))
 
         return sdk_tools
+
+    def _log_exc(self, msg, *args):
+        """ak-95w0: drop-in for logger.exception that logs the active
+        exception's type + label + frames, never its message (a DB error
+        on conversation persistence would carry the chat text)."""
+        import sys as _sys
+        exc = _sys.exc_info()[1]
+        text = msg % args if args else msg
+        if exc is not None:
+            text += f" ({error_tag(exc)})\n{error_frames(exc)}"
+        self.logger.error(text)
 
     @staticmethod
     def _revoke_cancelled(cancelled_calls, user_id):

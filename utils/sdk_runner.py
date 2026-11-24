@@ -21,6 +21,7 @@ Two entry points:
 
 from __future__ import annotations  # PEP 604 (`dict | None`) on 3.9 worktree env
 
+import re
 import time
 from dataclasses import dataclass
 
@@ -33,7 +34,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 from utils.logger import Logger
-from utils.sdk_retry import sdk_error_code  # ak-aufe
+from utils.sdk_retry import sdk_error_code, sdk_error_marker  # ak-aufe / ak-95w0
 
 _logger = Logger("agent_run").get_logger()
 
@@ -48,15 +49,30 @@ def _make_sdk_stderr_logger(agent):
     root-cause diagnosis when chat.* and rate.* fail with identical
     `turns=0 tools_called=0 status=ok` shapes (see hq-wisp-l2jfz, ezveu).
 
-    Lines are trimmed to 500 chars to bound journal volume.
+    ak-95w0: the raw line is NOT logged (CLI stderr can echo prompt / tool
+    content, i.e. statement or email text). Only diagnostic tokens are kept:
+    anthropic request id(s), HTTP status code(s), the closed-set SDK error
+    marker (utils.sdk_retry) and the line length.
     """
     def cb(line):
         try:
-            _logger.info(f"sdk_stderr agent={agent} line={line[:500]}")
+            text = str(line)
+            req_ids = _REQ_ID_RE.findall(text)[:3]
+            statuses = sorted(set(_HTTP_STATUS_RE.findall(text)))[:3]
+            _logger.info(
+                f"sdk_stderr agent={agent} marker={sdk_error_marker(text)} "
+                f"request_id={','.join(req_ids) or '-'} "
+                f"http_status={','.join(statuses) or '-'} len={len(text)}"
+            )
         except Exception:
             # Never let observability take down the call site.
             pass
     return cb
+
+
+# ak-95w0: diagnostic tokens extracted from CLI stderr (no free text).
+_REQ_ID_RE = re.compile(r"\breq_[A-Za-z0-9]{8,64}\b")
+_HTTP_STATUS_RE = re.compile(r"(?:status(?:[ _]?code)?|HTTP/\d(?:\.\d)?)\D{0,3}([1-5]\d\d)\b", re.I)
 
 
 def emit_agent_run(*, agent, model, turns, tools_called, latency_ms,

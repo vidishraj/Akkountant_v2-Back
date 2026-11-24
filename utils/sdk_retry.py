@@ -145,6 +145,29 @@ def sdk_error_marker_of(text):
     return m.group(1) if m else None
 
 
+_FRIENDLY = (
+    (("rate_limit", "overloaded"),
+     "The assistant is busy right now. Please try again in a minute."),
+    (("timeout", "stream", "connection", "sdk_message_reader", "server_error"),
+     "The assistant hit a temporary problem. Please try again."),
+    (("max_turns",),
+     "The assistant ran out of steps for this request. Try a narrower question."),
+    (("authentication", "permission"),
+     "The assistant couldn't authenticate. Check the server's assistant credentials."),
+)
+_FRIENDLY_DEFAULT = "The assistant ran into an error. Please try again."
+
+
+def sdk_error_user_message(code) -> str:
+    """ak-95w0: fixed, user-facing text for a closed-set SDK error code
+    (never echoes the code's source text, which is already dropped)."""
+    marker = sdk_error_marker_of(code) or "none"
+    for markers, text in _FRIENDLY:
+        if marker in markers:
+            return text
+    return _FRIENDLY_DEFAULT
+
+
 def is_retryable_sdk_error(error_msg) -> bool:
     """ak-wty predicate: return True iff `error_msg` matches a
     known-transient signature. Non-string / None / empty inputs

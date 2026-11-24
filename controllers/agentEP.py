@@ -119,17 +119,19 @@ class AgentController:
             stream_chat (before it can yield its own error event) would
             silently terminate the stream with no client-visible
             reason."""
-            self.logger.exception(
-                "agent chat producer thread crashed: %s", exc
+            # ak-95w0: type + frames only (logger.exception would print
+            # the message); fixed text to the client.
+            from utils.safe_errors import error_frames, error_tag
+            self.logger.error(
+                f"agent chat producer thread crashed ({error_tag(exc)})\n"
+                f"{error_frames(exc)}"
             )
             # Mirror `agentService._sse_event` shape without importing
             # its formatter (keeps agentEP → agentService coupling minimal).
             import json as _json
             payload = _json.dumps({
-                "message": (
-                    f"Internal server error during agent stream: "
-                    f"{type(exc).__name__}: {exc}"
-                )
+                "message": "Internal server error during agent stream. Please try again.",
+                "code": f"server_exception:{error_tag(exc)}",
             })
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
 
