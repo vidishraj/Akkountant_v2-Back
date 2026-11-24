@@ -43,6 +43,17 @@ class TransactionController:
                     else:
                         transaction_dict[key] = value
             results.append(transaction_dict)
+        # ak-ep4i: additive per-row "note" (str|null) for the drawer. A
+        # notes-lookup failure must never break the ledger fetch.
+        try:
+            notes = self.TransactionService.fetchTransactionNotes(
+                user_id, [r.get("referenceID") for r in results],
+            )
+        except Exception as e:
+            self.logger.warning(f"ak-ep4i: note lookup failed ({type(e).__name__})")
+            notes = {}
+        for r in results:
+            r["note"] = notes.get(r.get("referenceID"))
         response = {
             "total_count": transactions["count"],
             "page": page,
@@ -349,6 +360,42 @@ class TransactionController:
         if "error" in result:
             return jsonify(result), 404  # Return 404 if transaction not found
         return jsonify(result), 200  # Return 200 if update is successful
+
+    # ── ak-ep4i: transaction drawer (category / merchant rule / note) ──
+
+    @staticmethod
+    def _json_object():
+        data = request.get_json(silent=True)
+        return data if isinstance(data, dict) else None
+
+    @Logger.standardLogger
+    def setTransactionCategory(self, reference_id):
+        """PUT /transactions/<reference_id>/category
+        Body: {"category": str|null, "rule"?: {"pattern": str, "apply_to_existing"?: bool}}"""
+        data = self._json_object()
+        if data is None:
+            return jsonify({"error": "JSON object body required", "code": "invalid_category"}), 400
+        body, status = self.TransactionService.setTransactionCategory(
+            g.get("firebase_id"), reference_id, data.get("category"), data.get("rule"),
+        )
+        return jsonify(body), status
+
+    @Logger.standardLogger
+    def setTransactionNote(self, reference_id):
+        """PUT /transactions/<reference_id>/note  Body: {"note": str|null}"""
+        data = self._json_object()
+        if data is None:
+            return jsonify({"error": "JSON object body required", "code": "invalid_note"}), 400
+        body, status = self.TransactionService.setTransactionNote(
+            g.get("firebase_id"), reference_id, data.get("note"),
+        )
+        return jsonify(body), status
+
+    @Logger.standardLogger
+    def listTransactionCategories(self):
+        """GET /transactions/categories"""
+        body, status = self.TransactionService.listTransactionCategories(g.get("firebase_id"))
+        return jsonify(body), status
 
     @Logger.standardLogger
     def addUser(self):

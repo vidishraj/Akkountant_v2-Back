@@ -10,6 +10,8 @@ from enums.TransactionTypeEnum import TransactionTypeEnum
 from models import User, UserToken, Transactions, TransactionForReview, StatementPasswords, FileDetails
 from models.transactions import ProcessingMethod
 from services.Base_Service import BaseService
+from services import transactionAnnotations
+from services.transactionAnnotations import load_tag_rules, rule_tag_for
 from utils.firebase_id_validator import (
     assert_valid_firebase_id_for_path, InvalidFirebaseId,
 )
@@ -260,6 +262,24 @@ class TransactionService(BaseService):
 
 
 
+    def _apply_tag_rules(self, transaction_objects, userId):
+        """ak-ep4i: give untagged new rows the category of the longest
+        matching merchant rule (savedTags). Sets ``tag`` only."""
+        try:
+            if isinstance(self.db, dict):
+                with self.db.session() as session:
+                    rules = load_tag_rules(session, userId)
+            else:
+                rules = load_tag_rules(self.db.session, userId)
+        except Exception as e:
+            self.logger.warning(f"ak-ep4i: tag rule lookup failed ({type(e).__name__}); importing untagged")
+            return
+        if not rules:
+            return
+        for obj in transaction_objects:
+            if not obj.tag:
+                obj.tag = rule_tag_for(rules, obj.details) or ""
+
     def insertTransactions(self, transactions, bank, userId, conflicts, source, fileId=None, source_emails=None):
         """OPTIMIZED: Batch insert transactions for better performance"""
         integrityErrors = 0
@@ -304,7 +324,12 @@ class TransactionService(BaseService):
                     bank_reference_id=transaction.get('bank_reference_id'),
                 )
                 transaction_objects.append(transaction_obj)
-            
+
+            # ak-ep4i: merchant rules set the category of new rows. Only
+            # ``tag`` is touched; a rule-lookup failure never blocks import.
+            if transaction_objects:
+                self._apply_tag_rules(transaction_objects, userId)
+
             # OPTIMIZATION: Batch insert all transactions in a single transaction
             if transaction_objects:
                 try:
@@ -929,6 +954,31 @@ class TransactionService(BaseService):
             "results": paginated_results,
             "page": page
         }
+
+    # ── ak-ep4i: transaction drawer annotations ──────────────────────
+    # Logic lives in services/transactionAnnotations.py; these return
+    # (body, http_status) for the controller.
+
+    def _annotate(self, fn, *args):
+        try:
+            return fn(self.db.session, *args), 200
+        except transactionAnnotations.AnnotationError as e:
+            if e.status >= 500:
+                self.logger.error(f"ak-ep4i {fn.__name__} failed: {e.code}")
+            return e.to_response()
+
+    def setTransactionCategory(self, user_id, reference_id, category, rule=None):
+        return self._annotate(transactionAnnotations.set_category,
+                              user_id, reference_id, category, rule)
+
+    def setTransactionNote(self, user_id, reference_id, note):
+        return self._annotate(transactionAnnotations.set_note, user_id, reference_id, note)
+
+    def listTransactionCategories(self, user_id):
+        return self._annotate(transactionAnnotations.list_categories, user_id)
+
+    def fetchTransactionNotes(self, user_id, reference_ids):
+        return transactionAnnotations.notes_for(self.db.session, user_id, reference_ids)
 
     def updateTransaction(self, reference_id: int, updates: dict, user_id: str = None):
         # ak-vfa3: always scope to the caller's uid; fail closed without one

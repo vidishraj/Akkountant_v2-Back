@@ -8,6 +8,9 @@ from models.transactions import Transactions
 from models.strippedTransactionsAudit import StrippedTransactionsAudit
 from models.transactionsForReview import TransactionForReview
 from models.savedTags import SavedTags
+# ak-ep4i: per-transaction notes. New table (no ALTER), created by
+# db.create_all() on next boot.
+from models.transactionNote import TransactionNote
 from models.statementPasswords import StatementPasswords
 from models.googleTokens import UserToken
 from models.securities import SoldSecurities

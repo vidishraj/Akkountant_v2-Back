@@ -492,6 +492,12 @@ class Akkountant(Flask):
             ('/deleteFile', 'GET', self.transactionEP.deleteFile),
             ('/processMailPipeline', 'POST', self.transactionEP.processMailPipeline),
             ('/reprocessPdf', 'POST', self.transactionEP.reprocessPdf),
+            # ak-ep4i: transaction drawer — category (+ merchant rule),
+            # note, and the category picker list. uid-scoped; 404 for
+            # another user's / unknown referenceID.
+            ('/transactions/categories', 'GET', self.transactionEP.listTransactionCategories),
+            ('/transactions/<reference_id>/category', 'PUT', self.transactionEP.setTransactionCategory),
+            ('/transactions/<reference_id>/note', 'PUT', self.transactionEP.setTransactionNote),
             ('/statementAttention', 'GET', self.transactionEP.statementAttention),
             ('/retryStatementEmail', 'POST', self.transactionEP.retryStatementEmail),
             ('/updatePersonalInfo', 'POST', self.transactionEP.updatePersonalInfo),
