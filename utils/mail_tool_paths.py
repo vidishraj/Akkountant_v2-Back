@@ -100,3 +100,38 @@ def safe_attachment_dest(user_id, category, filename, cwd: str | None = None) ->
     if not _within(dest, save_dir) or dest == save_dir:
         raise ToolPathRejected("invalid filename")
     return dest
+
+
+def resolve_reprocess_pdf(user_id, gmail_id, pdf_path=None,
+                          cwd: str | None = None) -> str:
+    """ak-fb4o: pin the PDF that POST /reprocessPdf opens.
+
+    ``pdf_path`` comes from the request body, so it gets the same pin as
+    the mail tools (``resolve_pinned_pdf``: realpath is a regular .pdf
+    under tmp/ or claude_statements/<uid>/). When it is omitted, the
+    saved statement is looked up as claude_statements/<uid>/**/<gmail_id>_*
+    and the first match that passes the pin is used. Returns the
+    realpath; raises ToolPathRejected (generic message, no path echoed).
+    """
+    if pdf_path is not None and pdf_path != "":
+        if not isinstance(pdf_path, str):
+            raise ToolPathRejected("pdf_path must be a string")
+        return resolve_pinned_pdf(pdf_path, user_id, cwd)
+
+    import glob as _glob
+    from utils.firebase_id_validator import assert_valid_firebase_id_for_path
+    try:
+        uid = assert_valid_firebase_id_for_path(user_id)
+    except Exception:
+        raise ToolPathRejected("invalid user for file access")
+    if (not isinstance(gmail_id, str) or not gmail_id
+            or "/" in gmail_id or "\\" in gmail_id or ".." in gmail_id):
+        raise ToolPathRejected("invalid gmail_id")
+    base = os.path.join(cwd or os.getcwd(), "claude_statements", uid)
+    pattern = os.path.join(_glob.escape(base), "**", f"{_glob.escape(gmail_id)}_*")
+    for match in _glob.glob(pattern, recursive=True):
+        try:
+            return resolve_pinned_pdf(match, uid, cwd)
+        except ToolPathRejected:
+            continue
+    raise ToolPathRejected("no saved PDF found for this gmail_id")

@@ -224,19 +224,16 @@ class MailProcessorService:
         GET /readEmails/status?scan_id=…&wait=true to block on
         that path.
         """
-        import glob as _glob
-
-        # 1. Resolve PDF path
-        if not pdf_path:
-            base = os.path.join(os.getcwd(), "claude_statements", user_id)
-            matches = _glob.glob(os.path.join(base, "**", f"{gmail_id}_*"), recursive=True)
-            if not matches:
-                return {"error": f"No saved PDF found for gmail_id {gmail_id}"}
-            pdf_path = matches[0]
-            self.logger.info(f"Resolved PDF: {pdf_path}")
-
-        if not os.path.exists(pdf_path):
-            return {"error": f"PDF not found: {pdf_path}"}
+        # 1. Resolve + pin the PDF path (ak-fb4o). pdf_path may come from
+        # the request body: only a .pdf whose realpath is under tmp/ or
+        # claude_statements/<uid>/ is ever opened.
+        from utils.mail_tool_paths import ToolPathRejected, resolve_reprocess_pdf
+        try:
+            pdf_path = resolve_reprocess_pdf(user_id, gmail_id, pdf_path)
+        except ToolPathRejected as exc:
+            self.logger.warning(f"reprocess_pdf refused gmail_id={gmail_id!r}: {exc}")
+            return {"error": f"PDF rejected: {exc}"}
+        self.logger.info(f"Resolved PDF: {pdf_path}")
 
         # 2. Try password if needed
         import fitz as _fitz
@@ -279,7 +276,9 @@ class MailProcessorService:
             from utils.PdfPasswordUtil import try_unlock_pdf
             doc = _fitz.open(pdf_path)
             doc.authenticate(password)
-            unlocked_path = pdf_path.replace(".pdf", "_unlocked.pdf")
+            # ak-fb4o: splitext, not str.replace — the pin accepts .PDF,
+            # where replace() would be a no-op and target the original.
+            unlocked_path = os.path.splitext(pdf_path)[0] + "_unlocked.pdf"
             doc.save(unlocked_path)
             doc.close()
             pdf_path = unlocked_path

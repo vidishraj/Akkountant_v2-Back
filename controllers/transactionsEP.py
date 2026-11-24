@@ -721,7 +721,8 @@ class TransactionController:
 
         Body: {
             "gmail_id": "19cd534052ce39a8",
-            "pdf_path": "/path/to/saved.pdf",   (optional — auto-resolved from claude_statements)
+            "pdf_path": "/path/to/saved.pdf",   (optional — auto-resolved from claude_statements;
+                                                 must be a .pdf under tmp/ or claude_statements/<uid>/, ak-fb4o)
             "password": "...",                   (optional — auto-tried from personal info)
             "processing_mode": "text"            (optional — default "text")
         }
