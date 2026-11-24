@@ -18,13 +18,77 @@ jobs:
       with:
         ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-    - name: Pull latest changes and restart service
+    - name: Pull, smoke-test in the prod venv, then restart
       run: |
         ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          set -euo pipefail
           cd /home/opc/Akkountant_v2-Back/
-          sudo git pull
-          # If using a virtualenv, activate it here
-          # source venv/bin/activate
-          # Restart your service (systemd example)
-          sudo systemctl restart app.service
+          log() { echo "deploy: $*"; }
+          # Same identity for every git call (the pull has always been sudo).
+          PREV="$(sudo git rev-parse HEAD </dev/null)"
+          sudo git pull --ff-only </dev/null
+          NEW="$(sudo git rev-parse HEAD </dev/null)"
+          log "${PREV} -> ${NEW}"
+
+          # Put the checkout back at PREV. --keep never discards edits to
+          # tracked files; if it refuses, stash them (tracked only: the
+          # untracked statement dirs are never touched) and retry.
+          rollback_checkout() {
+            sudo git reset --keep "${PREV}" </dev/null && return 0
+            log "reset --keep refused (local edits to tracked files); stashing them and retrying"
+            if sudo git stash push -m "deploy-rollback ${NEW} $(date -u +%FT%TZ)" </dev/null \
+               && sudo git reset --keep "${PREV}" </dev/null; then
+              log "local edits kept in 'sudo git stash list' (not discarded)"
+              return 0
+            fi
+            return 1
+          }
+
+          # Over ~30s: unit active, no automatic restarts (no crash loop),
+          # and the socket answers HTTP (any 2xx-4xx; unauthenticated / = 401).
+          healthy() {
+            local base="$1" i code
+            for i in $(seq 1 6); do
+              sleep 5
+              systemctl is-active --quiet app.service || return 1
+              [ "$(systemctl show app.service -p NRestarts --value)" = "${base}" ] || return 1
+            done
+            code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' \
+                    --unix-socket /run/akkountant/app.sock http://localhost/ </dev/null || true)"
+            [ "${code}" -ge 200 ] 2>/dev/null && [ "${code}" -lt 500 ]
+          }
+
+          # A failed restart (e.g. ExecStartPre runs repo code) must reach
+          # the rollback, so the restart lives inside the checked condition.
+          restart_and_check() {
+            sudo systemctl restart app.service </dev/null || return 1
+            healthy "$(systemctl show app.service -p NRestarts --value)"
+          }
+
+          # ak-ck9l: the code must work with the SDK actually installed in
+          # the PROD venv (ak-1m97: tools= on SDK 0.1.11 broke every agent).
+          if ! ./venv/bin/python scripts/deploy_smoke_agent_sdk.py </dev/null; then
+            log "agent-SDK smoke FAILED at ${NEW}; NOT restarting"
+            if rollback_checkout; then
+              log "checkout back at ${PREV}; running service untouched"
+            else
+              log "WARNING: could not revert the checkout. ${NEW} IS ON DISK and the next restart or reboot will load the failing code"
+            fi
+            exit 1
+          fi
+
+          if ! restart_and_check; then
+            log "app.service did not come up healthy at ${NEW}; rolling back to ${PREV}"
+            if ! rollback_checkout; then
+              log "!!! PROD DOWN on ${NEW}: could not revert the checkout. MANUAL ROLLBACK NEEDED: cd /home/opc/Akkountant_v2-Back && sudo git reset --keep ${PREV} && sudo systemctl restart app.service"
+              exit 2
+            fi
+            if restart_and_check; then
+              log "rolled back to ${PREV}, healthy"
+              exit 1
+            fi
+            log "!!! rolled back to ${PREV}, STILL DOWN. MANUAL INVESTIGATION NEEDED (journalctl -u app.service)"
+            exit 2
+          fi
+          log "OK at ${NEW}"
         EOF
