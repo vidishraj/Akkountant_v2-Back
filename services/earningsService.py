@@ -35,6 +35,9 @@ from models.freelance_management import (
     Invoice, InvoicePayment, InvoiceStatusEnum, CurrencyEnum,
 )
 from services.money_utils import money, q2, _is_migration_gap
+from utils.logger import Logger
+
+logger = Logger(__name__).get_logger()
 
 
 def get_earnings_in_inr(
@@ -46,7 +49,7 @@ def get_earnings_in_inr(
     customer_id: Optional[str] = None,
     include_unpaid: bool = False,
     currency_service=None,
-) -> Decimal:
+) -> Optional[Decimal]:
     """Sum earnings for `user_id`, in INR, per the ak-lvu A.3 contract.
 
     Args:
@@ -64,7 +67,38 @@ def get_earnings_in_inr(
             include_unpaid=True AND there are non-INR unpaid invoices.
 
     Returns:
-        Decimal (2dp-quantized) — total earnings in INR.
+        Decimal (2dp-quantized) total earnings in INR, or None when the
+        total is UNKNOWN: ak-nzed, an unpaid invoice that couldn't be
+        converted to INR is never silently dropped (that understated the
+        total). Only include_unpaid=True can return None; paid earnings
+        sum stored INR payment values and need no FX. Use
+        get_earnings_in_inr_detailed for the known part + the reasons.
+    """
+    return get_earnings_in_inr_detailed(
+        session, user_id, start_date=start_date, end_date=end_date,
+        customer_id=customer_id, include_unpaid=include_unpaid,
+        currency_service=currency_service,
+    )["total"]
+
+
+def get_earnings_in_inr_detailed(
+    session,
+    user_id: str,
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    customer_id: Optional[str] = None,
+    include_unpaid: bool = False,
+    currency_service=None,
+) -> dict:
+    """ak-nzed: get_earnings_in_inr plus what the total is missing.
+
+    Returns {
+        "total": Decimal | None   — None when any invoice is unconverted,
+        "known_total": Decimal    — the part that WAS converted (partial),
+        **_fx_meta(...)           — unconverted_count / unconverted_currencies
+                                     / approximate / rate_vintage,
+    }
     """
     if not user_id:
         raise ValueError("get_earnings_in_inr: user_id is required")
@@ -92,70 +126,84 @@ def get_earnings_in_inr(
 
     invoices = query.filter(and_(*filters)).all()
 
+    acc = _new_fx_acc()
     total = Decimal("0")
     for inv in invoices:
-        # For any invoice with payments, sum the INR values of those
-        # payments — that's the actual money received, and it accounts
-        # for partial payments correctly.
+        # Payments: the INR money actually received (no FX needed).
         paid_sum = _sum_inr_payments(inv.payments)
         total += paid_sum
+        if include_unpaid:
+            total += _outstanding_inr(inv, paid_sum, currency_service, acc)
 
-        # For include_unpaid: add the OUTSTANDING amount for unpaid /
-        # partially-paid invoices, converted from invoice.total (or
-        # remaining balance) via currency service.
-        if include_unpaid and inv.status in (
-            InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue,
-        ):
-            # Fully unpaid: convert invoice.total to INR.
-            currency_str = (
-                inv.currency.value if hasattr(inv.currency, 'value')
-                else str(inv.currency)
-            )
-            if currency_str == 'INR':
-                total += money(inv.total)
-            else:
-                if currency_service is None:
-                    # Skip — no way to convert without the service. Log
-                    # via the caller (dashboardService) if this matters.
-                    continue
-                try:
-                    fx = currency_service.convert_to_inr_with_source(
-                        money(inv.total), currency_str, allow_fallback=True,
-                    )
-                    total += fx["inr_amount"]
-                except Exception:
-                    # Best-effort — skip on failure. Read-side already
-                    # tolerates FX outages elsewhere.
-                    continue
-        elif include_unpaid and inv.status == InvoiceStatusEnum.partially_paid:
-            # Partially paid: the "outstanding" portion is (total - paid).
-            # Convert the balance in invoice-currency space via a ratio:
-            #   total_inr ≈ inv.total × fx_rate
-            #   paid_inr = paid_sum
-            #   remaining_inr = total_inr - paid_sum
-            # For simplicity we convert the full total then subtract the
-            # already-summed paid amount.
-            currency_str = (
-                inv.currency.value if hasattr(inv.currency, 'value')
-                else str(inv.currency)
-            )
-            if currency_str == 'INR':
-                total_inr = money(inv.total)
-            else:
-                if currency_service is None:
-                    continue
-                try:
-                    fx = currency_service.convert_to_inr_with_source(
-                        money(inv.total), currency_str, allow_fallback=True,
-                    )
-                    total_inr = fx["inr_amount"]
-                except Exception:
-                    continue
-            remaining = total_inr - paid_sum
-            if remaining > Decimal("0"):
-                total += remaining
+    return _with_fx_meta({"known_total": q2(total)}, acc)
 
-    return q2(total)
+
+def _new_fx_acc():
+    return {"unconverted": [], "vintages": set()}
+
+
+def _invoice_currency(inv) -> str:
+    return (inv.currency.value if hasattr(inv.currency, 'value')
+            else str(inv.currency)).upper()
+
+
+def _invoice_total_inr(inv, currency_service, acc) -> Optional[Decimal]:
+    """invoice.total in INR, or None (recorded in acc) when it can't be
+    converted. ak-nzed: never a silent skip. A vintage fallback rate is
+    used (read path) but flagged as approximate."""
+    currency_str = _invoice_currency(inv)
+    if currency_str == 'INR':
+        return money(inv.total)
+    if currency_service is None:
+        reason = "no_currency_service"
+        fx = None
+    else:
+        try:
+            fx = currency_service.convert_to_inr_with_source(
+                money(inv.total), currency_str, allow_fallback=True,
+            )
+            reason = None
+        except Exception as exc:
+            fx, reason = None, type(exc).__name__
+    if fx is None:
+        acc["unconverted"].append(currency_str)
+        logger.warning(
+            f"[ak-nzed] invoice in {currency_str} not convertible to INR "
+            f"({reason}); total reported as unknown, not understated"
+        )
+        return None
+    source = str(fx.get("fx_rate_source") or "")
+    if source.startswith("fallback:"):
+        acc["vintages"].add(source.split(":", 1)[1])
+    return fx["inr_amount"]
+
+
+def _outstanding_inr(inv, paid_sum, currency_service, acc) -> Decimal:
+    """The unpaid part of a sent / overdue / partially_paid invoice in
+    INR; Decimal 0 for other statuses or when unconvertible (then acc
+    records it, so the caller's total becomes unknown)."""
+    if inv.status in (InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue):
+        total_inr = _invoice_total_inr(inv, currency_service, acc)
+        return total_inr if total_inr is not None else Decimal("0")
+    if inv.status == InvoiceStatusEnum.partially_paid:
+        # Outstanding = total_inr - already-received INR.
+        total_inr = _invoice_total_inr(inv, currency_service, acc)
+        if total_inr is None:
+            return Decimal("0")
+        remaining = total_inr - paid_sum
+        return remaining if remaining > Decimal("0") else Decimal("0")
+    return Decimal("0")
+
+
+def _with_fx_meta(out, acc):
+    """Attach total (None if anything is unconverted) + FX provenance."""
+    unconverted = acc["unconverted"]
+    out["total"] = None if unconverted else out["known_total"]
+    out["unconverted_count"] = len(unconverted)
+    out["unconverted_currencies"] = sorted(set(unconverted))
+    out["approximate"] = bool(acc["vintages"])
+    out["rate_vintage"] = ", ".join(sorted(acc["vintages"])) or None
+    return out
 
 
 def _sum_inr_payments(payments) -> Decimal:
@@ -222,8 +270,12 @@ def get_earnings_by_client(
 ) -> list:
     """Return top-N clients by INR earnings.
 
-    Result: list of {"client": name, "earnings": Decimal}, sorted DESC by
-    earnings, capped at `limit`. Consistent with get_earnings_in_inr.
+    Result: list of {"client", "earnings": Decimal | None,
+    "known_earnings": Decimal, "unconverted_count", "unconverted_currencies",
+    "approximate", "rate_vintage"}, sorted DESC by known_earnings, capped
+    at `limit`. Consistent with get_earnings_in_inr. ak-nzed: "earnings"
+    is None (unknown) when one of the client's invoices couldn't be
+    converted to INR; it is never silently smaller.
     """
     query = session.query(Invoice).options(
         joinedload(Invoice.payments), joinedload(Invoice.customer),
@@ -241,54 +293,29 @@ def get_earnings_by_client(
     per_client: dict = {}
     for inv in invoices:
         client_name = inv.customer.name if inv.customer else inv.to_name
+        entry = per_client.setdefault(client_name, {"known": Decimal("0"), "acc": _new_fx_acc()})
         paid_sum = _sum_inr_payments(inv.payments)
-        per_client[client_name] = per_client.get(client_name, Decimal("0")) + paid_sum
+        entry["known"] += paid_sum
+        # ak-lvu v2 F-7 parity with get_earnings_in_inr(include_unpaid):
+        # outstanding sent/overdue/partially_paid amounts. ak-nzed: an
+        # unconvertible invoice makes THIS client's total unknown
+        # instead of silently vanishing from it.
+        if include_unpaid:
+            entry["known"] += _outstanding_inr(inv, paid_sum, currency_service, entry["acc"])
 
-        # ak-lvu v2 F-7: parity with `get_earnings_in_inr(include_unpaid=True)`
-        # — that function includes partially_paid OUTSTANDING amounts;
-        # this one used to omit them, creating fresh internal divergence
-        # inside the canonical module. Align.
-        if include_unpaid and inv.status in (
-            InvoiceStatusEnum.sent, InvoiceStatusEnum.overdue,
-        ):
-            currency_str = (
-                inv.currency.value if hasattr(inv.currency, 'value')
-                else str(inv.currency)
-            )
-            if currency_str == 'INR':
-                per_client[client_name] += money(inv.total)
-            elif currency_service:
-                try:
-                    fx = currency_service.convert_to_inr_with_source(
-                        money(inv.total), currency_str, allow_fallback=True,
-                    )
-                    per_client[client_name] += fx["inr_amount"]
-                except Exception:
-                    pass
-        elif include_unpaid and inv.status == InvoiceStatusEnum.partially_paid:
-            # Outstanding balance for partially-paid = total_inr - paid.
-            currency_str = (
-                inv.currency.value if hasattr(inv.currency, 'value')
-                else str(inv.currency)
-            )
-            if currency_str == 'INR':
-                total_inr = money(inv.total)
-            elif currency_service:
-                try:
-                    fx = currency_service.convert_to_inr_with_source(
-                        money(inv.total), currency_str, allow_fallback=True,
-                    )
-                    total_inr = fx["inr_amount"]
-                except Exception:
-                    continue
-            else:
-                continue
-            outstanding = total_inr - paid_sum
-            if outstanding > Decimal("0"):
-                per_client[client_name] += outstanding
-
-    ranked = sorted(per_client.items(), key=lambda x: x[1], reverse=True)[:limit]
-    return [
-        {"client": name, "earnings": q2(amount)}
-        for name, amount in ranked
-    ]
+    # Ranked by the KNOWN part (a client with an unknown total still
+    # ranks by what's known; its earnings field is None).
+    ranked = sorted(per_client.items(), key=lambda x: x[1]["known"], reverse=True)[:limit]
+    out = []
+    for name, entry in ranked:
+        row = _with_fx_meta({"known_total": q2(entry["known"])}, entry["acc"])
+        out.append({
+            "client": name,
+            "earnings": row["total"],
+            "known_earnings": row["known_total"],
+            "unconverted_count": row["unconverted_count"],
+            "unconverted_currencies": row["unconverted_currencies"],
+            "approximate": row["approximate"],
+            "rate_vintage": row["rate_vintage"],
+        })
+    return out

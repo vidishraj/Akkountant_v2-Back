@@ -33,10 +33,11 @@ class CurrencyService:
     Optimized for INR-centric operations with robust restart-safe caching.
 
     ak-lvu A.6: WRITES fail-closed on API unavailable.
-    - `convert_to_inr(amount, currency)` returns just the float INR value
-      for backwards compatibility (legacy read-side callers).
-    - `convert_to_inr_with_source(amount, currency)` is the new
-      write-side entry point: returns a dict
+    - ak-nzed: the legacy `convert_to_inr` / `_fallback_convert_to_inr`
+      pair was removed (no callers; its fallback silently used a 1.0
+      rate for an unknown currency, i.e. treated it as INR).
+    - `convert_to_inr_with_source(amount, currency)` is the only
+      entry point: returns a dict
         {"inr_amount": Decimal, "fx_rate": Decimal, "fx_rate_source": str,
          "converted_at": datetime}
       or RAISES `CurrencyUnavailableError` if the live API is down AND
@@ -157,44 +158,6 @@ class CurrencyService:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
             raise e
-
-    def convert_to_inr(self, amount, from_currency):
-        """
-        Convert amount from any currency to INR (LEGACY read-side entry).
-
-        Kept for backwards compat with dashboard read paths that only
-        need a display value. Silently falls back to 2024-vintage rates
-        on API failure — DO NOT USE for writes. Writes must call
-        `convert_to_inr_with_source(...)` which fails closed.
-        """
-        if from_currency.upper() == 'INR':
-            return float(amount)
-
-        try:
-            # Get USD-based rates (most comprehensive and reliable)
-            usd_rates = self._get_usd_rates()
-
-            if from_currency.upper() == 'USD':
-                # Direct USD to INR conversion
-                inr_rate = usd_rates['INR']
-                converted = float(amount) * inr_rate
-            else:
-                # Convert via USD: amount -> USD -> INR
-                from_rate = usd_rates.get(from_currency.upper())
-                if not from_rate:
-                    raise ValueError(f"Currency {from_currency} not supported")
-
-                inr_rate = usd_rates['INR']
-                # Convert to USD first, then to INR
-                usd_amount = float(amount) / from_rate
-                converted = usd_amount * inr_rate
-
-            self.logger.info(f"Converted {amount} {from_currency} = {converted:.2f} INR")
-            return round(converted, 2)
-
-        except Exception as e:
-            self.logger.error(f"Live conversion failed for {amount} {from_currency}: {str(e)}")
-            return self._fallback_convert_to_inr(amount, from_currency)
 
     def convert_to_inr_with_source(
         self,
@@ -399,14 +362,6 @@ class CurrencyService:
         except Exception as e:
             self.logger.error(f"Failed to cache USD rates: {str(e)}")
             # Don't raise - caching failure shouldn't break the conversion
-
-    def _fallback_convert_to_inr(self, amount, from_currency):
-        """Fallback conversion using hardcoded rates"""
-        rate = self.fallback_rates_to_inr.get(from_currency.upper(), 1.0)
-        converted = float(amount) * rate
-        
-        self.logger.warning(f"Using fallback rate: {amount} {from_currency} = {converted:.2f} INR (rate: {rate})")
-        return round(converted, 2)
 
     def get_cache_info(self):
         """Get information about current cache status"""

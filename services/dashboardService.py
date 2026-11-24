@@ -114,10 +114,30 @@ class DashboardService(BaseService):
             )
             # ak-lvu A.5: NO int() truncation — was
             # `"earnings": int(earnings)` at old L142 dropping the paisa.
+            # ak-nzed: an unconvertible (FX) invoice makes that client's
+            # earnings null (unknown) instead of silently smaller; the
+            # known part, the excluded count/currencies and any
+            # approximate (vintage) rate are exposed for the FE label.
             earnings_by_client_combined = [
-                {"client": row["client"], "earnings": float(row["earnings"])}
+                {
+                    "client": row["client"],
+                    "earnings": float(row["earnings"]) if row["earnings"] is not None else None,
+                    "knownEarnings": float(row["known_earnings"]),
+                    "unconvertedCount": row["unconverted_count"],
+                    "unconvertedCurrencies": row["unconverted_currencies"],
+                    "approximate": row["approximate"],
+                    "rateVintage": row["rate_vintage"],
+                }
                 for row in earnings_by_client_combined_data
             ]
+            earnings_by_client_combined_fx = {
+                "unconvertedCount": sum(r["unconverted_count"] for r in earnings_by_client_combined_data),
+                "unconvertedCurrencies": sorted({c for r in earnings_by_client_combined_data
+                                                 for c in r["unconverted_currencies"]}),
+                "approximate": any(r["approximate"] for r in earnings_by_client_combined_data),
+                "rateVintage": ", ".join(sorted({r["rate_vintage"] for r in earnings_by_client_combined_data
+                                                 if r["rate_vintage"]})) or None,
+            }
 
             # Completed projects = count of paid + partially_paid invoices.
             completed_projects = session.query(Invoice).filter(
@@ -224,6 +244,7 @@ class DashboardService(BaseService):
                 "earningsByMonth": earnings_by_month,
                 "earningsByClient": earnings_by_client,
                 "earningsByClientCombined": earnings_by_client_combined,
+                "earningsByClientCombinedFx": earnings_by_client_combined_fx,
                 "recentInvoices": recent_invoices_formatted,
                 "unpaidByCurrency": unpaid_by_currency_formatted
             }
