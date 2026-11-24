@@ -49,6 +49,7 @@ from utils.mail_row_validation import MAX_BATCH_ROWS, MAX_ROWS_PER_EMAIL
 from utils.pdf_ingest_context import (
     DEFAULT_PDF_CATEGORY, PDF_REPORT, is_ledger_statement, record_report,
 )
+from utils import statement_ingest_outcome as ingest_outcome
 from utils.PdfPasswordUtil import generate_password_candidates, try_unlock_pdf, extract_password_hint
 from utils.logger import Logger
 from utils.sdk_runner import run_query_collect
@@ -1035,35 +1036,55 @@ class MailProcessorService:
         # 3. Process each PDF through Claude with vision.
         # ak-n0cg re-review CRITICAL-1: the SERVICE owns the final
         # processedEmails status (the PDF agent's report_result is not
-        # persisted). Any failed PDF stamps 'error' and the failure is
-        # sticky: a later PDF of the same email succeeding must not
-        # overwrite it with 'processed'.
-        # Round 3: the agent's report_result METADATA, stamped below with
-        # the server-owned status. Classifier category wins; the model's
-        # is a fallback.
+        # persisted as status). Round 3: the agent's report_result
+        # METADATA is kept and stamped with the server-owned status.
+        # ak-fc7z: the status is decided ONCE for the email, after every
+        # PDF, by utils.statement_ingest_outcome.final_email_status: a
+        # failed unlock or failed ingest on ANY PDF, or a ledger
+        # statement that landed 0 rows in total, is 'error' (never
+        # 'processed') and is retried next run.
         report = {}
+        landed = {"rows": 0, "recorded": 0}
         _report_token = PDF_REPORT.set(report)
-
-        def _stamp(status, error_message=None):
-            self._stamp_processed_email(
-                email, user_id,
-                category=email.get("_category") or report.get("model_category") or DEFAULT_PDF_CATEGORY,
-                status=status,
-                items_extracted=report.get("items_extracted", 0),
-                extraction_summary=report.get("extraction_summary"),
-                error_message=error_message,
-            )
-
+        _landed_token = ingest_outcome.LANDED_ROWS.set(landed)
         try:
-            self._process_pdf_items(email, user_id, processing_mode, pdf_items,
-                                    hint_tags, gmail_id, _stamp)
+            failures, persisted = self._process_pdf_items(
+                email, user_id, processing_mode, pdf_items, hint_tags, gmail_id)
         finally:
+            ingest_outcome.LANDED_ROWS.reset(_landed_token)
             PDF_REPORT.reset(_report_token)
 
+        category = email.get("_category") or report.get("model_category") or DEFAULT_PDF_CATEGORY
+        status, reason = ingest_outcome.final_email_status(
+            email.get("_category") or report.get("model_category"),
+            landed["rows"], failures, sender=email.get("sender"))
+        if reason:
+            self.logger.error(
+                f"[ak-fc7z] PDF email gmail_id={gmail_id!r} (category={category!r}) "
+                f"stamped error: {reason} (landed_rows={landed['rows']}, "
+                f"recorded={landed['recorded']}); will retry next run"
+            )
+        self._stamp_processed_email(
+            email, user_id,
+            category=category,
+            status=status,
+            # ak-fc7z: items_extracted = what actually landed (ledger
+            # rows inserted or deduplicated + accepted record-only
+            # inserts), not the model's self-report.
+            items_extracted=landed["rows"] + landed["recorded"],
+            extraction_summary=report.get("extraction_summary"),
+            error_message=ingest_outcome.REASON_TEXT.get(reason),
+        )
+        for persist_path in persisted:
+            self._update_processed_email_pdf(gmail_id, user_id, persist_path)
+
     def _process_pdf_items(self, email, user_id, processing_mode, pdf_items,
-                           hint_tags, gmail_id, _stamp):
-        """Per-PDF loop of _process_single_pdf_email (stamps via _stamp)."""
-        email_failed = False
+                           hint_tags, gmail_id):
+        """Per-PDF loop of _process_single_pdf_email. Returns
+        (failure reasons, persisted PDF paths); stamps nothing."""
+        from utils.processed_emails_upsert import should_stamp_success
+        failures = []
+        persisted = []
         for item in pdf_items:
             pdf_path, original_filename = item if isinstance(item, tuple) else (item, os.path.basename(item))
             unlocked_path = None
@@ -1075,53 +1096,65 @@ class MailProcessorService:
                     if unlocked_path:
                         pdf_path = unlocked_path
                         password = None  # PDF is now unlocked
-                analysis_summary = self._run_pdf_analysis(
-                    pdf_path, email, user_id, password, processing_mode,
-                )
 
-                # ak-bwe v2 (reviewer BOUNCE hq-wisp-b48kot):
-                # GATE the stamp on genuine ingest success. Only
-                # stamp status='success' when _run_pdf_analysis
-                # reports success=True AND no failed_chunks
-                # residual. On partial/persistent failure DO NOT
-                # stamp — _filter_already_processed re-processes
-                # anything that isn't 'processed' → next run
-                # retries the file → ak-8l5 dedup absorbs
-                # already-done chunks and only the missed rows
-                # land. Symmetric with ak-wty (retry) + ak-ifc
-                # (reconciliation fallback): all three lean on
-                # re-runs to close the loop.
-                from utils.processed_emails_upsert import should_stamp_success
-                if should_stamp_success(analysis_summary) and not email_failed:
-                    _stamp("success")
-                elif not should_stamp_success(analysis_summary):
-                    email_failed = True
-                    self.logger.warning(
-                        f"ak-bwe v2: stamping processedEmails 'error' "
-                        f"for gmail_id={gmail_id!r} — ingest not fully "
-                        f"successful (summary={analysis_summary!r}). "
-                        f"Next run will re-attempt; ak-8l5 dedup "
-                        f"absorbs the already-done chunks."
+                # ak-fc7z: server-side unlock check BEFORE any agent run.
+                # A still-locked PDF used to reach the agent, which saw
+                # nothing, and the email was stamped 'processed' with 0
+                # rows (SBI 11-22, CAMS 11-24).
+                if self._pdf_still_locked(pdf_path, password):
+                    failures.append(ingest_outcome.UNLOCK_FAILED)
+                    self.logger.error(
+                        f"[ak-fc7z] PDF unlock failed for gmail_id={gmail_id!r}: "
+                        f"no working password; agent NOT run"
                     )
-                    _stamp("error", "PDF ingest incomplete (failed or rejected chunks)")
+                else:
+                    analysis_summary = self._run_pdf_analysis(
+                        pdf_path, email, user_id, password, processing_mode,
+                    )
+                    # ak-bwe v2: success only when _run_pdf_analysis
+                    # reports success=True AND no failed_chunks; anything
+                    # else is retried next run (ak-8l5 dedup absorbs the
+                    # chunks that did land).
+                    if not should_stamp_success(analysis_summary):
+                        failures.append(ingest_outcome.INGEST_INCOMPLETE)
+                        self.logger.warning(
+                            f"ak-bwe v2: PDF ingest not fully successful for "
+                            f"gmail_id={gmail_id!r} (summary={analysis_summary!r}); "
+                            f"email will be stamped error and retried."
+                        )
 
-                # Only persist PDF after successful processing
                 try:
                     persist_path = self._persist_pdf(pdf_path, user_id, email, original_filename)
                     if persist_path:
-                        self._update_processed_email_pdf(gmail_id, user_id, persist_path)
+                        persisted.append(persist_path)
                 except Exception as e:
                     self.logger.warning(f"Failed to persist PDF for {gmail_id}: {e}")
             except Exception as e:
                 self.logger.error(f"PDF analysis failed for {gmail_id}: {e}")
-                email_failed = True
-                _stamp("error", f"PDF analysis failed: {type(e).__name__}")
+                failures.append(ingest_outcome.INGEST_INCOMPLETE)
             finally:
                 # Clean up temp files
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
                 if unlocked_path and unlocked_path != pdf_path and os.path.exists(unlocked_path):
                     os.remove(unlocked_path)
+        return failures, persisted
+
+    @staticmethod
+    def _pdf_still_locked(pdf_path, password=None):
+        """ak-fc7z: True if the PDF needs a password and none that works
+        is available. An open error is not 'locked' (the analysis path
+        reports that as a failure itself)."""
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception:
+            return False
+        try:
+            if not doc.needs_pass:
+                return False
+            return not (password and doc.authenticate(password))
+        finally:
+            doc.close()
 
     def _persist_pdf(self, pdf_path, user_id, email, original_filename):
         """Copy processed PDF to persistent storage under claude_statements/."""
@@ -1904,8 +1937,19 @@ class MailProcessorService:
                     "total_chunks": 0,
                     "reason": f"pdf_open_failed: {e}"}
 
+        # ak-fc7z: text mode sends EVERY extracted row to the bank batch
+        # insert, so only ledger statements may use it. Other PDFs (CAS,
+        # contract notes, EPF, NPS, gold) run in image/MCP mode, where
+        # the agent records them with the record-only insert_* tools.
+        if not self._is_ledger_email(email):
+            if processing_mode == "text":
+                self.logger.info(
+                    f"[ak-fc7z] non-ledger PDF (category={email.get('_category')!r}): "
+                    f"using image mode, not text mode"
+                )
+            processing_mode = "image"
         # Auto-detect: if PDF has extractable text, prefer text mode
-        if processing_mode == "image" and self._pdf_has_usable_text(pdf_path, password):
+        elif processing_mode == "image" and self._pdf_has_usable_text(pdf_path, password):
             self.logger.info(f"PDF has usable text layer — auto-switching to text mode")
             processing_mode = "text"
 
@@ -2993,6 +3037,17 @@ class MailProcessorService:
         # We keep `force_no_mask` so the file-level orchestrator can
         # re-invoke each chunk in a no-mask mode.
 
+        # ak-fc7z defence in depth: text-mode rows go to the BANK batch
+        # insert, so a non-ledger PDF must never reach here (it is routed
+        # to image mode in _run_pdf_analysis). If one does, fail the
+        # chunk rather than file investment/EPF rows as bank txns.
+        if not self._is_ledger_email(email):
+            self.logger.error(
+                f"[ak-fc7z] text-mode chunk {page_start}-{page_end} for a non-ledger "
+                f"PDF (category={email.get('_category')!r}); NOT inserting as bank txns"
+            )
+            return {"called": False, "inserted": 0, "duplicates": 0, "rejected": 1}
+
         # Insert directly via the existing tool executor logic
         insert_args = {
             "transactions": transactions,
@@ -3019,6 +3074,7 @@ class MailProcessorService:
                     "rejected": 1}
         inserted = result.get("inserted", 0)
         duplicates = result.get("duplicates", 0)
+        ingest_outcome.add_landed(result)   # ak-fc7z: landed rows
 
         self.logger.info(
             f"Chunk {page_start}-{page_end} inserted: {inserted} new, {duplicates} dupes"
@@ -3690,9 +3746,13 @@ class MailProcessorService:
                 # only by a batch the executor accepted, never by the
                 # mere call. Any rejected batch fails the chunk (see
                 # _chunk_insert_result); rows can't be matched by count.
-                if (insert_called is not None and not rejected
-                        and _tn.startswith("insert_") and _tn != "insert_batch_transactions"):
-                    insert_called["recorded"] = insert_called.get("recorded", 0) + 1
+                if (not rejected and _tn.startswith("insert_")
+                        and _tn != "insert_batch_transactions"):
+                    ingest_outcome.add_recorded()   # ak-fc7z
+                    if insert_called is not None:
+                        insert_called["recorded"] = insert_called.get("recorded", 0) + 1
+                if _tn == "insert_batch_transactions" and not rejected:
+                    ingest_outcome.add_landed(result)   # ak-fc7z: landed rows
                 if _tn == "insert_batch_transactions" and insert_called is not None and not rejected:
                     insert_called["value"] = True
                     if isinstance(result, dict):
