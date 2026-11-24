@@ -54,6 +54,7 @@ flask / SQLAlchemy.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -171,6 +172,10 @@ _ERROR_TYPE_KEYWORDS = (
 )
 
 
+_KNOWN_LABELS = frozenset(label for label, _ in _ERROR_TYPE_KEYWORDS)
+_TAG_RE = re.compile(r"\[([a-z0-9_]+)\]")
+
+
 def _classify_reason(reason) -> str:
     """Best-effort classification of a reason string into one of the
     canonical error_type labels. Falls through to 'unknown' when no
@@ -179,6 +184,12 @@ def _classify_reason(reason) -> str:
     if not reason or not isinstance(reason, str):
         return "unknown"
     lower = reason.lower()
+    # ak-q9c8: reasons now carry the server-side classification as an
+    # explicit `[label]` tag (utils.safe_errors.error_tag) instead of the
+    # raw exception message. A known label in brackets wins.
+    for tagged in _TAG_RE.findall(lower):
+        if tagged in _KNOWN_LABELS:
+            return tagged
     for label, keywords in _ERROR_TYPE_KEYWORDS:
         if any(kw in lower for kw in keywords):
             return label

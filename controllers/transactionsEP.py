@@ -5,6 +5,7 @@ from enums.BanksEnum import BankEnums
 from enums.ServiceTypeEnum import ServiceTypeEnum
 from services.transactionsService import TransactionService
 from utils.logger import Logger
+from utils.safe_errors import error_frames, error_type  # ak-q9c8
 from flask import request, jsonify, current_app
 
 from flask import g
@@ -194,12 +195,14 @@ class TransactionController:
                             "result": result,
                         })
             except Exception as e:
-                self.logger.error(f"Async scan {scan_id} failed: {e}", exc_info=True)
+                # ak-q9c8: type + frames only; the status is FE-visible.
+                self.logger.error(
+                    f"Async scan {scan_id} failed ({error_type(e)})\n{error_frames(e)}")
                 with self._scans_lock:
                     self._scans[scan_id].update({
                         "status": "failed",
                         "stage": "error",
-                        "errors": [str(e)],
+                        "errors": [f"Scan failed ({error_type(e)})"],
                     })
             finally:
                 # ak-uvy v2 (reviewer note): signal_terminal in a
@@ -465,7 +468,8 @@ class TransactionController:
                 else:
                     return jsonify({"error": "Invalid local file ID format"}), 400
             except Exception as e:
-                return jsonify({"error": f"Failed to delete local statement: {str(e)}"}), 500
+                self.logger.error(f"deleteLocalStatement failed ({error_type(e)})\n{error_frames(e)}")
+                return jsonify({"error": f"Failed to delete local statement ({error_type(e)})"}), 500
         else:
             # Legacy Google Drive deletion
             result = self.TransactionService.deleteFile(userId, fileId)
@@ -541,7 +545,8 @@ class TransactionController:
                 else:
                     return jsonify({"error": "Invalid local file ID format"}), 400
             except Exception as e:
-                return jsonify({"error": f"Failed to download local statement: {str(e)}"}), 500
+                self.logger.error(f"downloadLocalStatement failed ({error_type(e)})\n{error_frames(e)}")
+                return jsonify({"error": f"Failed to download local statement ({error_type(e)})"}), 500
 
         # Legacy Google Drive download
         result = self.TransactionService.downloadFile(userId, fileId)
@@ -557,7 +562,8 @@ class TransactionController:
         try:
             return send_file(result["file_path"], as_attachment=True, download_name=result["filename"])
         except Exception as e:
-            return jsonify({"error": f"File download failed: {str(e)}"}), 500
+            self.logger.error(f"send_file failed ({error_type(e)})\n{error_frames(e)}")
+            return jsonify({"error": f"File download failed ({error_type(e)})"}), 500
 
     @Logger.standardLogger
     def fetchFileDetails(self):
@@ -622,7 +628,7 @@ class TransactionController:
         bank's unlock_failed emails. The value is never echoed or logged;
         errors use fixed messages (a DB error's str() carries bound
         params, i.e. the password — see ak-67q4). Deliberately NOT
-        wrapped in @Logger.standardLogger, which returns str(e)."""
+        wrapped in @Logger.standardLogger (historically returned str(e); ak-ouu2)."""
         userId = g.get("firebase_id")
         if not userId:
             return jsonify({"error": "authentication required"}), 401

@@ -58,6 +58,7 @@ from utils.pdf_ingest_context import (
 from utils import statement_ingest_outcome as ingest_outcome
 from utils.PdfPasswordUtil import generate_password_candidates, try_unlock_pdf, extract_password_hint
 from utils.logger import Logger
+from utils.safe_errors import error_frames, error_tag  # ak-q9c8
 from utils.sdk_runner import run_query_collect
 
 # ak-6k35: per-run temp dir (ContextVar: concurrent runs never share it).
@@ -870,7 +871,7 @@ class MailProcessorService:
                 json.dump(records, f, indent=2, ensure_ascii=False, default=str)
             self.logger.info(f"Saved {len(records)} emails to {filepath}")
         except Exception as e:
-            self.logger.error(f"Failed to save emails to disk: {e}", exc_info=True)
+            self.logger.error(f"Failed to save emails to disk: {error_tag(e)}" + "\n" + error_frames(e))
 
     @staticmethod
     def _tmp_dir():
@@ -1022,7 +1023,7 @@ class MailProcessorService:
                 if (e.get("gmail_id") or e.get("message_id")) not in existing_ids
             ]
         except Exception as e:
-            self.logger.warning(f"Dedup lookup failed, processing all emails: {e}")
+            self.logger.warning(f"Dedup lookup failed, processing all emails: {error_tag(e)}")
             return emails
 
     # ── Email separation ───────────────────────────────────────────────
@@ -1057,7 +1058,7 @@ class MailProcessorService:
                     from utils.GmailServiceUtils import GmailServiceUtils
                     has_pdf = GmailServiceUtils._check_for_pdf_in_payload(msg.get("payload", {}))
                 except Exception as e:
-                    self.logger.warning(f"Error checking email {gmail_id} for attachments: {e}")
+                    self.logger.warning(f"Error checking email {gmail_id} for attachments: {error_tag(e)}")
                     has_pdf = False
 
             if has_pdf:
@@ -1101,7 +1102,7 @@ class MailProcessorService:
                 batch_result = self._run_text_batch(batch, user_id)
                 total_processed += batch_result
             except Exception as e:
-                self.logger.error(f"Error processing text email batch: {e}", exc_info=True)
+                self.logger.error(f"Error processing text email batch: {error_tag(e)}" + "\n" + error_frames(e))
 
         return total_processed
 
@@ -1278,8 +1279,8 @@ class MailProcessorService:
                         pass
             except Exception as e:
                 self.logger.error(
-                    f"Error processing PDF email {email.get('gmail_id', 'unknown')}: {e}",
-                    exc_info=True,
+                    f"Error processing PDF email {email.get('gmail_id', 'unknown')}: {error_tag(e)}"
+                    + "\n" + error_frames(e)
                 )
 
         return total_processed
@@ -1437,9 +1438,10 @@ class MailProcessorService:
                     if persist_path:
                         persisted.append(persist_path)
                 except Exception as e:
-                    self.logger.warning(f"Failed to persist PDF for {gmail_id}: {e}")
+                    self.logger.warning(f"Failed to persist PDF for {gmail_id}: {error_tag(e)}")
             except Exception as e:
-                self.logger.error(f"PDF analysis failed for {gmail_id}: {e}")
+                self.logger.error(
+                    f"PDF analysis failed for {gmail_id}: {error_tag(e)}\n{error_frames(e)}")
                 failures.append(ingest_outcome.INGEST_INCOMPLETE)
             finally:
                 # Clean up temp files
@@ -1540,7 +1542,7 @@ class MailProcessorService:
         except Exception as e:
             self.logger.warning(
                 f"ak-bwe: _stamp_processed_email failed for "
-                f"gmail_id={email.get('gmail_id')!r}: {e}. Idempotency "
+                f"gmail_id={email.get('gmail_id')!r}: {error_tag(e)}. Idempotency "
                 f"may be reduced but ak-8l5 dedup catches duplicates."
             )
 
@@ -1561,7 +1563,7 @@ class MailProcessorService:
             else:
                 self.logger.warning(f"No processedEmails row found for {gmail_id} to update pdf_filename")
         except Exception as e:
-            self.logger.warning(f"Failed to update pdf_filename for {gmail_id}: {e}")
+            self.logger.warning(f"Failed to update pdf_filename for {gmail_id}: {error_tag(e)}")
 
     def _download_pdf_attachments(self, gmail_api, gmail_id):
         """Download PDF attachments from a Gmail message to temp directory.
@@ -1600,7 +1602,7 @@ class MailProcessorService:
                 self.logger.info(f"Downloaded PDF attachment: {filename} -> {pdf_path}")
 
         except Exception as e:
-            self.logger.error(f"Error downloading PDF attachments: {e}", exc_info=True)
+            self.logger.error(f"Error downloading PDF attachments: {error_tag(e)}" + "\n" + error_frames(e))
 
         return pdf_paths
 
@@ -1725,7 +1727,7 @@ class MailProcessorService:
             return self._download_from_smart_statement_link(link, gmail_id, password)
 
         except Exception as e:
-            self.logger.warning(f"Failed to extract link-based PDF for {gmail_id}: {e}")
+            self.logger.warning(f"Failed to extract link-based PDF for {gmail_id}: {error_tag(e)}")
             return None
 
     def _extract_smart_statement_link(self, msg):
@@ -2170,7 +2172,7 @@ class MailProcessorService:
                     f"{stmt_replaced} overlapping statement txns"
                 )
         except Exception as e:
-            self.logger.error(f"Post-chunk reconciliation error: {e}", exc_info=True)
+            self.logger.error(f"Post-chunk reconciliation error: {error_tag(e)}" + "\n" + error_frames(e))
 
     # Pages per chunk for text mode — text is tiny (~1-3KB/page) but we keep
     # chunks small so the agent doesn't need to format too many transactions.
@@ -2257,12 +2259,12 @@ class MailProcessorService:
             doc.close()
         except Exception as e:
             self.logger.error(
-                f"ak-bwe v2: PDF open failed for {pdf_path!r}: {e}. "
-                f"Reporting ingest as FAILED."
+                f"ak-bwe v2: PDF open failed for {pdf_path!r}: {error_tag(e)}. "
+                f"Reporting ingest as FAILED.\n{error_frames(e)}"
             )
             return {"success": False, "failed_chunks": [],
                     "total_chunks": 0,
-                    "reason": f"pdf_open_failed: {e}"}
+                    "reason": f"pdf_open_failed: {error_tag(e)}"}
 
         # ak-fc7z: text mode sends EVERY extracted row to the bank batch
         # insert, so only ledger statements may use it. Other PDFs (CAS,
@@ -2364,13 +2366,13 @@ class MailProcessorService:
                 self._post_chunk_reconciliation(file_id, gmail_id, user_id)
         except Exception as e:
             self.logger.error(
-                f"ak-bwe v2: _run_pdf_analysis top-level failure: {e}. "
+                f"ak-bwe v2: _run_pdf_analysis top-level failure: {error_tag(e)}. "
                 f"Reporting ingest as FAILED so processedEmails stamp "
-                f"is skipped (next run retries the file)."
+                f"is skipped (next run retries the file).\n{error_frames(e)}"
             )
             summary = {"success": False, "failed_chunks": [],
                        "total_chunks": summary.get("total_chunks", 0),
-                       "reason": f"analysis_exception: {e}"}
+                       "reason": f"analysis_exception: {error_tag(e)}"}
         return summary
 
     async def _run_all_chunks_async(self, pdf_path, email, user_id, password,
@@ -2612,14 +2614,14 @@ class MailProcessorService:
                 )
         except Exception as e:
             self.logger.error(
-                f"PDF chunk processing error: {e}"
+                f"PDF chunk processing error: {error_tag(e)}\n{error_frames(e)}"
             )
             # ak-bwe v2 (reviewer BOUNCE hq-wisp-b48kot): the top-level
             # exception path also constitutes a failed ingest —
             # propagate as False so _process_single_pdf_email doesn't
             # stamp 'processed' for a file that lost tx.
             return {"success": False, "failed_chunks": failed_chunks,
-                    "reason": f"top_level_exception: {e}"}
+                    "reason": f"top_level_exception: {error_tag(e)}"}
         finally:
             pass  # query() manages its own lifecycle per chunk
 
@@ -2699,7 +2701,7 @@ class MailProcessorService:
         except Exception as e:
             self.logger.warning(
                 f"ak-ifc file-reconciliation: could not read PDF for "
-                f"summary parse (file={file_id!r}): {e}. Skipping."
+                f"summary parse (file={file_id!r}): {error_tag(e)}. Skipping."
             )
             return
 
@@ -2732,7 +2734,7 @@ class MailProcessorService:
         except Exception as e:
             self.logger.warning(
                 f"ak-ifc file-reconciliation: could not aggregate "
-                f"extracted totals (file={file_id!r}): {e}. Skipping."
+                f"extracted totals (file={file_id!r}): {error_tag(e)}. Skipping."
             )
             return
 
@@ -2799,7 +2801,7 @@ class MailProcessorService:
         except Exception as e:  # pragma: no cover — defensive
             self.logger.warning(
                 f"ak-ifc file-reconciliation: mark_reconciliation_fallback "
-                f"threw: {e}. Continuing with re-run regardless."
+                f"threw: {error_tag(e)}. Continuing with re-run regardless."
             )
 
         # Re-run each chunk in no-mask mode. ak-8l5-v2 dedup at the
@@ -2822,8 +2824,8 @@ class MailProcessorService:
             except Exception as e:  # pragma: no cover — defensive
                 self.logger.error(
                     f"ak-ifc file-reconciliation: no-mask re-run of "
-                    f"chunk {start}-{end} failed: {e}. Data partial; "
-                    f"file is tagged for manual review."
+                    f"chunk {start}-{end} failed: {error_tag(e)}. Data partial; "
+                    f"file is tagged for manual review.\n{error_frames(e)}"
                 )
 
     # JSON schema for structured output in text mode.
@@ -3103,7 +3105,7 @@ class MailProcessorService:
                     except Exception as e:  # pragma: no cover — defensive
                         self.logger.warning(
                             f"ak-dby: mark_reconciliation_fallback failed "
-                            f"for fileID={preset_file_id!r}: {e}. Data "
+                            f"for fileID={preset_file_id!r}: {error_tag(e)}. Data "
                             f"lands regardless; strip endpoint won't fire "
                             f"until the file is tagged manually."
                         )
