@@ -1322,13 +1322,24 @@ class TransactionService(BaseService):
         return {"count": len(items), "by_reason": by_reason, "items": items,
                 "agedOut": {"count": len(aged_items), "items": aged_items[:50]}}
 
-    def requeueUnlockFailed(self, userId):
+    @staticmethod
+    def _unlock_failed_banks(row):
+        """ak-3rwh: banks whose stored password the pipeline would try
+        for this row's sender (same resolution as
+        _get_statement_password). [] if unmapped."""
+        from services.bankFormatRules import sender_domain, statement_password_banks
+        return statement_password_banks(sender_domain(row.sender or ""))
+
+    def requeueUnlockFailed(self, userId, bank=None):
         """ak-7ahz review minor 4: after the user changes statement
         passwords or personal info (the inputs of PDF unlocking), put
         every needs_attention row whose reason is unlock_failed back to
         'failed' with its counter cleared, so the next cycle (or the
         ak-i3tc sweep) retries the unlock. Returns the number requeued.
-        Never raises (the caller's save already succeeded)."""
+        Never raises (the caller's save already succeeded).
+
+        ak-3rwh: with `bank`, only rows whose sender maps to that bank
+        (PUT /statementPasswords/<bank>)."""
         from models.processedEmails import ProcessedEmails
         from utils.statement_retry_cap import (
             NEEDS_ATTENTION, fresh_attempts, previous_attempts, with_attempts,
@@ -1340,6 +1351,8 @@ class TransactionService(BaseService):
             for row in rows:
                 a = previous_attempts(row.extraction_summary)
                 if a and a.get("reason") == "unlock_failed":
+                    if bank is not None and bank not in self._unlock_failed_banks(row):
+                        continue
                     row.status = "failed"
                     # ak-8gfj: fresh counter, so an old row isn't aged out.
                     row.extraction_summary = with_attempts(
@@ -1357,6 +1370,57 @@ class TransactionService(BaseService):
             except Exception:
                 pass
             return 0
+
+    def getStatementPasswordStatus(self, userId):
+        """GET /statementPasswords (ak-3rwh). Status only: never returns,
+        masks or measures a stored password."""
+        from enums.BanksEnum import BankEnums
+        from models.processedEmails import ProcessedEmails
+        from utils import statement_password_store as store
+        from utils.statement_retry_cap import NEEDS_ATTENTION, previous_attempts
+        userId = assert_valid_firebase_id_for_path(userId)
+        session = self.db.session
+        user = session.query(User).filter(User.userID == userId).first()
+        opted = {b.strip() for b in ((user.optedBanks if user else "") or "").split(",") if b.strip()}
+        has = store.banks_with_password(session, userId)
+        failed = {}
+        rows = session.query(ProcessedEmails).filter_by(
+            user_id=userId, status=NEEDS_ATTENTION).all()
+        for row in rows:
+            a = previous_attempts(row.extraction_summary)
+            if a and a.get("reason") == "unlock_failed":
+                for b in self._unlock_failed_banks(row):
+                    failed[b] = failed.get(b, 0) + 1
+        banks = []
+        for b in BankEnums:
+            n = failed.get(b.value, 0)
+            banks.append({
+                "bank": b.value,
+                "opted": b.value in opted,
+                "hasPassword": b.value in has,
+                "unlockFailedCount": n,
+                "needsPassword": n > 0,
+            })
+        return {"banks": banks}
+
+    def setStatementPassword(self, userId, bank, password):
+        """PUT /statementPasswords/<bank> (ak-3rwh). Returns (body,
+        status). Never echoes, logs or measures the password."""
+        from enums.BanksEnum import BankEnums
+        from utils import statement_password_store as store
+        userId = assert_valid_firebase_id_for_path(userId)
+        if bank not in BankEnums.__members__:
+            return {"error": "Unknown bank", "error_code": "UNKNOWN_BANK"}, 400
+        try:
+            store.validate_password(password)
+        except store.InvalidStatementPassword as e:
+            return {"error": str(e), "error_code": "INVALID_PASSWORD"}, 400
+        if self.db.session.query(User).filter(User.userID == userId).first() is None:
+            return {"error": "User not found"}, 404
+        store.set_password(self.db.session, userId, bank, password)
+        self.logger.info(f"[ak-3rwh] statement password set for bank={bank}")
+        requeued = self.requeueUnlockFailed(userId, bank=bank)
+        return {"bank": bank, "hasPassword": True, "requeued": requeued}, 200
 
     def retryStatementEmail(self, userId, gmail_id):
         """Manual retry. Returns (body, http_status).

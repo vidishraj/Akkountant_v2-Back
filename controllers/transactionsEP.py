@@ -553,6 +553,39 @@ class TransactionController:
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+    def getStatementPasswords(self):
+        """GET /statementPasswords (ak-3rwh): per-bank status only
+        (opted / hasPassword / unlockFailedCount / needsPassword). Never
+        returns a stored password."""
+        userId = g.get("firebase_id")
+        if not userId:
+            return jsonify({"error": "authentication required"}), 401
+        try:
+            return jsonify(self.TransactionService.getStatementPasswordStatus(userId)), 200
+        except Exception as e:
+            self.logger.error(f"getStatementPasswords failed ({type(e).__name__})")
+            return jsonify({"error": "Failed to load statement password status"}), 500
+
+    def putStatementPassword(self, bank):
+        """PUT /statementPasswords/<bank> {"password": "..."} (ak-3rwh):
+        set/replace one bank's statement-PDF password, then requeue that
+        bank's unlock_failed emails. The value is never echoed or logged;
+        errors use fixed messages (a DB error's str() carries bound
+        params, i.e. the password — see ak-67q4). Deliberately NOT
+        wrapped in @Logger.standardLogger, which returns str(e)."""
+        userId = g.get("firebase_id")
+        if not userId:
+            return jsonify({"error": "authentication required"}), 401
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or "password" not in data:
+            return jsonify({"error": "password is required", "error_code": "INVALID_PASSWORD"}), 400
+        try:
+            body, status = self.TransactionService.setStatementPassword(userId, bank, data.get("password"))
+            return jsonify(body), status
+        except Exception as e:
+            self.logger.error(f"putStatementPassword failed for bank={bank!r} ({type(e).__name__})")
+            return jsonify({"error": "Failed to save statement password"}), 500
+
     @Logger.standardLogger
     def stripFallbackRows(self):
         """ak-ex2-v2 admin endpoint: strip non-savings sub-account

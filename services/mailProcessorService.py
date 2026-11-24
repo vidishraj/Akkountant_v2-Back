@@ -1895,24 +1895,9 @@ class MailProcessorService:
         sender = email.get("sender", "")
         domain = email.get("_sender_domain") or self._extract_domain(sender)
 
-        domain_to_bank = {
-            "hdfcbank.net": ["Millenia_Credit", "HDFC_DEBIT", "HDFC_REGALIA"],
-            "hdfcbank.com": ["Millenia_Credit", "HDFC_DEBIT", "HDFC_REGALIA"],
-            "hdfcbank.bank.in": ["Millenia_Credit", "HDFC_DEBIT", "HDFC_REGALIA"],
-            "icicibank.com": ["ICICI_AMAZON_PAY"],
-            "icicibank.co.in": ["ICICI_AMAZON_PAY"],
-            "yesbank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
-            "yesbank.co.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
-            # ak-iu8i: Yes / ICICI .bank.in switch.
-            "yes.bank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
-            "yesbank.bank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
-            "icicibank.bank.in": ["ICICI_AMAZON_PAY"],
-            "bankofindia.co.in": ["BOI"],
-            "bankofindia.com": ["BOI"],
-            # ak-2ql: 2026-03-07 RBI-mandated `.bank.in` TLD migration
-            # (precedent: hdfcbank.bank.in above).
-            "bankofindia.bank.in": ["BOI"],
-        }
+        # ak-3rwh: shared with the /statementPasswords status endpoint.
+        from services.bankFormatRules import STATEMENT_PASSWORD_DOMAIN_BANKS
+        domain_to_bank = STATEMENT_PASSWORD_DOMAIN_BANKS
 
         # ── Strategy 1: Explicit bank passwords from DB ─────────────
         # Collect ALL passwords for matching banks and try each against the PDF

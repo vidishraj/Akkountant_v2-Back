@@ -200,6 +200,49 @@ def get_banks_for_domain(sender_domain):
     return matched
 
 
+# ak-3rwh: which stored statement passwords the pipeline tries for a
+# sender domain, in try-order. Moved verbatim from the inline map in
+# mailProcessorService._get_statement_password so the pipeline and the
+# /statementPasswords status endpoint resolve banks the same way.
+STATEMENT_PASSWORD_DOMAIN_BANKS = {
+    "hdfcbank.net": ["Millenia_Credit", "HDFC_DEBIT", "HDFC_REGALIA"],
+    "hdfcbank.com": ["Millenia_Credit", "HDFC_DEBIT", "HDFC_REGALIA"],
+    "hdfcbank.bank.in": ["Millenia_Credit", "HDFC_DEBIT", "HDFC_REGALIA"],
+    "icicibank.com": ["ICICI_AMAZON_PAY"],
+    "icicibank.co.in": ["ICICI_AMAZON_PAY"],
+    "yesbank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+    "yesbank.co.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+    # ak-iu8i: Yes / ICICI .bank.in switch.
+    "yes.bank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+    "yesbank.bank.in": ["YES_BANK_DEBIT", "YES_BANK_ACE"],
+    "icicibank.bank.in": ["ICICI_AMAZON_PAY"],
+    "bankofindia.co.in": ["BOI"],
+    "bankofindia.com": ["BOI"],
+    # ak-2ql: 2026-03-07 RBI-mandated `.bank.in` TLD migration
+    # (precedent: hdfcbank.bank.in above).
+    "bankofindia.bank.in": ["BOI"],
+}
+
+
+def statement_password_banks(domain):
+    """ak-3rwh: banks whose stored password the pipeline tries for a
+    sender domain. Exact key, then dot-boundary suffix, against
+    STATEMENT_PASSWORD_DOMAIN_BANKS; banks with no order hint fall back
+    to get_banks_for_domain (same as _get_statement_password)."""
+    if not domain:
+        return []
+    d = str(domain).strip().rstrip(">").lower()
+    if not d:
+        return []
+    exact = STATEMENT_PASSWORD_DOMAIN_BANKS.get(d)
+    if exact:
+        return list(exact)
+    for known, banks in STATEMENT_PASSWORD_DOMAIN_BANKS.items():
+        if d.endswith("." + known):
+            return list(banks)
+    return get_banks_for_domain(d)
+
+
 def get_format_rules(bank):
     """Return bank-specific format rules string for prompt injection.
 

@@ -485,6 +485,9 @@ class Akkountant(Flask):
             ('/getGoogleStatus', 'GET', self.transactionEP.checkGoogleApiStatus),
             ('/updateGoogleTokens', 'POST', self.transactionEP.addUpdateUserToken),
             ('/setOptedBanks', 'POST', self.transactionEP.setOptedBanks),
+            # ak-3rwh: statement-PDF passwords (status only / set one bank).
+            ('/statementPasswords', 'GET', self.transactionEP.getStatementPasswords),
+            ('/statementPasswords/<bank>', 'PUT', self.transactionEP.putStatementPassword),
             ('/downloadFile', 'GET', self.transactionEP.downloadFile),
             ('/deleteFile', 'GET', self.transactionEP.deleteFile),
             ('/processMailPipeline', 'POST', self.transactionEP.processMailPipeline),
