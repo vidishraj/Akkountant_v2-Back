@@ -25,6 +25,24 @@ STATEMENT_PAGE_MAX = 200
 STATEMENT_BANK_SCAN_CAP = 5000
 
 
+def _statement_sort_key(row, resolved_bank, column):
+    """ak-wc1t: Python sort key for the bank-filtered statements list,
+    mirroring the SQL col_map (unknown column -> processed_at). NULLs sort
+    first ascending / last descending and strings compare case-
+    insensitively, like MySQL's default collation."""
+    if column == "bank":
+        value = resolved_bank
+    elif column == "fileName":
+        value = row.subject
+    elif column == "email_date":
+        value = row.email_date
+    else:  # "uploadDate" / "processed_at" / anything else
+        value = row.processed_at
+    if isinstance(value, str):
+        value = value.lower()
+    return (value is not None, value if value is not None else 0)
+
+
 class TransactionInsertError(RuntimeError):
     """ak-iu8i: insertTransactions wrote nothing (not a duplicate)."""
 
@@ -1603,26 +1621,52 @@ class TransactionService(BaseService):
         }
         sort_col = col_map.get(sort_col_name, ProcessedEmails.processed_at)
         order_fn = desc if sort_dir == "desc" else asc
-        query = query.order_by(order_fn(sort_col))
+        # ak-wc1t (+ review): every order ends in id DESC, so rows tied on
+        # the sort column have a total order and can't move between pages.
+        # The bank-filtered path always SCANS newest-first (so the scan cap
+        # keeps the most recent statements whatever the requested sort) and
+        # applies the requested sort in Python, where "bank" means the
+        # RESOLVED bank, not the sender string.
+        if bank_filter:
+            query = query.order_by(desc(ProcessedEmails.processed_at), desc(ProcessedEmails.id))
+        else:
+            query = query.order_by(order_fn(sort_col), desc(ProcessedEmails.id))
 
         offset = (page - 1) * limit
         if bank_filter:
             # Bounded, uid-scoped scan of the cheap columns, resolve each
-            # row's bank in Python, then page over the matching ids (the
-            # query's sort order is kept).
+            # row's bank in Python, then page over the matching ids.
             want = bank_filter.lower()
+            # ak-wc1t: fetch one row past the cap so "the cap was hit" is
+            # exact (not a guess from len == cap).
             cands = query.with_entities(
                 ProcessedEmails.id, ProcessedEmails.sender,
-                ProcessedEmails.extraction_summary,
-            ).limit(STATEMENT_BANK_SCAN_CAP).all()
-            ids = [c.id for c in cands
-                   if self._statement_bank(c.sender, c.extraction_summary).lower() == want]
+                ProcessedEmails.extraction_summary, ProcessedEmails.processed_at,
+                ProcessedEmails.subject, ProcessedEmails.email_date,
+            ).limit(STATEMENT_BANK_SCAN_CAP + 1).all()
+            truncated = len(cands) > STATEMENT_BANK_SCAN_CAP
+            cands = cands[:STATEMENT_BANK_SCAN_CAP]
+            if truncated:
+                self.logger.warning(
+                    f"ak-wc1t: statements bank filter hit the {STATEMENT_BANK_SCAN_CAP}-row "
+                    f"scan cap; results may be incomplete")
+            matches = []
+            for c in cands:
+                bank = self._statement_bank(c.sender, c.extraction_summary)
+                if bank.lower() == want:
+                    matches.append((c, bank))
+            matches.sort(key=lambda m: _statement_sort_key(m[0], m[1], sort_col_name),
+                         reverse=(sort_dir == "desc"))
+            # Stable sort: ties keep the scan order (processed_at, id DESC).
+            matches = [(m[0].id, m[1]) for m in matches]
+            ids = [m[0] for m in matches]
             total = len(ids)
             page_ids = ids[offset:offset + limit]
             by_id = {r.id: r for r in self.db.session.query(ProcessedEmails).filter(
                 ProcessedEmails.id.in_(page_ids)).all()} if page_ids else {}
             rows = [by_id[i] for i in page_ids if i in by_id]
         else:
+            truncated = False
             total = query.count()
             rows = query.offset(offset).limit(limit).all()
 
@@ -1701,6 +1745,12 @@ class TransactionService(BaseService):
             "page": page,
             "page_size": limit,
             "results": results,
+            # ak-wc1t (additive): a bank-filtered list scans at most
+            # scan_cap statement rows; truncated=True means more existed,
+            # so total_count / results may be incomplete. scan_cap is null
+            # (and truncated false) when no bank filter is applied.
+            "truncated": truncated,
+            "scan_cap": STATEMENT_BANK_SCAN_CAP if bank_filter else None,
         }
 
     @staticmethod
