@@ -209,6 +209,29 @@ If no emails are financial, return: []
 Respond with ONLY valid JSON — no markdown, no explanation, no extra text."""
 
 
+_STREAM_KEYWORDS = ("stream closed", "broken pipe", "connection reset",
+                    "connection refused", "stream error")
+
+
+def is_stream_error_text(error_msg, agent_output=None) -> bool:
+    """Should a failed PDF chunk rebuild its MCP server and retry?
+
+    ak-aufe review: SDK errors arrive as closed-set codes
+    (`...[stream]`), so decide on the code's MARKER (classified from the
+    raw SDK text before it was dropped). Plain strings and the agent's own
+    output keep the legacy keyword check."""
+    from utils.sdk_retry import STREAM_MARKERS, sdk_error_marker_of
+    marker = sdk_error_marker_of(error_msg)
+    if marker is not None:
+        if marker in STREAM_MARKERS:
+            return True
+    elif error_msg and any(kw in error_msg.lower() for kw in _STREAM_KEYWORDS):
+        return True
+    if agent_output and any(kw in agent_output.lower() for kw in _STREAM_KEYWORDS):
+        return True
+    return False
+
+
 class MailProcessorService:
     """
     Core orchestrator for the unified email processing pipeline.
@@ -3701,14 +3724,7 @@ class MailProcessorService:
         agent_output = "".join(text_parts).strip()
 
         # Detect stream/connection errors that warrant rebuilding MCP
-        is_stream_error = False
-        stream_keywords = ["stream closed", "broken pipe", "connection reset",
-                           "connection refused", "stream error"]
-        if error_msg and any(kw in error_msg.lower() for kw in stream_keywords):
-            is_stream_error = True
-        if not is_stream_error and agent_output:
-            if any(kw in agent_output.lower() for kw in stream_keywords):
-                is_stream_error = True
+        is_stream_error = is_stream_error_text(error_msg, agent_output)
 
         ledger = self._is_ledger_email(email)
         if insert_called.get("rejected"):

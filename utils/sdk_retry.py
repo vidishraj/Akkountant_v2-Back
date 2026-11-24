@@ -29,6 +29,8 @@ the SDK client.
 
 from __future__ import annotations
 
+import re
+
 
 # 3 retries = 4 total attempts. Any higher and the pipeline hangs
 # on genuinely-broken chunks; any lower and legit transient failures
@@ -66,6 +68,83 @@ _NON_RETRYABLE_SIGNATURES = (
 )
 
 
+# ── Closed-set SDK error codes (ak-sdkerr) ─────────────────────────
+# utils.sdk_runner no longer returns raw SDK text as `error` (a result
+# error's text can be model output quoting statement / email content).
+# It returns `<kind>:<detail>[<marker>]`, e.g.
+#   assistant_error:rate_limit[rate_limit]
+#   result_error:error_during_execution[overloaded]
+#   sdk_exception:ProcessError[sdk_message_reader]
+# The marker is classified from the raw text BEFORE it is dropped, using
+# the same substrings as the legacy signatures below. Non-retryable
+# markers take priority, exactly like is_retryable_sdk_error.
+_NON_RETRYABLE_MARKERS = (
+    ("schema", ("schema",)),
+    ("invalid_request", ("invalid_request",)),
+    ("authentication", ("authentication", "unauthorized")),
+    ("permission", ("permission", "forbidden")),
+    ("not_found", ("not found",)),
+    ("max_turns", ("maximum number of turns", "max_turns")),
+)
+_RETRYABLE_MARKERS = (
+    ("sdk_message_reader", ("fatal error in message reader", "message reader")),
+    ("rate_limit", ("rate_limit", "rate limit")),
+    ("overloaded", ("overloaded",)),
+    ("timeout", ("timeout", "timed out", "deadline exceeded")),
+    ("stream", ("stream", "eof", "broken pipe")),
+    ("connection", ("connection",)),
+    ("server_error", ("server error", "server_error", "internal error",
+                      "temporarily unavailable", "temporary failure")),
+)
+RETRYABLE_MARKERS = frozenset(m for m, _ in _RETRYABLE_MARKERS)
+NON_RETRYABLE_MARKERS = frozenset(m for m, _ in _NON_RETRYABLE_MARKERS)
+SDK_ERROR_KINDS = ("assistant_error", "result_error", "sdk_exception")
+_CODE_RE = re.compile(
+    r"^(assistant_error|result_error|sdk_exception):[A-Za-z0-9_]{1,64}\[([a-z0-9_]+)\]$")
+_DETAIL_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def sdk_error_marker(text) -> str:
+    """Closed-set marker for raw SDK error text ('none' if no match).
+    The text itself is never returned."""
+    if not isinstance(text, str) or not text.strip():
+        return "none"
+    lower = text.lower()
+    for marker, subs in _NON_RETRYABLE_MARKERS + _RETRYABLE_MARKERS:
+        if any(sub in lower for sub in subs):
+            return marker
+    return "none"
+
+
+def sdk_error_code(kind: str, detail, raw_text=None) -> str:
+    """Build `<kind>:<detail>[<marker>]`. `detail` must already be a
+    closed-set token (SDK error enum, result subtype, exception type);
+    anything else collapses to 'other'. `raw_text` is only classified.
+
+    ak-aufe review: the marker comes from `raw_text` ONLY, never from the
+    detail token. An exception TYPE name such as CLIConnectionError must
+    not by itself make "Failed to start Claude Code" look retryable."""
+    if kind not in SDK_ERROR_KINDS:
+        kind = "sdk_exception"
+    d = detail if isinstance(detail, str) and _DETAIL_RE.match(detail) else "other"
+    marker = sdk_error_marker(raw_text or "")
+    return f"{kind}:{d}[{marker}]"
+
+
+_CODE_SEARCH_RE = re.compile(
+    r"(?:assistant_error|result_error|sdk_exception):[A-Za-z0-9_]{1,64}\[([a-z0-9_]+)\]")
+STREAM_MARKERS = frozenset({"stream", "connection", "sdk_message_reader"})
+
+
+def sdk_error_marker_of(text):
+    """The marker of the SDK error code inside `text` (it may be wrapped,
+    e.g. 'Claude error: <code>'), or None if `text` carries no code."""
+    if not isinstance(text, str):
+        return None
+    m = _CODE_SEARCH_RE.search(text)
+    return m.group(1) if m else None
+
+
 def is_retryable_sdk_error(error_msg) -> bool:
     """ak-wty predicate: return True iff `error_msg` matches a
     known-transient signature. Non-string / None / empty inputs
@@ -78,6 +157,11 @@ def is_retryable_sdk_error(error_msg) -> bool:
     """
     if not error_msg or not isinstance(error_msg, str):
         return False
+    # ak-sdkerr: a closed-set code -> decide on its marker alone.
+    m = _CODE_RE.match(error_msg.strip())
+    if m:
+        return m.group(2) in RETRYABLE_MARKERS
+
     lower = error_msg.lower()
 
     # Non-retryable takes priority.

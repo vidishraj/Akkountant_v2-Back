@@ -33,6 +33,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 from utils.logger import Logger
+from utils.sdk_retry import sdk_error_code  # ak-aufe
 
 _logger = Logger("agent_run").get_logger()
 
@@ -216,7 +217,9 @@ async def run_query_collect(*, agent, options, prompt, user_id=None,
             elif isinstance(message, AssistantMessage):
                 turns += 1
                 if getattr(message, "error", None):
-                    error_msg = f"Assistant error: {message.error}"
+                    # ak-aufe: closed-set code, never the raw SDK text.
+                    error_msg = sdk_error_code(
+                        "assistant_error", str(message.error), str(message.error))
                     error_class = "assistant_error"
                     break
                 for block in message.content:
@@ -233,7 +236,11 @@ async def run_query_collect(*, agent, options, prompt, user_id=None,
             elif isinstance(message, ResultMessage):
                 subtype = getattr(message, "subtype", None)
                 if getattr(message, "is_error", False):
-                    error_msg = message.result or "Query failed"
+                    # ak-aufe: `result` can be model text quoting statement /
+                    # email content. Keep only the subtype + a closed-set
+                    # marker classified from the text (retry still works).
+                    error_msg = sdk_error_code(
+                        "result_error", subtype or "error", message.result)
                     error_class = "result_error"
                 if getattr(message, "structured_output", None) is not None:
                     structured_output = message.structured_output
@@ -253,7 +260,13 @@ async def run_query_collect(*, agent, options, prompt, user_id=None,
                         else usage.get("output_tokens")
                     )
     except Exception as e:
-        error_msg = f"SDK exception: {e}"
+        # ak-aufe: type + closed-set marker (classified from the message
+        # here, server-side); the message itself is dropped.
+        try:
+            _raw = str(e)
+        except Exception:
+            _raw = ""
+        error_msg = sdk_error_code("sdk_exception", type(e).__name__, _raw)
         error_class = e.__class__.__name__
 
     latency_ms = int((time.monotonic() - start) * 1000)

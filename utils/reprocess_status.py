@@ -167,6 +167,10 @@ _ERROR_TYPE_KEYWORDS = (
     ("stream", ("stream", "connection reset", "eof")),
     ("rate_limit", ("rate_limit", "rate limit")),
     ("timeout", ("timeout", "deadline exceeded")),
+    # ak-aufe review: SDK markers, so `[overloaded]` / `[connection]`
+    # codes are counted (after stream/timeout: existing labels unchanged).
+    ("overloaded", ("overloaded",)),
+    ("connection", ("connection",)),
     ("analysis_exception", ("analysis_exception",)),
     ("unknown_chunk_result_shape", ("unknown_chunk_result_shape",)),
 )
