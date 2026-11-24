@@ -16,6 +16,10 @@ from enums.TransactionTypeEnum import TransactionTypeEnum
 from models.transactions import ProcessingMethod
 from utils.GenericUtils import GenericUtil
 from utils.logger import Logger
+from utils.mail_row_validation import (
+    MAX_BATCH_ROWS, check_amount, check_and_normalise_date, check_date,
+    first_error,
+)
 from utils.mail_tool_paths import (
     ToolPathRejected, model_path_differs, resolve_pinned_pdf,
     safe_attachment_dest,
@@ -175,6 +179,15 @@ def execute_mail_tool(tool_name, tool_input, user_id,
 
 # ── Individual tool handlers ─────────────────────────────────────────────
 
+def _invalid_args(tool, reason, **extra):
+    """ak-n0cg: uniform fail-fast result. Logs the tool + reason only
+    (never the extracted values, which are personal financial data)."""
+    logger.warning(f"[ak-n0cg] {tool} rejected: {reason}")
+    out = {"result": "invalid_args", "error": reason, "inserted": 0}
+    out.update(extra)
+    return out
+
+
 def _handle_insert_transaction(args, user_id, transaction_service):
     """Insert a single transaction from an email alert.
 
@@ -186,6 +199,15 @@ def _handle_insert_transaction(args, user_id, transaction_service):
     tx arriving via BOTH an email alert AND a later statement PDF
     lands on the same referenceID and dedups correctly.
     """
+    # ak-n0cg / ak-v3mf m3: value sanity before any DB work. A Rs 0.00
+    # line is legitimate; accepted bank date spellings are normalised to
+    # a form the insert path parses.
+    norm_date, date_err = check_and_normalise_date(args.get("date"))
+    err = first_error(check_amount(args.get("amount"), allow_zero=True),
+                      date_err)
+    if err:
+        return _invalid_args("insert_transaction", err)
+    args["date"] = norm_date
     from models.transactions import Transactions
     from utils.reference_id import generate_reference_from_row
 
@@ -351,6 +373,46 @@ def _handle_insert_batch_transactions(args, user_id, transaction_service, reconc
             ),
             "inserted": 0,
         }
+
+    # ak-n0cg / ak-v3mf m3: cap + per-row sanity BEFORE any write. The
+    # whole call fails (the agent can retry with corrected rows):
+    # silently dropping some statement rows would itself be an
+    # accounting error.
+    # An EMPTY list keeps its pre-n0cg meaning (a page with no
+    # transactions → "no_transactions"), so it is not a rejection.
+    rows_in = args.get("transactions")
+    if rows_in is None:
+        rows_in = []
+    if not isinstance(rows_in, list):
+        return _invalid_args("insert_batch_transactions",
+                             "transactions must be a list")
+    if len(rows_in) > MAX_BATCH_ROWS:
+        return _invalid_args(
+            "insert_batch_transactions",
+            f"too many rows in one call (max {MAX_BATCH_ROWS})")
+    bad_rows = []
+    norm_rows = []
+    for idx, row in enumerate(rows_in, start=1):
+        if not isinstance(row, dict):
+            bad_rows.append({"row": idx, "error": "row is not an object"})
+            continue
+        # Rs 0.00 statement lines are real (allow_zero); dates in an
+        # accepted bank spelling are normalised, not rejected.
+        norm_date, date_err = check_and_normalise_date(row.get("date"))
+        err = first_error(check_amount(row.get("amount"), allow_zero=True),
+                          date_err)
+        if err:
+            bad_rows.append({"row": idx, "error": err})
+        else:
+            norm_rows.append(dict(row, date=norm_date))
+    if bad_rows:
+        return _invalid_args(
+            "insert_batch_transactions",
+            f"{len(bad_rows)} row(s) failed validation",
+            bad_rows=bad_rows[:10],
+            bad_row_count=len(bad_rows),
+        )
+    args["transactions"] = norm_rows
 
     transactions = []
     # Track how each row was hashed so the batch summary log makes it
@@ -736,6 +798,17 @@ def _parse_period_date(date_str):
 
 def _handle_insert_epf_deposit(args, user_id, investment_service):
     """Record EPF contribution data from email (no DB insert)."""
+    err = first_error(
+        check_date(args.get("date")),
+        check_amount(args.get("employee_amount"), field="employee_amount",
+                     allow_zero=True, allow_negative=False),
+        check_amount(args.get("employer_amount"), field="employer_amount",
+                     allow_zero=True, allow_negative=False),
+    )
+    if not err and not (float(args["employee_amount"]) or float(args["employer_amount"])):
+        err = "employee_amount and employer_amount are both zero"
+    if err:
+        return _invalid_args("insert_epf_deposit", err)
     return {
         "status": "recorded",
         "service_type": "EPF",
@@ -749,6 +822,10 @@ def _handle_insert_epf_deposit(args, user_id, investment_service):
 
 def _handle_insert_ppf_deposit(args, user_id, investment_service):
     """Record PPF deposit data from email (no DB insert)."""
+    err = first_error(check_date(args.get("date")),
+                      check_amount(args.get("amount"), allow_negative=False))
+    if err:
+        return _invalid_args("insert_ppf_deposit", err)
     return {
         "status": "recorded",
         "service_type": "PPF",
@@ -761,6 +838,13 @@ def _handle_insert_ppf_deposit(args, user_id, investment_service):
 
 def _handle_insert_gold_purchase(args, user_id, investment_service):
     """Record gold purchase data from email (no DB insert)."""
+    err = first_error(
+        check_date(args.get("date")),
+        check_amount(args.get("amount"), allow_negative=False),
+        check_amount(args.get("quantity"), field="quantity", allow_negative=False),
+    )
+    if err:
+        return _invalid_args("insert_gold_purchase", err)
     return {
         "status": "recorded",
         "service_type": "Gold",
@@ -775,6 +859,15 @@ def _handle_insert_gold_purchase(args, user_id, investment_service):
 
 def _handle_insert_investment(args, user_id, investment_service):
     """Record stock/MF/NPS purchase data from email (no DB insert)."""
+    err = first_error(
+        check_date(args.get("date")),
+        check_amount(args.get("amount")),
+        (check_amount(args.get("quantity"), field="quantity", allow_zero=True,
+                      allow_negative=False)
+         if args.get("quantity") is not None else None),
+    )
+    if err:
+        return _invalid_args("insert_investment", err)
     return {
         "status": "recorded",
         "service_type": args.get("service_type"),
@@ -818,6 +911,20 @@ def _handle_mark_invoice_paid(args, invoice_service):
     from models.freelance_management import PendingPaymentClaim, Invoice
 
     invoice_number = args["invoice_number"]
+    # ak-n0cg: provenance. The SERVICE attaches the batch email this
+    # claim came from (verified against its own batch); the model can't
+    # supply it (any model-sent value is stripped upstream). No source
+    # email → refuse: an unattributable claim could come from anywhere.
+    source_email = args.get("_source_email")
+    if not isinstance(source_email, dict) or not source_email.get("gmail_id"):
+        logger.warning(
+            "[ak-n0cg] mark_invoice_paid refused: no server-verified "
+            "source email for this claim"
+        )
+        return {
+            "status": "error",
+            "error": "mark_invoice_paid refused: the claim must come from an email in this batch",
+        }
     user_id = _flask_g.get('firebase_id') if _flask_g else None
     if not user_id:
         # Mail executor is always called inside a request context via
@@ -841,13 +948,15 @@ def _handle_mark_invoice_paid(args, invoice_service):
     # Extract claim metadata from LLM tool args (snake_case per the tool
     # schema — see mailProcessorTools.py:280-320).
     claimed_amount_raw = args.get("amount_received")
+    claimed_currency_supplied = bool(args.get("currency"))
     claimed_currency = args.get("currency") or (
         invoice.currency.value if hasattr(invoice.currency, 'value')
         else str(invoice.currency)
     )
     payment_method = args.get("payment_method")
     payment_date = args.get("payment_date")
-    source_email_id = args.get("source_email_id") or args.get("email_id")
+    # ak-n0cg: the server-verified gmail id, never the model's free text.
+    source_email_id = source_email["gmail_id"]
 
     # Parse claimed_amount tolerantly (LLM may pass float / str / omit).
     from services.money_utils import money, q2, MoneyError
@@ -862,6 +971,22 @@ def _handle_mark_invoice_paid(args, invoice_service):
                 f"filing claim without amount"
             )
 
+    # ak-n0cg: server-side evidence binding the claim to its email.
+    from utils.payment_claim_evidence import evaluate_claim_evidence
+    customer = getattr(invoice, "customer", None)
+    evidence = evaluate_claim_evidence(
+        sender=source_email.get("sender"),
+        subject=source_email.get("subject"),
+        body=source_email.get("body"),
+        invoice_number=invoice_number,
+        invoice_total=invoice.total,
+        invoice_currency=invoice.currency,
+        claimed_amount=claimed_amount,
+        claimed_currency=claimed_currency if claimed_currency_supplied else None,
+        customer_emails=[getattr(customer, "email", None), invoice.to_email],
+    )
+    requires_user_confirmation = not evidence["all_match"]
+
     # Write the claim row.
     claim = PendingPaymentClaim(
         user_id=user_id,
@@ -873,6 +998,9 @@ def _handle_mark_invoice_paid(args, invoice_service):
             "payment_method": payment_method,
             "payment_date": payment_date,
             "invoice_number": invoice_number,
+            # ak-n0cg: evidence flags + sender domain only (no content).
+            "evidence": evidence,
+            "requires_user_confirmation": requires_user_confirmation,
         },
         resolution='pending',
     )
@@ -900,6 +1028,8 @@ def _handle_mark_invoice_paid(args, invoice_service):
         "status": "pending",
         "claim_id": claim.id,
         "invoice_number": invoice_number,
+        # ak-n0cg: True unless sender + amount + reference all matched.
+        "requires_user_confirmation": requires_user_confirmation,
         "message": (
             "Payment claim recorded from email — pending reconciliation. "
             "Invoice status not changed until either (a) bank credit "

@@ -12,6 +12,33 @@ from utils.logger import Logger
 from sqlalchemy import and_
 from claude_agent_sdk import ClaudeAgentOptions
 from utils.sdk_tools import restricted_tool_options
+from utils.prompt_injection_guard import (
+    _escape_untrusted_markdown,
+    _generate_batch_nonce,
+    _wrap_email_block,
+    _wrap_sysprompt_with_injection_guard,
+)
+
+# System prompt for the job-application classifier. ak-v3mf m1: wrapped
+# per call with the per-batch nonce guard (header + footer).
+_JOB_CLASSIFIER_PROMPT = """You are a precise email classifier that ONLY identifies emails about job applications I have personally submitted.
+
+STRICT CRITERIA - Mark as job-related ONLY if:
+1. Email confirms I submitted an application 
+2. Email is about MY specific application status/progress
+3. Email requests additional info for MY application
+4. Email schedules/invites me for interview/assessment
+
+NEVER mark as job-related:
+- General job postings or "now hiring" ads
+- Marketing emails with job opportunities 
+- Newsletters about careers
+- Mass recruitment campaigns
+- Job board/LinkedIn notifications
+- Upwork related emails
+
+Be extremely conservative. When in doubt, mark as false.
+Return ONLY valid JSON without explanations."""
 from utils.sdk_runner import run_query_collect
 
 
@@ -119,10 +146,13 @@ class JobEmailService(BaseService):
                     "snippet": email.get('message', '')[:300]  # Limit to reduce tokens
                 })
             
-            prompt = self._create_batch_analysis_prompt(email_summaries)
-            
+            # ak-v3mf m1 (via ak-n0cg): per-batch nonce shared by the
+            # sentinel-wrapped email blocks AND the system-prompt sandwich.
+            nonce = _generate_batch_nonce()
+            prompt = self._create_batch_analysis_prompt(email_summaries, nonce)
+
             # Call Claude API
-            claude_response = self._call_claude_api(prompt)
+            claude_response = self._call_claude_api(prompt, nonce)
             
             # Parse Claude's response
             return self._parse_claude_batch_response(claude_response, emails)
@@ -180,11 +210,24 @@ class JobEmailService(BaseService):
             self.db.session.rollback()
             # Don't raise - we don't want to fail the whole batch for this
     
-    def _create_batch_analysis_prompt(self, email_summaries):
-        """Create highly precise prompt for job application analysis"""
-        emails_text = ""
-        for email in email_summaries:
-            emails_text += f"ID:{email['id']}\nFrom:{email['sender']}\nSubject:{email['subject']}\nContent:{email['snippet']}\n---\n"
+    def _create_batch_analysis_prompt(self, email_summaries, nonce):
+        """Create highly precise prompt for job application analysis.
+
+        ak-v3mf m1: sender / subject / snippet are UNTRUSTED inbox
+        content. Each email is escaped and wrapped in per-batch nonce
+        sentinels (ak-csng pattern, utils/prompt_injection_guard); the
+        system prompt carries the matching guard sandwich.
+        """
+        blocks = []
+        for idx, email in enumerate(email_summaries, 1):
+            body_lines = (
+                f"ID:{_escape_untrusted_markdown(email['id'])}\n"
+                f"From:{_escape_untrusted_markdown(email['sender'])}\n"
+                f"Subject:{_escape_untrusted_markdown(email['subject'])}\n"
+                f"Content:{_escape_untrusted_markdown(email['snippet'])}\n"
+            )
+            blocks.append(_wrap_email_block(idx, nonce, body_lines))
+        emails_text = "\n".join(blocks)
         
         return f"""CRITICAL: Identify ONLY emails about MY job applications - where I have personally applied to a specific company/position.
 
@@ -216,7 +259,7 @@ Return ONLY a JSON array:
 For non-job emails or job ads/marketing: {{"id":X,"is_job_related":false}}
 For MY job applications: extract company, job_title, status (applied/interview/offer/rejected/under_review), type (new_application/status_update)"""
 
-    def _call_claude_api(self, prompt):
+    def _call_claude_api(self, prompt, nonce):
         """Call Claude API using claude_agent_sdk"""
         try:
             # Configure Claude options for batch job email analysis
@@ -237,24 +280,7 @@ For MY job applications: extract company, job_title, status (applied/interview/o
                 # ak-m0f6: allowed_tools=[] alone restricted NOTHING;
                 # this makes the effective tool set empty.
                 **restricted_tool_options([]),
-                system_prompt="""You are a precise email classifier that ONLY identifies emails about job applications I have personally submitted.
-
-STRICT CRITERIA - Mark as job-related ONLY if:
-1. Email confirms I submitted an application 
-2. Email is about MY specific application status/progress
-3. Email requests additional info for MY application
-4. Email schedules/invites me for interview/assessment
-
-NEVER mark as job-related:
-- General job postings or "now hiring" ads
-- Marketing emails with job opportunities 
-- Newsletters about careers
-- Mass recruitment campaigns
-- Job board/LinkedIn notifications
-- Upwork related emails
-
-Be extremely conservative. When in doubt, mark as false.
-Return ONLY valid JSON without explanations."""
+                system_prompt=_wrap_sysprompt_with_injection_guard(_JOB_CLASSIFIER_PROMPT, nonce),
             )
             
             async def get_claude_response():

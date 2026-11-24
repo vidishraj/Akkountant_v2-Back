@@ -340,10 +340,11 @@ class TestServiceWiring(unittest.TestCase):
         self.assertEqual(fn.count("pinned_pdf_path=pdf_path"), 3)
 
     def test_text_mail_site_has_no_pin(self):
-        line = [l for l in self.src.splitlines()
-                if "self._build_sdk_tools(user_id, email_lookup=email_lookup)" in l]
-        self.assertEqual(len(line), 1)
-
+        # The text-email agent processes no PDF, so it gets no pin (its
+        # file tools are also scoped out since ak-n0cg).
+        i = self.src.index("tool_names=TEXT_EMAIL_TOOL_NAMES")
+        call = self.src[self.src.rindex("self._build_sdk_tools(", 0, i):i + 60]
+        self.assertNotIn("pinned_pdf_path", call)
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)

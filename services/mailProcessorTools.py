@@ -4,6 +4,8 @@ These tools allow the AI to insert extracted financial data into the database
 and manage PDF processing during autonomous email scanning.
 """
 
+import copy
+
 MAIL_PROCESSOR_TOOLS = [
     {
         "name": "insert_transaction",
@@ -295,6 +297,13 @@ MAIL_PROCESSOR_TOOLS = [
                     "type": "string",
                     "description": "Invoice number the claim references."
                 },
+                "gmail_message_id": {
+                    "type": "string",
+                    "description": (
+                        "Gmail ID of the email this payment claim comes "
+                        "from (ak-n0cg: must be an email in this batch)."
+                    ),
+                },
                 "payment_date": {
                     "type": "string",
                     "description": "Claimed payment date in YYYY-MM-DD (as stated in mail)."
@@ -315,7 +324,7 @@ MAIL_PROCESSOR_TOOLS = [
                     "description": "Claimed payment method (e.g. 'bank_transfer', 'paypal', 'wise')."
                 },
             },
-            "required": ["invoice_number"]
+            "required": ["invoice_number", "gmail_message_id"]
         }
     },
     {
@@ -422,6 +431,81 @@ MAIL_PROCESSOR_TOOLS = [
 ]
 
 # System prompt for batch text email processing (used with haiku for speed)
+# ak-n0cg (2026-11-24): per-agent tool scoping. Each mail agent is given
+# ONLY the MCP tools its flow needs; anything else is never registered
+# with its MCP server, so an injected email can't reach it. Sets cover
+# every tool the prompts instruct, and every tool prod actually used
+# (infra journal count: mail.text_extract → insert_transaction +
+# report_result; pdf.image → get_pdf_pages + report_result).
+# save_attachment was never used by either flow (the service persists
+# PDFs itself), so neither agent gets it. mark_invoice_paid (freelance
+# payment emails) is TEXT only; insert_batch_transactions + get_pdf_pages
+# are PDF only.
+TEXT_EMAIL_TOOL_NAMES = frozenset({
+    "insert_transaction",
+    "insert_investment",
+    "insert_epf_deposit",
+    "insert_ppf_deposit",
+    "insert_gold_purchase",
+    "mark_invoice_paid",
+    "report_result",
+})
+PDF_TOOL_NAMES = frozenset({
+    "insert_batch_transactions",
+    "insert_investment",
+    "insert_epf_deposit",
+    "insert_ppf_deposit",
+    "insert_gold_purchase",
+    "get_pdf_pages",
+    "report_result",
+})
+
+
+# ak-n0cg review: in the TEXT-email flow every write tool must name the
+# email it came from, so the server can bind inserts (and refusals) to
+# that email. The PDF flow processes ONE email per agent, so the
+# server already knows the source and the field is not required there.
+TEXT_ATTRIBUTED_TOOL_NAMES = frozenset({
+    "insert_transaction",
+    "insert_investment",
+    "insert_epf_deposit",
+    "insert_ppf_deposit",
+    "insert_gold_purchase",
+    "mark_invoice_paid",
+})
+_GMAIL_ID_PROP = {
+    "type": "string",
+    "description": (
+        "REQUIRED: the Gmail ID of the email this item was extracted "
+        "from (from that email's header)"
+    ),
+}
+
+
+def scoped_mail_tools(names, require_gmail_id=False):
+    """MAIL_PROCESSOR_TOOLS filtered to `names` (definition order).
+
+    require_gmail_id: return COPIES of the TEXT_ATTRIBUTED_TOOL_NAMES
+    schemas with gmail_message_id present and required (text flow).
+    """
+    unknown = set(names) - {t["name"] for t in MAIL_PROCESSOR_TOOLS}
+    if unknown:
+        raise ValueError(f"unknown mail tool(s): {sorted(unknown)}")
+    out = []
+    for t in MAIL_PROCESSOR_TOOLS:
+        if t["name"] not in names:
+            continue
+        if require_gmail_id and t["name"] in TEXT_ATTRIBUTED_TOOL_NAMES:
+            t = copy.deepcopy(t)
+            schema = t["input_schema"]
+            schema.setdefault("properties", {})["gmail_message_id"] = dict(_GMAIL_ID_PROP)
+            req = schema.setdefault("required", [])
+            if "gmail_message_id" not in req:
+                req.append("gmail_message_id")
+        out.append(t)
+    return out
+
+
 TEXT_EMAIL_SYSTEM_PROMPT = """\
 You are a financial email processor for a personal finance app called Akkountant.
 You will receive a batch of financial emails. For each email, classify it and extract structured data.
@@ -450,7 +534,8 @@ You will receive a batch of financial emails. For each email, classify it and ex
 
 ### For freelance_payment:
 - Extract date, client, amount, currency, invoice_number
-- Try to match against existing invoices using mark_invoice_paid (ak-lvu:
+- Try to match against existing invoices using mark_invoice_paid, passing the
+  email's gmail_message_id (ak-lvu:
   this tool FILES A CLAIM — it does NOT flip the invoice status to paid.
   The claim gets reconciled later via bank-credit match or Overseer
   manual confirmation. Return value includes claim_id for audit trail.)
@@ -465,7 +550,9 @@ You will receive a batch of financial emails. For each email, classify it and ex
 
 ## Instructions
 1. Process each email one by one
-2. Call the appropriate MCP tool for each extracted item
+2. Call the appropriate MCP tool for each extracted item. EVERY insert_*
+   and mark_invoice_paid call MUST include gmail_message_id (the Gmail ID
+   of the email the item came from); calls without it are refused
 3. Call report_result for EVERY email processed — include all metadata:
    - gmail_message_id: the Gmail ID from the email header
    - sender: the From address

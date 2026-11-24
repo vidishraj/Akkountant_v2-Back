@@ -105,7 +105,8 @@ def _ast_lift_helpers():
       _make_injection_guard_footer
       _wrap_sysprompt_with_injection_guard
     """
-    src = _read_source("services/mailProcessorService.py")
+    # ak-n0cg: helpers hoisted to utils/prompt_injection_guard.py.
+    src = _read_source("utils/prompt_injection_guard.py")
     tree = ast.parse(src)
     wanted = {
         "_generate_batch_nonce",
