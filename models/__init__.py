@@ -79,3 +79,8 @@ from .AgentMessage import AgentMessage, AGENT_MESSAGE_ROLES
 # on existing). Import order matters: AgentConversation + AgentMessage
 # must precede this so FK targets exist at create_all() time.
 from .agentFileAttachments import AgentFileAttachment
+# ak-0cvi: users.User has relationship('InvestmentHistory'). Without this
+# import the class was only registered when some SERVICE imported it, so a
+# process that imports just `models` (the bare-engine audit / backfill
+# scripts) failed configure_mappers() before any SQL.
+from .investmentHistory import InvestmentHistory
