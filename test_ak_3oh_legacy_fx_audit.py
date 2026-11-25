@@ -237,5 +237,22 @@ print("FLAG", os.environ.get("AK_SKIP_SCHEDULERS"))
         self.assertIn("FLAG 1", out)
 
 
+class TestImportLeaksNoEnv(unittest.TestCase):
+    """Loading the script as a module (tests do) must not set the flag in
+    the importing process; running it as __main__ still does."""
+
+    def test_loading_module_does_not_set_flag(self):
+        import importlib.util
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AK_SKIP_SCHEDULERS", None)
+            spec = importlib.util.spec_from_file_location("ak3oh_noleak", os.path.join(HERE, "scripts", "ak3oh_legacy_fx_audit.py"))
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            self.assertNotIn("AK_SKIP_SCHEDULERS", os.environ)
+        src = open(os.path.join(HERE, "scripts", "ak3oh_legacy_fx_audit.py")).read()
+        self.assertIn('if __name__ == "__main__":\n    os.environ["AK_SKIP_SCHEDULERS"] = "1"', src)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

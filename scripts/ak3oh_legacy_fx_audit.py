@@ -21,8 +21,10 @@ import os
 import sys
 
 # Review MAJOR: before ANY project import (belt and braces; app is never
-# imported here).
-os.environ["AK_SKIP_SCHEDULERS"] = "1"
+# imported here). Only when run as a script, so loading it in a test leaks
+# nothing into the test process (ak-n3lf pattern).
+if __name__ == "__main__":
+    os.environ["AK_SKIP_SCHEDULERS"] = "1"
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
