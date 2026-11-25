@@ -115,10 +115,43 @@ def take_pending(run_refs, bank=None):
     return out
 
 
+# ak-b5sv: run-level ak-tik dedup signal. Set by process_emails around a
+# whole run; every accepted insert_batch_transactions result adds its
+# degraded_dedup_rows / dual_tier_tuples (ak-qic6) here via add_landed, so
+# the run summary (and from it /readEmails/status and the AgentChat
+# ingest_notice SSE event) can report them. Previously they were dropped
+# right after each chunk.
+DEDUP_SIGNAL_KEYS = ("degraded_dedup_rows", "dual_tier_tuples")
+DEDUP_SIGNAL: ContextVar = ContextVar("ak_b5sv_dedup_signal", default=None)
+
+
+def new_dedup_signal():
+    return {k: 0 for k in DEDUP_SIGNAL_KEYS}
+
+
+def dedup_count(value):
+    """A non-negative int from a result field; anything else is 0."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _add_dedup_signal(result):
+    signal = DEDUP_SIGNAL.get()
+    if signal is None:
+        return
+    for key in DEDUP_SIGNAL_KEYS:
+        signal[key] = signal.get(key, 0) + dedup_count(result.get(key))
+
+
 def add_landed(result):
-    """Count an insert result's landed rows into the current email."""
+    """Count an insert result's landed rows into the current email (and
+    its dedup signal into the current run, ak-b5sv)."""
+    if not isinstance(result, dict):
+        return
+    _add_dedup_signal(result)
     counter = LANDED_ROWS.get()
-    if counter is None or not isinstance(result, dict):
+    if counter is None:
         return
     try:
         counter["rows"] += int(result.get("inserted") or 0) + int(result.get("duplicates") or 0)

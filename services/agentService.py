@@ -17,6 +17,7 @@ from utils.sdk_runner import emit_agent_run, _make_sdk_stderr_logger
 from utils.sdk_retry import sdk_error_code, sdk_error_user_message  # ak-95w0
 from utils.safe_errors import error_frames, error_tag  # ak-95w0
 from utils.confirm_preview import build_outcome, build_preview
+from utils.ingest_notice import EVENT_TYPE as INGEST_NOTICE_EVENT, ingest_notice_from_result
 from utils.confirm_tokens import (
     issue_confirm_token, verify_confirm_token, revoke_confirm_token,
     peek_confirm_tool, revoke_confirm_token_status,
@@ -1089,8 +1090,10 @@ class AgentService(BaseService):
             if error_msg:
                 # ak-2ye9: outcomes first — the user must learn whether
                 # anything was recorded even when the turn errored.
+                # ak-b5sv: an import that landed degraded-dedup rows before
+                # the error is still reported.
                 for event_type, data in tool_events:
-                    if event_type == "outcome":
+                    if event_type in ("outcome", INGEST_NOTICE_EVENT):
                         yield self._sse_event(event_type, data)
                 # ak-95w0: fixed user text + the closed-set code.
                 self.logger.warning(f"[ak-95w0] chat.{agent_type} SDK error {error_msg}")
@@ -1538,6 +1541,12 @@ class AgentService(BaseService):
                     tool_events.append(("outcome", build_outcome(
                         _ck, _tn, "failed" if result_failed(result) else "recorded")))
                     confirm_state["done"].add(_ck)
+
+                # ak-b5sv: surface the ak-tik degraded-dedup signal of a
+                # statement import to the client (same banner as ak-dngn).
+                _notice = ingest_notice_from_result(_tn, result)
+                if _notice:
+                    tool_events.append((INGEST_NOTICE_EVENT, _notice))
 
                 # ak-e7g: distinguish handler-layer validation failures
                 # (surfaced with is_error=True so the LLM can retry with

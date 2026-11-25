@@ -421,6 +421,11 @@ class MailProcessorService:
             "text_emails_processed": 0,
             "pdf_emails_processed": 0,
             "errors": [],
+            # ak-b5sv: ak-tik dedup signal summed over every batch this run
+            # landed (always present, ints >= 0). Read by the ak-dngn
+            # /readEmails/status banner and the AgentChat ingest_notice.
+            "degraded_dedup_rows": 0,
+            "dual_tier_tuples": 0,
         }
 
         def report(update):
@@ -438,6 +443,8 @@ class MailProcessorService:
         run_tmp_token = _RUN_TMP_DIR.set(run_tmp)
         sweep_marks = {}
         sweep_marks_token = _SWEEP_MARKS.set(sweep_marks)
+        dedup_signal = ingest_outcome.new_dedup_signal()
+        dedup_signal_token = ingest_outcome.DEDUP_SIGNAL.set(dedup_signal)
         try:
             # 1. Fetch Gmail token
             report({"stage": "fetching_emails", "status": "processing"})
@@ -550,6 +557,9 @@ class MailProcessorService:
             # still present. Persisted copies (claude_statements/) are
             # separate and untouched.
             self._cleanup_local_pdfs(pdf_emails)
+            # ak-b5sv: runs before every return above, so all exits report it.
+            ingest_outcome.DEDUP_SIGNAL.reset(dedup_signal_token)
+            summary.update(dedup_signal)
             _RUN_TMP_DIR.reset(run_tmp_token)
             _SWEEP_MARKS.reset(sweep_marks_token)
             # The run's own subdir only (never the shared tmp/).
