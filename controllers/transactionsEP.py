@@ -131,6 +131,15 @@ class TransactionController:
         dateTo = request.args.get('dateTo')
         dateFrom = request.args.get('dateFrom')
         processing_mode = request.args.get('processing_mode', 'image')
+        # ak-v6zp: opt-in re-classification of emails already stamped
+        # skipped/not_financial (skipped by default every cycle).
+        reclassify = (request.args.get('reclassify') or '').strip().lower() in ('1', 'true', 'yes')
+        if reclassify:
+            # ak-v6zp review: bound the SDK spend of a manual reclassify.
+            from utils.not_financial_policy import reclassify_range_error
+            range_error = reclassify_range_error(dateFrom, dateTo)
+            if range_error:
+                return jsonify({"error": range_error, "error_code": "RECLASSIFY_RANGE"}), 400
         self.logger.info(f"Triggering async email scan for user {userId} ({dateFrom} to {dateTo})")
 
         if not self.mail_processor:
@@ -187,6 +196,7 @@ class TransactionController:
                     result = self.mail_processor.process_emails(
                         userId, dateFrom, dateTo, processing_mode,
                         progress_callback=on_progress,
+                        reclassify_not_financial=reclassify,
                     )
                     with self._scans_lock:
                         self._scans[scan_id].update({

@@ -63,26 +63,55 @@ _STATUS_MAP = {
 
 
 def _parse_email_date(raw_date) -> Optional[datetime]:
-    """Best-effort parse of a raw email_date string. Returns None if
-    none of the tolerated formats match (caller should degrade
-    gracefully — email_date is nullable in the schema)."""
+    """Best-effort parse of a raw email_date into NAIVE UTC (ak-v6zp:
+    processedEmails.email_date is stored as naive UTC from every path).
+
+      * GmailServiceUtils' fetch 'time' ('%Y-%m-%d %H:%M:%S') is already
+        UTC (utcfromtimestamp(internalDate)) and is kept as is;
+      * a timezone-aware datetime / ISO string with an offset / RFC 2822
+        header date is converted to UTC and made naive;
+      * a date-only string ('2026-11-24', '24/11/2026') has no zone and is
+        stored as that date at 00:00.
+    Returns None if nothing matches (email_date is nullable)."""
     if not raw_date:
         return None
     if isinstance(raw_date, datetime):
-        return raw_date
+        return _naive_utc(raw_date)
     if not isinstance(raw_date, str):
         return None
+    raw = raw_date.strip()
     for fmt in (
         "%Y-%m-%d",
         "%d/%m/%Y",
         "%d-%m-%Y",
         "%Y-%m-%dT%H:%M:%S",
+        # ak-v6zp: GmailServiceUtils' fetch dict 'time' (UTC from
+        # internalDate). Without it every service stamp stored NULL.
+        "%Y-%m-%d %H:%M:%S",
     ):
         try:
-            return datetime.strptime(raw_date, fmt)
+            return datetime.strptime(raw, fmt)
         except ValueError:
             continue
-    return None
+    # ak-v6zp review: offset-aware ISO 8601 ('...+05:30', '...Z').
+    try:
+        return _naive_utc(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError:
+        pass
+    # RFC 2822 email header date ('Mon, 24 Nov 2026 12:00:00 +0530').
+    try:
+        from email.utils import parsedate_to_datetime
+        return _naive_utc(parsedate_to_datetime(raw))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Aware -> converted to UTC, tzinfo dropped; naive is assumed UTC."""
+    if dt.tzinfo is not None:
+        from datetime import timezone
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def should_stamp_success(analysis_summary) -> bool:
@@ -244,6 +273,9 @@ def upsert_processed_email(
             existing.extraction_summary = _merge_retry_counter(
                 existing.extraction_summary, extraction_summary, db_status)
             existing.processing_type = processing_type
+            # ak-v6zp: fill a missing email_date; never overwrite a known one.
+            if parsed_email_date is not None and getattr(existing, "email_date", None) is None:
+                existing.email_date = parsed_email_date
             if db_status in ("failed", "needs_attention"):
                 existing.error_message = error_message
             session.commit()

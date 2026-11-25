@@ -87,6 +87,9 @@ TEXT_BATCH_SIZE = 15
 
 # Batch size for Agent-1 classification — lightweight (sender+subject+snippet only)
 CLASSIFICATION_BATCH_SIZE = 50
+# ak-iu8i / ak-v6zp: processedEmails.category for an email the classifier
+# dropped as non-financial (stamped status 'skipped').
+NOT_FINANCIAL = "not_financial"
 
 
 # ── ak-csng Phase 1 (2026-11-23) — prompt-injection guard ────────
@@ -408,12 +411,15 @@ class MailProcessorService:
         return result
 
     def process_emails(self, user_id, date_from, date_to, processing_mode="image",
-                       progress_callback=None):
+                       progress_callback=None, reclassify_not_financial=False):
         """
         Main entry point. Fetches emails, filters, and processes.
         Returns a summary dict with counts of processed items.
         processing_mode: "image" (vision-based) or "text" (text extraction)
         progress_callback: optional callable(dict) to report progress updates
+        reclassify_not_financial: ak-v6zp — re-classify emails already
+            stamped skipped/not_financial (manual scans only; scheduled and
+            agent runs never set it).
         """
         summary = {
             "total_emails_fetched": 0,
@@ -473,7 +479,14 @@ class MailProcessorService:
             report({"stage": "fetched_emails", "total_emails_fetched": len(all_emails)})
 
             # 2.5 Pre-filter: skip emails already processed (before classification)
-            unprocessed = self._filter_already_processed(all_emails, user_id)
+            # ak-v6zp: the default (scheduled / agent) call keeps the
+            # pre-v6zp two-argument shape; the opt-in is passed only for a
+            # manual reclassify scan.
+            if reclassify_not_financial:
+                unprocessed = self._filter_already_processed(
+                    all_emails, user_id, reclassify_not_financial=True)
+            else:
+                unprocessed = self._filter_already_processed(all_emails, user_id)
             pre_skipped = len(all_emails) - len(unprocessed)
             if pre_skipped > 0:
                 self.logger.info(f"Pre-filter: skipped {pre_skipped} already-processed emails, {len(unprocessed)} remaining")
@@ -715,9 +728,18 @@ class MailProcessorService:
         except Exception as e:
             self.logger.warning(f"[ak-iu8i] not_financial lookup failed ({type(e).__name__}); not stamping")
             return
+        # ak-v6zp review: count consistent not_financial verdicts on the
+        # row (utils.not_financial_policy caps automatic re-tries of a
+        # likely-financial email at 3). A row previously skipped for some
+        # other reason starts the count over; other summary keys are kept.
+        from utils.not_financial_policy import NF_VERDICTS_KEY, with_nf_verdict
+        prev = getattr(row, "extraction_summary", None) if row is not None else None
+        if row is not None and getattr(row, "category", None) != NOT_FINANCIAL and isinstance(prev, dict):
+            prev = {k: v for k, v in prev.items() if k != NF_VERDICTS_KEY}
         self._stamp_processed_email(
             dict(email, _processing_type="pdf" if email.get("_has_pdf") else "text"),
-            user_id, category="not_financial", status="skipped",
+            user_id, category=NOT_FINANCIAL, status="skipped",
+            extraction_summary=with_nf_verdict(prev),
         )
 
     def _run_classification_batch(self, batch):
@@ -1028,7 +1050,7 @@ class MailProcessorService:
             except Exception:
                 pass
 
-    def _filter_already_processed(self, emails, user_id):
+    def _filter_already_processed(self, emails, user_id, reclassify_not_financial=False):
         """Remove emails that have already been successfully processed.
 
         Skips emails with status='processed' and (ak-7ahz) the terminal
@@ -1036,6 +1058,16 @@ class MailProcessorService:
         so they can be retried (e.g., after adding personal info for PDF
         password unlocking); needs_attention comes back only via a manual
         retry (POST /retryStatementEmail).
+
+        ak-v6zp: also skips rows the classifier already dropped
+        (status 'skipped', category 'not_financial', ak-iu8i), which were
+        re-classified every hourly cycle (SDK spend, same answer) — except
+        likely-financial ones (known bank sender or a PDF) with fewer than
+        3 not_financial verdicts (utils.not_financial_policy), so a single
+        false negative can't hide a statement. A manual scan can opt back
+        in for all of them with ``reclassify_not_financial=True``
+        (GET /readEmails?reclassify=true, <= 31 days). Other 'skipped'
+        rows are unchanged (still let through).
         """
         from utils.statement_retry_cap import TERMINAL_DB_STATUSES
         from models.processedEmails import ProcessedEmails
@@ -1054,6 +1086,30 @@ class MailProcessorService:
                 ProcessedEmails.status.in_(TERMINAL_DB_STATUSES),
             ).all()
             existing_ids = {row.gmail_id for row in existing}
+
+            if not reclassify_not_financial:
+                # ak-v6zp (+ review): a not_financial row is skipped unless
+                # it is likely financial (known bank sender or a PDF) and
+                # has had fewer than MAX_NF_VERDICTS not_financial
+                # verdicts, so one classifier false negative can't hide a
+                # statement forever while newsletters stop costing SDK.
+                from utils.not_financial_policy import should_reclassify
+                by_id = {(e.get("gmail_id") or e.get("message_id")): e for e in emails}
+                nf_rows = db.session.query(
+                    ProcessedEmails.gmail_id, ProcessedEmails.sender,
+                    ProcessedEmails.processing_type, ProcessedEmails.extraction_summary,
+                ).filter(
+                    ProcessedEmails.user_id == user_id,
+                    ProcessedEmails.gmail_id.in_(gmail_ids),
+                    ProcessedEmails.status == "skipped",
+                    ProcessedEmails.category == NOT_FINANCIAL,
+                ).all()
+                for row in nf_rows:
+                    email = by_id.get(row.gmail_id) or {}
+                    sender = email.get("sender") or row.sender
+                    has_pdf = bool(email.get("_has_pdf")) or row.processing_type == "pdf"
+                    if not should_reclassify(sender, has_pdf, row.extraction_summary):
+                        existing_ids.add(row.gmail_id)
 
             return [
                 e for e in emails
@@ -1579,7 +1635,10 @@ class MailProcessorService:
                 user_id=user_id,
                 sender=email.get("sender"),
                 subject=email.get("subject"),
-                email_date=email.get("date"),
+                # ak-v6zp: the Gmail fetch dict carries the date as 'time'
+                # ('%Y-%m-%d %H:%M:%S'), not 'date', so service-stamped
+                # rows (incl. not_financial) got a NULL email_date.
+                email_date=email.get("date") or email.get("time"),
                 category=category,
                 processing_type=email.get("_processing_type", "pdf"),
                 status=status,
