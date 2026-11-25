@@ -248,7 +248,7 @@ class TestHandlerAndCloseOut(unittest.TestCase):
         self.assertEqual(events[0][0], "confirm")                  # fresh proposal instead
         closing = self.A.AgentService._close_out_confirms([tok], state, "u1")
         self.assertEqual(closing, [("outcome", P.build_outcome(
-            tok, "delete_single_investment", "not_executed"))])
+            tok, "delete_single_investment", "not_executed", revoked=True))])
         # now dead: the original args can no longer be applied either
         call, events, _ = self._handler("delete_single_investment", [tok])
         call({"service_type": "Stocks", "buy_id": "b1"})
@@ -287,7 +287,8 @@ class TestHandlerAndCloseOut(unittest.TestCase):
         self.assertEqual((etype, confirm["reason"]), ("confirm", "args_changed_since_confirm"))
         self.assertEqual(confirm["preview"], P.build_preview("insert_investment", changed))
         self.assertEqual(self.A.AgentService._close_out_confirms([tok], state, "u1"),
-                         [("outcome", P.build_outcome(tok, "insert_investment", "not_executed"))])
+                         [("outcome", P.build_outcome(tok, "insert_investment", "not_executed",
+                                                      revoked=True))])
 
     def test_apply_without_web_and_same_args_records(self):
         tok = self._propose_insert()
@@ -322,7 +323,8 @@ class TestHandlerAndCloseOut(unittest.TestCase):
         tok = T.issue_confirm_token("delete_file", {"file_id": "f1"}, "u1")
         events, revoked = self.A.AgentService._revoke_cancelled([tok, "junk"], "u1")
         self.assertEqual(revoked, {tok})
-        self.assertEqual(events, [("outcome", P.build_outcome(tok, "delete_file", "cancelled"))])
+        self.assertEqual(events, [("outcome", P.build_outcome(tok, "delete_file", "cancelled",
+                                                              revoked=True))])
         call, _, _ = self._handler("delete_file", [tok])
         call({"file_id": "f1"})
         self.exec.assert_not_called()

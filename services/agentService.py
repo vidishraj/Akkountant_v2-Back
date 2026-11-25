@@ -19,7 +19,7 @@ from utils.safe_errors import error_frames, error_tag  # ak-95w0
 from utils.confirm_preview import build_outcome, build_preview
 from utils.confirm_tokens import (
     issue_confirm_token, verify_confirm_token, revoke_confirm_token,
-    peek_confirm_tool,
+    peek_confirm_tool, revoke_confirm_token_status,
 )
 import base64 as _base64  # ak-1x4 pass 2: encode attachment bytes for tool result
 from utils.agent_attachments import (
@@ -1592,10 +1592,15 @@ class AgentService(BaseService):
         tokens are skipped silently (nothing to report)."""
         events, revoked = [], set()
         for tok in (cancelled_calls or []):
-            tool = revoke_confirm_token(tok, user_id)
-            if tool:
-                revoked.add(tok)
-                events.append(("outcome", build_outcome(tok, tool, "cancelled")))
+            tool, status = revoke_confirm_token_status(tok, user_id)
+            if tool is None:
+                continue                        # dead / foreign / forged
+            # ak-u8c4: a store error still gets a terminal outcome (the FE
+            # card must resolve), flagged revoked=False. It is also kept
+            # out of this turn's confirmed_calls, so it can't run here.
+            revoked.add(tok)
+            events.append(("outcome", build_outcome(
+                tok, tool, "cancelled", revoked=(status == "revoked"))))
         return events, revoked
 
     @staticmethod
@@ -1614,13 +1619,15 @@ class AgentService(BaseService):
                 events.append(("outcome", build_outcome(
                     tok, confirm_state["matched"][tok], "failed", interrupted=True)))
                 continue
-            tool = revoke_confirm_token(tok, user_id)
+            tool, status = revoke_confirm_token_status(tok, user_id)
             if tool:
                 confirm_state["done"].add(tok)
                 # Never claim "nothing recorded" if that tool DID run this
                 # turn (it can't with the pending gate; defence in depth).
                 if tool not in confirm_state.get("executed", ()):
-                    events.append(("outcome", build_outcome(tok, tool, "not_executed")))
+                    # ak-u8c4: terminal even on a store error (revoked=False).
+                    events.append(("outcome", build_outcome(
+                        tok, tool, "not_executed", revoked=(status == "revoked"))))
         return events
 
     @staticmethod

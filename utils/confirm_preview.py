@@ -139,9 +139,15 @@ def build_preview(tool: str, args: Any) -> Dict[str, Any]:
 
 
 def build_outcome(confirm_id: str, tool: str, status: str,
-                  interrupted: bool = False) -> Dict[str, Any]:
+                  interrupted: bool = False,
+                  revoked: Optional[bool] = None) -> Dict[str, Any]:
     """`interrupted`: the confirmed call started but never reported a
-    result, so whether anything was written is unknown."""
+    result, so whether anything was written is unknown.
+
+    `revoked` (ak-u8c4, cancelled / not_executed only): True when the
+    token is now dead in every worker; False when the token store errored
+    so revocation is NOT confirmed (nothing was recorded this turn, and
+    verify fails closed while the store is down). Omitted when None."""
     if status not in OUTCOME_STATUSES:
         raise ValueError(f"unknown outcome status: {status}")
     done_msg = _TOOL_OPS.get(tool, _DEFAULT_OP)[2]
@@ -154,13 +160,18 @@ def build_outcome(confirm_id: str, tool: str, status: str,
         "not_executed": "Not applied — nothing recorded.",
         "cancelled": "Cancelled — nothing recorded.",
     }[status]
-    return {
+    out = {
         "confirm_id": confirm_id,
         "tool": tool,
         "status": status,
         "recorded": status == "recorded",
         "message": message,
     }
+    if revoked is not None:
+        out["revoked"] = bool(revoked)
+        if not revoked:
+            out["message"] = message + " Don't re-send this confirmation."
+    return out
 
 
 __all__ = ["build_preview", "build_outcome", "derive_nav", "OUTCOME_STATUSES"]

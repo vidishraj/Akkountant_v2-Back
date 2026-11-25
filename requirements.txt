@@ -9,7 +9,8 @@ python-dateutil~=2.9.0.post0
 nsepython~=2.94
 aiohttp~=3.11.7
 beautifulsoup4~=4.12.3
-flask_sqlalchemy
+# ak-u8c4: >=3 for SQLAlchemy(...).engine, which the confirm-token store needs.
+flask_sqlalchemy>=3.0
 flask_cors
 tabula-py
 PyMuPDF~=1.26.5

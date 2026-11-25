@@ -164,9 +164,10 @@ def _prune_consumed_locked(now: int) -> None:
         _consumed.popitem(last=False)
 
 
-def _mark_used(nonce: str, uid: str, tool: str, exp: int, state: str) -> bool:
+def _mark_used(nonce: str, uid: str, tool: str, exp: int, state: str):
     """ak-erkm: atomically move a token from live to used. True iff THIS
-    call did it. With an app context the state lives in the DB
+    call did it; False if already used; None if the shared store errored
+    (ak-u8c4; callers treat anything but True as NOT marked). With an app context the state lives in the DB
     (confirmTokenStates, unique nonce) so it holds across gunicorn
     workers; outside one (unit tests / CLI) the in-process set is used."""
     from utils.confirm_token_store import current_store
@@ -284,7 +285,7 @@ def verify_confirm_token(
     if not isinstance(nonce, str) or not nonce:
         return False
     # ak-erkm: atomic, cross-worker (DB) check-and-mark.
-    return _mark_used(nonce, user_id, expected_tool, exp, "consumed")
+    return _mark_used(nonce, user_id, expected_tool, exp, "consumed") is True
 
 
 def _decode_live(token, user_id):
@@ -330,26 +331,45 @@ def peek_confirm_tool(token: str, user_id: str) -> Optional[str]:
     return live[0] if live else None
 
 
+REVOKED, DEAD, STORE_ERROR = "revoked", "dead", "store_error"
+
+
+def revoke_confirm_token_status(token: str, user_id: str):
+    """ak-u8c4: (tool, status) for a revoke attempt.
+
+      * (tool, "revoked")      this call revoked a live token
+      * (None, "dead")         forged / other user / expired / already used
+      * (tool, "store_error")  validly signed + live as far as we could tell,
+                               but the shared store errored, so it is NOT
+                               known to be revoked. Callers still emit a
+                               terminal outcome (the FE card must resolve)
+                               and flag `revoked: false`. While the store is
+                               down, verify fails closed too, so it can't be
+                               applied meanwhile.
+    Never raises.
+    """
+    live = _decode_live(token, user_id)
+    if not live:
+        return None, DEAD
+    tool, nonce, exp = live
+    marked = _mark_used(nonce, user_id, tool, exp, "revoked")
+    if marked is True:
+        return tool, REVOKED
+    if marked is False:
+        return None, DEAD
+    return tool, STORE_ERROR
+
+
 def revoke_confirm_token(token: str, user_id: str) -> Optional[str]:
     """ak-2ye9: consume a LIVE token without executing anything, so it
-    can never be applied later. Used when the user cancels a proposal
-    (`cancelled_calls`) and when an Apply turn ends without the bound
-    call having run ("not_executed").
-
-    Checks signature + uid + expiry + not-already-consumed (NOT tool or
-    args: the caller doesn't have them). Returns the token's tool name
-    on success, None otherwise. Never raises.
+    can never be applied later. Returns the tool name iff THIS call
+    revoked it (see revoke_confirm_token_status for the error case).
 
     ak-erkm: revocation and one-time-use share the DB-backed state, so a
     revoked token is dead in EVERY gunicorn worker.
     """
-    live = _decode_live(token, user_id)
-    if not live:
-        return None
-    tool, nonce, exp = live
-    if not _mark_used(nonce, user_id, tool, exp, "revoked"):
-        return None
-    return tool
+    tool, status = revoke_confirm_token_status(token, user_id)
+    return tool if status == REVOKED else None
 
 
 def _reset_consumed_for_tests() -> None:
@@ -364,4 +384,5 @@ __all__ = [
     "verify_confirm_token",
     "revoke_confirm_token",
     "peek_confirm_tool",
+    "revoke_confirm_token_status",
 ]
