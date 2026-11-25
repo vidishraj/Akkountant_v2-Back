@@ -87,82 +87,19 @@ def _read_source(rel_path):
 
 
 def _ast_lift_hdfc_url_validator():
-    """Extract `_HDFC_SMART_STATEMENT_HOSTS` + `_is_hdfc_smart_
-    statement_url` from services/mailProcessorService.py WITHOUT
-    importing the full module (which pulls anyio + firebase + the
-    full Claude SDK chain — unnecessary + anyio is not in this
-    dev env).
+    """Return the HDFC Smart Statement URL gate + its allowlist.
 
-    Returns a callable `fn(url)` that mirrors the classmethod's
-    behavior; plus the extracted allowlist frozenset for direct
-    inspection.
+    ak-tspe hoisted both into the stdlib-only leaf module
+    utils/hdfc_smart_statement.py (shared with
+    StatementDownloadService); MailProcessorService keeps
+    `_HDFC_SMART_STATEMENT_HOSTS` / `_is_hdfc_smart_statement_url` as
+    aliases (pinned by TestHardeningSourceGrep). The leaf module
+    imports without the anyio / SDK chain, so no AST lift is needed.
     """
-    src = _read_source("services/mailProcessorService.py")
-    tree = ast.parse(src)
-
-    # Find the MailProcessorService class and the two members.
-    cls_node = None
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == "MailProcessorService":
-            cls_node = node
-            break
-    assert cls_node is not None, (
-        "MailProcessorService class not found in "
-        "services/mailProcessorService.py"
+    from utils.hdfc_smart_statement import (
+        HDFC_SMART_STATEMENT_HOSTS, is_hdfc_smart_statement_url,
     )
-
-    constant_node = None
-    classmethod_node = None
-    for member in cls_node.body:
-        if isinstance(member, ast.Assign):
-            # Match `_HDFC_SMART_STATEMENT_HOSTS = frozenset({...})`.
-            for target in member.targets:
-                if (isinstance(target, ast.Name)
-                        and target.id == "_HDFC_SMART_STATEMENT_HOSTS"):
-                    constant_node = member
-                    break
-        elif (isinstance(member, ast.FunctionDef)
-                and member.name == "_is_hdfc_smart_statement_url"):
-            classmethod_node = member
-
-    assert constant_node is not None, (
-        "ak-ptxq: _HDFC_SMART_STATEMENT_HOSTS constant not found "
-        "on MailProcessorService — the allowlist is the sole gate; "
-        "its absence is itself the regression"
-    )
-    assert classmethod_node is not None, (
-        "ak-ptxq: _is_hdfc_smart_statement_url method not found "
-        "on MailProcessorService"
-    )
-
-    # Re-emit the method as a free function so we can exec it
-    # outside the class scope. Strip the @classmethod decorator
-    # + rename `cls.` references by renaming the first arg to
-    # the shim class name below.
-    method_copy = ast.FunctionDef(
-        name="_fn",
-        args=classmethod_node.args,
-        body=classmethod_node.body,
-        decorator_list=[],
-        returns=classmethod_node.returns,
-    )
-    # Build a shim class holding the constant + the method body
-    # can keep its `cls.` references working — simplest is to
-    # emit a full tiny class.
-    shim_cls = ast.ClassDef(
-        name="_ShimCls",
-        bases=[],
-        keywords=[],
-        body=[constant_node, classmethod_node],
-        decorator_list=[],
-    )
-    module = ast.Module(body=[shim_cls], type_ignores=[])
-    ast.fix_missing_locations(module)
-    code = compile(module, filename="<ak-ptxq-ast-lift>", mode="exec")
-    ns = {"urlparse": urlparse, "frozenset": frozenset}
-    exec(code, ns)
-    ShimCls = ns["_ShimCls"]
-    return ShimCls._is_hdfc_smart_statement_url, ShimCls._HDFC_SMART_STATEMENT_HOSTS
+    return is_hdfc_smart_statement_url, HDFC_SMART_STATEMENT_HOSTS
 
 
 # ─── Pure-unit: _is_hdfc_smart_statement_url ─────────────────
@@ -204,12 +141,10 @@ class TestIsHdfcSmartStatementUrl(unittest.TestCase):
             "https://smartstatements.hdfc.bank.in/download",
         ))
 
-    def test_accepts_http_scheme(self):
-        # Pre-ak-ptxq this would also be followed; the fix tolerates
-        # http even though HDFC serves https — to not add a new
-        # breakage surface. The attack class is cross-host SSRF, not
-        # TLS downgrade.
-        self.assertTrue(self.fn(
+    def test_rejects_http_scheme(self):
+        # ak-x5l9: https only. http was tolerated by ak-ptxq; it is now
+        # refused (the Customer ID password must never go over plaintext).
+        self.assertFalse(self.fn(
             "http://smartstatements.hdfcbank.com/",
         ))
 
@@ -306,22 +241,30 @@ class TestHardeningSourceGrep(unittest.TestCase):
 
     # (8) Constant present with both canonical hosts.
     def test_allowlist_constant_present(self):
+        # ak-tspe: the allowlist lives in utils/hdfc_smart_statement.py;
+        # the service aliases it and delegates the gate to it.
+        self.assertRegex(
+            self.src,
+            r"_HDFC_SMART_STATEMENT_HOSTS\s*=\s*HDFC_SMART_STATEMENT_HOSTS",
+        )
+        self.assertIn("return is_hdfc_smart_statement_url(url)", self.src)
+        util_src = _read_source("utils/hdfc_smart_statement.py")
         self.assertIsNotNone(
             re.search(
-                r"_HDFC_SMART_STATEMENT_HOSTS\s*=\s*frozenset",
-                self.src,
+                r"HDFC_SMART_STATEMENT_HOSTS\s*=\s*frozenset",
+                util_src,
             ),
             "ak-ptxq: _HDFC_SMART_STATEMENT_HOSTS allowlist constant "
             "missing — the sole gate between attacker URLs and "
             "credentialed session.get/.post calls",
         )
         self.assertIn(
-            '"smartstatements.hdfcbank.com"', self.src,
+            '"smartstatements.hdfcbank.com"', util_src,
             "ak-ptxq: smartstatements.hdfcbank.com must appear in "
             "the host allowlist",
         )
         self.assertIn(
-            '"smartstatements.hdfc.bank.in"', self.src,
+            '"smartstatements.hdfc.bank.in"', util_src,
             "ak-ptxq: smartstatements.hdfc.bank.in must appear in "
             "the host allowlist",
         )

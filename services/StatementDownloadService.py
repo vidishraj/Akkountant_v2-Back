@@ -6,11 +6,15 @@ from werkzeug.utils import secure_filename
 from bs4 import BeautifulSoup
 from enums.StatementPatternEnum import StatementPatternEnum
 from utils.DateTimeUtil import DateTimeUtil
+from utils.hdfc_smart_statement import (
+    canonical_hdfc_url, follow_hdfc_redirects, is_hdfc_smart_statement_url, new_hdfc_session,
+)
 from utils.logger import Logger
 
 TEMP_DIR = os.getcwd() + '/tmp'
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 " \
              "Safari/537.36 "
+HDFC_PDF_URL = "https://smartstatements.hdfcbank.com/HDFCRestFulService/webresources/app/pdfformat"
 
 
 class StatementDownloadService:
@@ -172,12 +176,28 @@ class StatementDownloadService:
             self.logger.error(f"Error extracting statement link: {e}")
         return None
 
-    @staticmethod
-    def _parse_href(link):
+    def _parse_href(self, link):
+        # ak-tspe: the href comes from email HTML (forgeable by a phishing
+        # mail styled like HDFC). Same host gate as the mail pipeline,
+        # before any request; redirects only to allowlisted hosts.
+        # ak-x5l9: request only the canonical URL rebuilt from the checked
+        # components, never the raw href.
+        if not is_hdfc_smart_statement_url(link):
+            self.logger.warning("ak-tspe: refusing non-allowlisted Smart Statement link (SSRF guard)")
+            return None
+        link = canonical_hdfc_url(link)
         parsed_url = urlparse(link)
         query_params = parse_qs(parsed_url.query)
         job_key = query_params.get('jobkey', [None])[0]
-        response = requests.get(link, headers={"User-Agent": USER_AGENT})
+        if not job_key:
+            return None
+        session = new_hdfc_session(USER_AGENT)
+        response = follow_hdfc_redirects(
+            session, session.get(link, timeout=30, allow_redirects=False), timeout=30,
+        )
+        if response is None or response.status_code != 200:
+            self.logger.warning("ak-tspe: Smart Statement page fetch failed or redirected off the allowlist")
+            return None
         soup = BeautifulSoup(response.text, 'html.parser')
         seq_element = soup.find('input', {'type': 'hidden', 'name': 'seqence', 'id': 'seqence'})
 
@@ -191,12 +211,21 @@ class StatementDownloadService:
         for req in job_req_list:
             if req:
                 req_id, job_key = req
-                link = f"https://smartstatements.hdfcbank.com/HDFCRestFulService/webresources/app/pdfformat?jobkey=" \
-                       f"{job_key}&reqid={req_id}&format=pdf"
-                response = requests.post(link, headers={"User-Agent": USER_AGENT})
+                # ak-tspe: params are URL-encoded (job_key / req_id come
+                # from email / page content); fixed host, no auto-redirects.
+                session = new_hdfc_session(USER_AGENT)
+                response = follow_hdfc_redirects(session, session.post(
+                    HDFC_PDF_URL,
+                    params={"jobkey": job_key, "reqid": req_id, "format": "pdf"},
+                    timeout=60, allow_redirects=False,
+                ), timeout=60)
 
-                if response.status_code == 200:
-                    filename = f"HDFC_Statement_{job_key}_{req_id}.pdf"
+                if response is not None and response.status_code == 200:
+                    # ak-x5l9: job_key / req_id come from email / page
+                    # content; never let them form a path.
+                    filename = secure_filename(f"HDFC_Statement_{job_key}_{req_id}.pdf")
+                    if not filename.endswith(".pdf"):
+                        continue
                     file_path = os.path.join(TEMP_DIR, filename)
 
                     with open(file_path, 'wb') as pdf_file:

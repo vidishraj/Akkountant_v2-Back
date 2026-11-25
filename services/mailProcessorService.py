@@ -17,6 +17,11 @@ import tempfile
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
+from utils.hdfc_smart_statement import (
+    HDFC_SMART_STATEMENT_HOSTS, canonical_hdfc_url, follow_hdfc_redirects,
+    is_hdfc_smart_statement_url, new_hdfc_session,
+)
+
 import anyio
 import fitz  # PyMuPDF
 from flask import g
@@ -1655,10 +1660,9 @@ class MailProcessorService:
     # statement_link logs `list(login_data.keys())` only — keys are
     # safe, values are not; keep that shape.
 
-    _HDFC_SMART_STATEMENT_HOSTS = frozenset({
-        "smartstatements.hdfcbank.com",
-        "smartstatements.hdfc.bank.in",
-    })
+    # ak-tspe: the allowlist + gate live in utils/hdfc_smart_statement.py,
+    # shared with StatementDownloadService; these names are aliases.
+    _HDFC_SMART_STATEMENT_HOSTS = HDFC_SMART_STATEMENT_HOSTS
 
     @classmethod
     def _is_hdfc_smart_statement_url(cls, url):
@@ -1678,18 +1682,9 @@ class MailProcessorService:
             (case-insensitive; substring / suffix matches NOT
             acceptable — `evil.com/?q=smartstatements.hdfcbank.com`
             must return False)
-          * unparseable URL
+          * unparseable URL (including a hostname that fails to parse)
         """
-        if not isinstance(url, str) or not url:
-            return False
-        try:
-            parsed = urlparse(url)
-        except Exception:
-            return False
-        if parsed.scheme.lower() not in ("http", "https"):
-            return False
-        host = (parsed.hostname or "").lower()
-        return host in cls._HDFC_SMART_STATEMENT_HOSTS
+        return is_hdfc_smart_statement_url(url)
 
     def _try_download_link_based_pdf(self, email, gmail_api, gmail_id, user_id=None):
         """
@@ -1808,35 +1803,48 @@ class MailProcessorService:
         # future caller hands us a non-allowlisted URL (bypass of
         # _extract_smart_statement_link or a direct caller), fail
         # closed BEFORE any network I/O or password lookup is used.
+        # ak-x5l9: every request goes to the CANONICAL URL rebuilt from the
+        # checked components, never the raw email string (urlparse and
+        # urllib3 disagree on e.g. "https://evil\@<hdfc host>/").
         if not self._is_hdfc_smart_statement_url(link):
             self.logger.warning(
                 f"ak-ptxq: refusing to follow non-allowlisted Smart "
-                f"Statement link for {gmail_id} "
-                f"(host={urlparse(link).hostname!r}); credential-"
+                f"Statement link for {gmail_id}; credential-"
                 f"leak + SSRF guard."
             )
             return None
+        link = canonical_hdfc_url(link)
 
         user_agent = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         )
 
-        # Parse the link to get jobkey and base URL
+        # Parse the link to get jobkey and base URL (link is canonical:
+        # https + allowlisted host, no userinfo/port).
         parsed = urlparse(link)
         query_params = parse_qs(parsed.query)
         job_key = query_params.get("jobkey", [None])[0]
-        base_url = f"{parsed.scheme}://{parsed.hostname}"
+        base_url = f"https://{parsed.hostname}"
 
         if not job_key:
             self.logger.warning(f"No jobkey found in Smart Statement link for {gmail_id}")
             return None
 
-        session = requests.Session()
-        session.headers.update({"User-Agent": user_agent})
+        # ak-x5l9: trust_env=False (no proxy / netrc from the environment).
+        session = new_hdfc_session(user_agent)
 
         # Visit link to get the initial page
-        response = session.get(link, timeout=30)
+        # ak-tspe: no automatic redirects; follow only to allowlisted hosts.
+        response = follow_hdfc_redirects(
+            session, session.get(link, timeout=30, allow_redirects=False), timeout=30,
+        )
+        if response is None:
+            self.logger.warning(
+                f"ak-tspe: Smart Statement link redirected off the HDFC allowlist "
+                f"for {gmail_id}; refusing."
+            )
+            return None
         if response.status_code != 200:
             self.logger.warning(
                 f"Smart Statement page returned HTTP {response.status_code} for {gmail_id}"
@@ -1873,7 +1881,6 @@ class MailProcessorService:
                             f"ak-ptxq: refusing to POST Smart "
                             f"Statement credentials to non-"
                             f"allowlisted action "
-                            f"(host={urlparse(action).hostname!r}) "
                             f"for {gmail_id}; credential-leak + "
                             f"SSRF guard."
                         )
@@ -1910,16 +1917,29 @@ class MailProcessorService:
             # is derived from base_url (entry-validated), but a future
             # refactor that changes base_url derivation would bypass
             # the upstream check — gate here too.
+            # ak-x5l9: POST only to the canonical URL rebuilt from the
+            # checked components (the raw action string is never sent).
             if not self._is_hdfc_smart_statement_url(action):
                 self.logger.warning(
-                    f"ak-ptxq: refusing POST to action "
-                    f"{urlparse(action).hostname!r} for {gmail_id} "
+                    f"ak-ptxq: refusing POST to a non-allowlisted action "
+                    f"for {gmail_id} "
                     f"(final allowlist gate; should not reach here "
                     f"if upstream gates are intact)."
                 )
                 return None
+            action = canonical_hdfc_url(action)
 
-            login_response = session.post(action, data=login_data, timeout=30)
+            # ak-tspe m1: the credentialed POST never auto-follows a
+            # redirect (a 307/308 would replay the password to the new
+            # host). Allowlisted redirects are followed as body-less GETs.
+            login_response = session.post(action, data=login_data, timeout=30, allow_redirects=False)
+            login_response = follow_hdfc_redirects(session, login_response, timeout=30)
+            if login_response is None:
+                self.logger.warning(
+                    f"ak-tspe: Smart Statement login redirected off the HDFC "
+                    f"allowlist for {gmail_id}; refusing."
+                )
+                return None
 
             if login_response.status_code != 200:
                 self.logger.warning(
@@ -1942,11 +1962,25 @@ class MailProcessorService:
         req_id = seq_element["value"]
 
         # Download PDF using same base domain as the link
-        pdf_url = (
-            f"{base_url}/HDFCRestFulService/webresources/app/pdfformat"
-            f"?jobkey={job_key}&reqid={req_id}&format=pdf"
+        # ak-x5l9: fixed canonical path; job_key / req_id (from the email /
+        # page) are URL-encoded params, never spliced into the URL.
+        pdf_url = canonical_hdfc_url(f"{base_url}/HDFCRestFulService/webresources/app/pdfformat")
+        if pdf_url is None:
+            return None
+        pdf_response = follow_hdfc_redirects(
+            session,
+            session.post(
+                pdf_url, params={"jobkey": job_key, "reqid": req_id, "format": "pdf"},
+                timeout=60, allow_redirects=False,
+            ),
+            timeout=60,
         )
-        pdf_response = session.post(pdf_url, timeout=60)
+        if pdf_response is None:
+            self.logger.warning(
+                f"ak-tspe: Smart Statement PDF download redirected off the HDFC "
+                f"allowlist for {gmail_id}; refusing."
+            )
+            return None
 
         if pdf_response.status_code != 200:
             self.logger.warning(

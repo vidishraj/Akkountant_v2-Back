@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from services.StatementDownloadService import StatementDownloadService
 from utils.GoogleServiceSingleton import GoogleServiceSingleton
 from utils.logger import Logger
 from datetime import datetime
@@ -42,11 +41,6 @@ class GmailServiceUtils:
                 emails_with_timestamps.append({'time': None, 'message': snippet})
 
         return emails_with_timestamps
-
-    def downloadFilesInRange(self, userId, token, password, bankType, dateTo, dateFrom):
-        gmailService = self.googleService.get_gmail_service(userId, token)
-        statementDownloader = StatementDownloadService(gmailService=gmailService, password=password)
-        return statementDownloader.route_download_process(bankType, dateTo, dateFrom)
 
     def checkStatus(self, token):
         return self.googleService.is_token_valid(token)
